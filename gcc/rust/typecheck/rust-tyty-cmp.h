@@ -28,6 +28,10 @@
 namespace Rust {
 namespace TyTy {
 
+// we need to fix this properly by implementing the match for assembling
+// candidates
+extern bool autoderef_cmp_flag;
+
 class BaseCmp : public TyConstVisitor
 {
 public:
@@ -867,6 +871,29 @@ public:
     ok = true;
   }
 
+  void visit (const ClosureType &type) override
+  {
+    if (base->get_def_id () != type.get_def_id ())
+      {
+	BaseCmp::visit (type);
+	return;
+      }
+
+    if (!base->get_parameters ().can_eq (&type.get_parameters (), false))
+      {
+	BaseCmp::visit (type);
+	return;
+      }
+
+    if (!base->get_result_type ().can_eq (&type.get_result_type (), false))
+      {
+	BaseCmp::visit (type);
+	return;
+      }
+
+    ok = true;
+  }
+
 private:
   const BaseType *get_base () const override { return base; }
   const ClosureType *base;
@@ -1244,6 +1271,9 @@ public:
     auto other_base_type = type.get_base ();
 
     bool mutability_ok = base->is_mutable () ? type.is_mutable () : true;
+    if (autoderef_cmp_flag)
+      mutability_ok = base->mutability () == type.mutability ();
+
     if (!mutability_ok)
       {
 	BaseCmp::visit (type);
@@ -1289,9 +1319,10 @@ public:
     auto base_type = base->get_base ();
     auto other_base_type = type.get_base ();
 
-    // rust is permissive about mutablity here you can always go from mutable to
-    // immutable but not the otherway round
     bool mutability_ok = base->is_mutable () ? type.is_mutable () : true;
+    if (autoderef_cmp_flag)
+      mutability_ok = base->mutability () == type.mutability ();
+
     if (!mutability_ok)
       {
 	BaseCmp::visit (type);
@@ -1370,7 +1401,7 @@ public:
 
   void visit (const ArrayType &) override { ok = true; }
 
-  void visit (const SliceType &) override { ok = true; }
+  void visit (const SliceType &) override { ok = !autoderef_cmp_flag; }
 
   void visit (const BoolType &) override { ok = true; }
 

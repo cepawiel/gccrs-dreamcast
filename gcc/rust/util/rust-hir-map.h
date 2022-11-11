@@ -104,6 +104,8 @@ public:
 
   void insert_defid_mapping (DefId id, HIR::Item *item);
   HIR::Item *lookup_defid (DefId id);
+  void insert_defid_mapping (DefId id, HIR::TraitItem *item);
+  HIR::TraitItem *lookup_trait_item_defid (DefId id);
 
   void insert_local_defid_mapping (CrateNum crateNum, LocalDefId id,
 				   HIR::Item *item);
@@ -269,6 +271,11 @@ public:
 
   bool lookup_macro_def (NodeId id, AST::MacroRulesDefinition **def);
 
+  void insert_macro_invocation (AST::MacroInvocation &invoc,
+				AST::MacroRulesDefinition *def);
+  bool lookup_macro_invocation (AST::MacroInvocation &invoc,
+				AST::MacroRulesDefinition **def);
+
   void insert_visibility (NodeId id, Privacy::ModuleVisibility visibility);
   bool lookup_visibility (NodeId id, Privacy::ModuleVisibility &def);
 
@@ -302,6 +309,7 @@ private:
   std::map<CrateNum, AST::Crate *> ast_crate_mappings;
   std::map<CrateNum, HIR::Crate *> hir_crate_mappings;
   std::map<DefId, HIR::Item *> defIdMappings;
+  std::map<DefId, HIR::TraitItem *> defIdTraitItemMappings;
   std::map<CrateNum, std::map<LocalDefId, HIR::Item *>> localDefIdMappings;
 
   std::map<HirId, HIR::Module *> hirModuleMappings;
@@ -334,6 +342,7 @@ private:
 
   // macros
   std::map<NodeId, AST::MacroRulesDefinition *> macroMappings;
+  std::map<NodeId, AST::MacroRulesDefinition *> macroInvocations;
 
   // crate names
   std::map<CrateNum, std::string> crate_names;

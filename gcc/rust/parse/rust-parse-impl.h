@@ -8903,8 +8903,9 @@ Parser<ManagedTokenSource>::parse_closure_param ()
 	}
     }
 
-  return AST::ClosureParam (std::move (pattern), pattern->get_locus (),
-			    std::move (type), std::move (outer_attrs));
+  auto locus = pattern->get_locus ();
+  return AST::ClosureParam (std::move (pattern), locus, std::move (type),
+			    std::move (outer_attrs));
 }
 
 // Parses a grouped or tuple expression (disambiguates).
@@ -11728,10 +11729,17 @@ Parser<ManagedTokenSource>::parse_stmt_or_expr_without_block ()
 	    // must be expression statement
 	    lexer.skip_token ();
 
-	    std::unique_ptr<AST::ExprStmtWithoutBlock> stmt (
-	      new AST::ExprStmtWithoutBlock (std::move (expr),
-					     t->get_locus ()));
-	    return ExprOrStmt (std::move (stmt));
+	    if (expr)
+	      {
+		std::unique_ptr<AST::ExprStmtWithoutBlock> stmt (
+		  new AST::ExprStmtWithoutBlock (std::move (expr),
+						 t->get_locus ()));
+		return ExprOrStmt (std::move (stmt));
+	      }
+	    else
+	      {
+		return ExprOrStmt::create_error ();
+	      }
 	  }
 
 	// return expression

@@ -69,6 +69,7 @@ GRS_OBJS = \
     rust/rust-cfg-parser.o \
     rust/rust-parse.o \
     rust/rust-ast-full-test.o \
+    rust/rust-ast-fragment.o \
     rust/rust-ast-dump.o \
     rust/rust-hir-dump.o \
     rust/rust-session-manager.o \
@@ -88,6 +89,9 @@ GRS_OBJS = \
     rust/rust-ast-lower-base.o \
     rust/rust-ast-lower-pattern.o \
     rust/rust-ast-lower-item.o \
+    rust/rust-ast-lower-expr.o \
+    rust/rust-ast-lower-type.o \
+    rust/rust-early-name-resolver.o \
     rust/rust-name-resolver.o \
     rust/rust-ast-resolve.o \
     rust/rust-ast-resolve-base.o \
@@ -265,7 +269,7 @@ rust.uninstall:
 # Enable selftests for the rust frontend
 selftest-rust: s-selftest-rust
 
-RUST_SELFTEST_FLAGS = -xrs $(SELFTEST_FLAGS)
+RUST_SELFTEST_FLAGS = -xrust $(SELFTEST_FLAGS)
 RUST_SELFTEST_DEPS = rust1$(exeext) $(SELFTEST_DEPS)
 
 # Run the rust selftests
@@ -327,8 +331,7 @@ CFLAGS-rust/rust-lex.o += $(RUST_INCLUDES)
 CFLAGS-rust/rust-parse.o += $(RUST_INCLUDES)
 CFLAGS-rust/rust-session-manager.o += $(RUST_INCLUDES)
 
-# TODO: possibly find a way to ensure C++11 compilation level here?
-RUST_CXXFLAGS = -std=c++11 -Wno-unused-parameter -Werror=overloaded-virtual
+RUST_CXXFLAGS = $(CXXFLAGS)
 
 # build all rust/lex files in rust folder, add cross-folder includes
 rust/%.o: rust/lex/%.cc
