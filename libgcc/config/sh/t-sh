@@ -23,8 +23,16 @@ LIB1ASMFUNCS = _ashiftrt _ashiftrt_n _ashiftlt _lshiftrt _movmem \
   $(LIB1ASMFUNCS_CACHE)
 LIB1ASMFUNCS_CACHE = _ic_invalidate _ic_invalidate_array
 
-crt1.o: $(srcdir)/config/sh/crt1.S
+LIBGCC2_INCLUDES += \
+  -I/home/coltonp/Git/sh4-rust/KallistiOS/include \
+  -I/home/coltonp/Git/sh4-rust/KallistiOS/kernel/arch/dreamcast/include
+
+#LIB2ADD = $(srcdir)/config/sh/fake-kos.S
+crt1.o: $(srcdir)/config/sh/crt1-dreamcast.S
 	$(gcc_compile) -c $<
+
+# crt1.o: $(srcdir)/config/sh/crt1.S
+#	$(gcc_compile) -c $<
 
 ic_invalidate_array_4-100.o: $(srcdir)/config/sh/lib1funcs.S
 	$(gcc_compile) -c -DL_ic_invalidate_array -DWAYS=1 -DWAY_SIZE=0x2000 $<

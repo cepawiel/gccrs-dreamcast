@@ -1344,6 +1344,9 @@ sh-*-elf* | sh[12346l]*-*-elf*)
 		tmake_file="$tmake_file sh/t-superh"
 		extra_parts="$extra_parts crt1-mmu.o gcrt1-mmu.o gcrt1.o"
  		;;
+	sh*-kos-elf)
+		tmake_file="$tmake_file sh/t-dreamcast"
+		;;
  	esac
 	;;
 sh-*-linux* | sh[2346lbe]*-*-linux*)
