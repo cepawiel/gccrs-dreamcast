@@ -1,5 +1,5 @@
 /* Target-independent configuration for VxWorks and VxWorks AE.   
-   Copyright (C) 2005-2022 Free Software Foundation, Inc.
+   Copyright (C) 2005-2024 Free Software Foundation, Inc.
    Contributed by CodeSourcery, LLC.
 
 This file is part of GCC.
@@ -69,7 +69,7 @@ along with GCC; see the file COPYING3.  If not see
 #undef WINT_TYPE_SIZE
 #define WINT_TYPE_SIZE WCHAR_TYPE_SIZE
 #undef WINT_TYPE
-#define WINT_TYPE WCHAR_TYPE
+#define WINT_TYPE "wchar_t"
 
 /* ---------------------- Debug and unwind info formats ------------------  */
 

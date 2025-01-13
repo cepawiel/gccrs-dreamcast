@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -18,6 +18,8 @@
 
 #include "rust-ast-resolve-type.h"
 #include "rust-ast-resolve-expr.h"
+#include "rust-canonical-path.h"
+#include "rust-type.h"
 
 namespace Rust {
 namespace Resolver {
@@ -27,15 +29,15 @@ namespace Resolver {
 void
 ResolveType::visit (AST::ArrayType &type)
 {
-  type.get_elem_type ()->accept_vis (*this);
-  ResolveExpr::go (type.get_size_expr ().get (), CanonicalPath::create_empty (),
+  type.get_elem_type ().accept_vis (*this);
+  ResolveExpr::go (type.get_size_expr (), CanonicalPath::create_empty (),
 		   CanonicalPath::create_empty ());
 }
 
 void
 ResolveType::visit (AST::TraitObjectTypeOneBound &type)
 {
-  ResolveTypeBound::go (&type.get_trait_bound ());
+  ResolveTypeBound::go (type.get_trait_bound ());
 }
 
 void
@@ -44,38 +46,44 @@ ResolveType::visit (AST::TraitObjectType &type)
   for (auto &bound : type.get_type_param_bounds ())
     {
       /* NodeId bound_resolved_id = */
-      ResolveTypeBound::go (bound.get ());
+      ResolveTypeBound::go (*bound);
     }
+}
+
+void
+ResolveType::visit (AST::ParenthesisedType &type)
+{
+  resolved_node = ResolveType::go (*type.get_type_in_parens ());
 }
 
 void
 ResolveType::visit (AST::ReferenceType &type)
 {
-  resolved_node = ResolveType::go (type.get_type_referenced ().get ());
+  resolved_node = ResolveType::go (type.get_type_referenced ());
 }
 
 void
 ResolveType::visit (AST::RawPointerType &type)
 {
-  resolved_node = ResolveType::go (type.get_type_pointed_to ().get ());
+  resolved_node = ResolveType::go (type.get_type_pointed_to ());
 }
 
 void
-ResolveType::visit (AST::InferredType &type)
+ResolveType::visit (AST::InferredType &)
 {
   // FIXME
 }
 
 void
-ResolveType::visit (AST::NeverType &type)
+ResolveType::visit (AST::NeverType &)
 {
-  // FIXME
+  resolved_node = resolver->get_never_type_node_id ();
 }
 
 void
 ResolveType::visit (AST::SliceType &type)
 {
-  resolved_node = ResolveType::go (type.get_elem_type ().get ());
+  resolved_node = ResolveType::go (type.get_elem_type ());
 }
 
 // resolve relative type-paths
@@ -84,7 +92,7 @@ bool
 ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
 {
   auto resolver = Resolver::get ();
-  auto mappings = Analysis::Mappings::get ();
+  auto &mappings = Analysis::Mappings::get ();
 
   NodeId module_scope_id = resolver->peek_current_module_scope ();
   NodeId previous_resolved_node_id = module_scope_id;
@@ -98,9 +106,7 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
       bool in_middle_of_path = i > 0;
       if (in_middle_of_path && segment->is_lower_self_seg ())
 	{
-	  // error[E0433]: failed to resolve: `self` in paths can only be used
-	  // in start position
-	  rust_error_at (segment->get_locus (),
+	  rust_error_at (segment->get_locus (), ErrorCode::E0433,
 			 "failed to resolve: %<%s%> in paths can only be used "
 			 "in start position",
 			 segment->as_string ().c_str ());
@@ -155,12 +161,12 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
 	  AST::TypePathFunction &fn = fnseg->get_type_path_function ();
 	  for (auto &param : fn.get_params ())
 	    {
-	      ResolveType::go (param.get ());
+	      ResolveType::go (*param);
 	    }
 
 	  if (fn.has_return_type ())
 	    {
-	      ResolveType::go (fn.get_return_type ().get ());
+	      ResolveType::go (fn.get_return_type ());
 	    }
 
 	  break;
@@ -200,10 +206,10 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
       if (resolved_node_id == UNKNOWN_NODEID
 	  && previous_resolved_node_id == module_scope_id)
 	{
-	  Optional<CanonicalPath &> resolved_child
-	    = mappings->lookup_module_child (module_scope_id,
-					     ident_seg.as_string ());
-	  if (resolved_child.is_some ())
+	  tl::optional<CanonicalPath &> resolved_child
+	    = mappings.lookup_module_child (module_scope_id,
+					    ident_seg.as_string ());
+	  if (resolved_child.has_value ())
 	    {
 	      NodeId resolved_node = resolved_child->get_node_id ();
 	      if (resolver->get_name_scope ().decl_was_declared_here (
@@ -233,8 +239,8 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
       bool did_resolve_segment = resolved_node_id != UNKNOWN_NODEID;
       if (did_resolve_segment)
 	{
-	  if (mappings->node_is_module (resolved_node_id)
-	      || mappings->node_is_crate (resolved_node_id))
+	  if (mappings.node_is_module (resolved_node_id)
+	      || mappings.node_is_crate (resolved_node_id))
 	    {
 	      module_scope_id = resolved_node_id;
 	    }
@@ -242,7 +248,7 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
 	}
       else if (is_first_segment)
 	{
-	  rust_error_at (segment->get_locus (),
+	  rust_error_at (segment->get_locus (), ErrorCode::E0412,
 			 "failed to resolve TypePath: %s in this scope",
 			 segment->as_string ().c_str ());
 	  return false;
@@ -266,7 +272,7 @@ ResolveRelativeTypePath::go (AST::TypePath &path, NodeId &resolved_node_id)
 	}
       else
 	{
-	  gcc_unreachable ();
+	  rust_unreachable ();
 	}
     }
 
@@ -320,17 +326,11 @@ ResolveRelativeQualTypePath::resolve_qual_seg (AST::QualifiedPathType &seg)
       return false;
     }
 
-  auto type = seg.get_type ().get ();
-  NodeId type_resolved_node = ResolveType::go (type);
-  if (type_resolved_node == UNKNOWN_NODEID)
-    return false;
+  auto &type = seg.get_type ();
+  ResolveType::go (type);
 
-  if (!seg.has_as_clause ())
-    return true;
-
-  NodeId trait_resolved_node = ResolveType::go (&seg.get_as_type_path ());
-  if (trait_resolved_node == UNKNOWN_NODEID)
-    return false;
+  if (seg.has_as_clause ())
+    ResolveType::go (seg.get_as_type_path ());
 
   return true;
 }
@@ -364,10 +364,10 @@ ResolveRelativeQualTypePath::visit (AST::TypePathSegment &seg)
 // resolve to canonical path
 
 bool
-ResolveTypeToCanonicalPath::go (AST::Type *type, CanonicalPath &result)
+ResolveTypeToCanonicalPath::go (AST::Type &type, CanonicalPath &result)
 {
   ResolveTypeToCanonicalPath resolver;
-  type->accept_vis (resolver);
+  type.accept_vis (resolver);
   result = resolver.result;
   return !resolver.result.is_empty ();
 }
@@ -384,8 +384,7 @@ ResolveTypeToCanonicalPath::visit (AST::TypePath &path)
   if (resolved_node == UNKNOWN_NODEID)
     return;
 
-  const CanonicalPath *type_path = nullptr;
-  if (mappings->lookup_canonical_path (resolved_node, &type_path))
+  if (auto type_path = mappings.lookup_canonical_path (resolved_node))
     {
       auto &final_seg = path.get_segments ().back ();
       switch (final_seg->get_type ())
@@ -404,14 +403,15 @@ ResolveTypeToCanonicalPath::visit (AST::TypePath &path)
 		    // constant or an ambiguous const generic?
 		    // TODO: At that point, will all generics have been
 		    // disambiguated? Can we thus canonical resolve types and
-		    // const and `gcc_unreachable` on ambiguous types?
+		    // const and `rust_unreachable` on ambiguous types?
 		    // This is probably fine as we just want to canonicalize
 		    // types, right?
 		    if (generic.get_kind () == AST::GenericArg::Kind::Type)
 		      {
 			CanonicalPath arg = CanonicalPath::create_empty ();
-			bool ok = ResolveTypeToCanonicalPath::go (
-			  generic.get_type ().get (), arg);
+			bool ok
+			  = ResolveTypeToCanonicalPath::go (generic.get_type (),
+							    arg);
 			if (ok)
 			  args.push_back (std::move (arg));
 		      }
@@ -452,8 +452,7 @@ void
 ResolveTypeToCanonicalPath::visit (AST::ReferenceType &type)
 {
   CanonicalPath path = CanonicalPath::create_empty ();
-  bool ok
-    = ResolveTypeToCanonicalPath::go (type.get_type_referenced ().get (), path);
+  bool ok = ResolveTypeToCanonicalPath::go (type.get_type_referenced (), path);
   if (ok)
     {
       std::string ref_type_str = type.is_mut () ? "mut" : "";
@@ -466,8 +465,7 @@ void
 ResolveTypeToCanonicalPath::visit (AST::RawPointerType &type)
 {
   CanonicalPath path = CanonicalPath::create_empty ();
-  bool ok
-    = ResolveTypeToCanonicalPath::go (type.get_type_pointed_to ().get (), path);
+  bool ok = ResolveTypeToCanonicalPath::go (type.get_type_pointed_to (), path);
   if (ok)
     {
       std::string ptr_type_str
@@ -482,7 +480,7 @@ void
 ResolveTypeToCanonicalPath::visit (AST::SliceType &type)
 {
   CanonicalPath path = CanonicalPath::create_empty ();
-  bool ok = ResolveTypeToCanonicalPath::go (type.get_elem_type ().get (), path);
+  bool ok = ResolveTypeToCanonicalPath::go (type.get_elem_type (), path);
   if (ok)
     {
       std::string slice_path = "[" + path.get () + "]";
@@ -495,7 +493,7 @@ ResolveTypeToCanonicalPath::visit (AST::TraitObjectTypeOneBound &type)
 {
   CanonicalPath path = CanonicalPath::create_empty ();
   bool ok
-    = ResolveTypeToCanonicalPath::go (&type.get_trait_bound ().get_type_path (),
+    = ResolveTypeToCanonicalPath::go (type.get_trait_bound ().get_type_path (),
 				      path);
   if (ok)
     {
@@ -507,8 +505,72 @@ ResolveTypeToCanonicalPath::visit (AST::TraitObjectTypeOneBound &type)
 void
 ResolveTypeToCanonicalPath::visit (AST::TraitObjectType &type)
 {
-  // FIXME is this actually allowed? dyn A+B
-  gcc_unreachable ();
+  rust_assert (!type.get_type_param_bounds ().empty ());
+
+  auto &first_bound = type.get_type_param_bounds ().front ();
+
+  // Is it allowed or even possible to have a lifetime bound as a first bound?
+  if (first_bound->get_bound_type () == AST::TraitBound::LIFETIME)
+    rust_unreachable ();
+
+  auto &trait = static_cast<AST::TraitBound &> (*first_bound);
+
+  CanonicalPath path = CanonicalPath::create_empty ();
+  bool ok = ResolveTypeToCanonicalPath::go (trait.get_type_path (), path);
+
+  // right?
+  rust_assert (ok);
+
+  auto slice_path = "<dyn " + path.get ();
+
+  for (size_t idx = 1; idx < type.get_type_param_bounds ().size (); idx++)
+    {
+      auto &additional_bound = type.get_type_param_bounds ()[idx];
+
+      std::string str;
+
+      switch (additional_bound->get_bound_type ())
+	{
+	  case AST::TypeParamBound::TRAIT: {
+	    auto bound_path = CanonicalPath::create_empty ();
+
+	    auto &bound_type_path
+	      = static_cast<AST::TraitBound &> (*additional_bound)
+		  .get_type_path ();
+	    bool ok
+	      = ResolveTypeToCanonicalPath::go (bound_type_path, bound_path);
+
+	    if (!ok)
+	      continue;
+
+	    str = bound_path.get ();
+	    break;
+	  }
+	case AST::TypeParamBound::LIFETIME:
+	  rust_unreachable ();
+	  break;
+	}
+      slice_path += " + " + str;
+    }
+
+  slice_path += ">";
+
+  result = CanonicalPath::new_seg (type.get_node_id (), slice_path);
+}
+
+void
+ResolveTypeToCanonicalPath::visit (AST::NeverType &type)
+{
+  result = CanonicalPath::new_seg (type.get_node_id (), "!");
+}
+
+void
+ResolveTypeToCanonicalPath::visit (AST::TupleType &type)
+{
+  if (!type.is_unit_type ())
+    rust_unreachable ();
+
+  result = CanonicalPath::new_seg (type.get_node_id (), "()");
 }
 
 ResolveTypeToCanonicalPath::ResolveTypeToCanonicalPath ()
@@ -558,13 +620,13 @@ ResolveGenericArgs::resolve_disambiguated_generic (AST::GenericArg &arg)
   switch (arg.get_kind ())
     {
     case AST::GenericArg::Kind::Const:
-      ResolveExpr::go (arg.get_expression ().get (), prefix, canonical_prefix);
+      ResolveExpr::go (arg.get_expression (), prefix, canonical_prefix);
       break;
     case AST::GenericArg::Kind::Type:
-      ResolveType::go (arg.get_type ().get ());
+      ResolveType::go (arg.get_type ());
       break;
     default:
-      gcc_unreachable ();
+      rust_unreachable ();
     }
 }
 void
@@ -588,6 +650,11 @@ ResolveGenericArgs::go (AST::GenericArgs &generic_args,
 	resolver.disambiguate (arg);
 
       resolver.resolve_disambiguated_generic (arg);
+    }
+
+  for (auto &binding : generic_args.get_binding_args ())
+    {
+      ResolveType::go (binding.get_type ());
     }
 }
 

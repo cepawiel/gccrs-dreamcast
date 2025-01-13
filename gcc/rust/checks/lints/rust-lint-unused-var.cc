@@ -1,4 +1,4 @@
-// Copyright (C) 2021-2022 Free Software Foundation, Inc.
+// Copyright (C) 2021-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -17,7 +17,7 @@
 // <http://www.gnu.org/licenses/>.
 
 #include "rust-lint-unused-var.h"
-#include "print-tree.h"
+#include "rust-gcc.h"
 
 namespace Rust {
 namespace Analysis {
@@ -53,7 +53,7 @@ check_decl (tree *t)
 }
 
 static tree
-unused_var_walk_fn (tree *t, int *walk_subtrees, void *closure)
+unused_var_walk_fn (tree *t, int *, void *)
 {
   switch (TREE_CODE (*t))
     {
@@ -84,8 +84,8 @@ UnusedVariables::Lint (Compile::Context &ctx)
 
   for (auto &var : ctx.get_var_decls ())
     {
-      tree t = ctx.get_backend ()->var_expression (var, Location ());
-      check_decl (&t);
+      tree decl = var->get_decl ();
+      check_decl (&decl);
     }
 
   for (auto &const_decl : ctx.get_const_decls ())

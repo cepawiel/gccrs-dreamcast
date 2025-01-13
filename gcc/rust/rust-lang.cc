@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -37,7 +37,10 @@
 #include "rust-cfg-parser.h"
 #include "rust-privacy-ctx.h"
 #include "rust-ast-resolve-item.h"
-#include "rust-optional.h"
+#include "rust-lex.h"
+#include "optional.h"
+#include "rust-unicode.h"
+#include "rust-punycode.h"
 
 #include <mpfr.h>
 // note: header files must be in this order or else forward declarations don't
@@ -65,23 +68,7 @@
 
 #include "rust-system.h"
 #include "rust-session-manager.h"
-
-// Language-dependent contents of a type. GTY() mark used for garbage collector.
-struct GTY (()) lang_type
-{
-};
-
-// Language-dependent contents of a decl.
-struct GTY (()) lang_decl
-{
-};
-
-// Language-dependent contents of an identifier.  This must include a
-// tree_identifier.
-struct GTY (()) lang_identifier
-{
-  struct tree_identifier common;
-};
+#include "rust-tree.h"
 
 // The resulting tree type.
 union GTY ((
@@ -93,11 +80,6 @@ union GTY ((
 {
   union tree_node GTY ((tag ("0"), desc ("tree_node_structure (&%h)"))) generic;
   struct lang_identifier GTY ((tag ("1"))) identifier;
-};
-
-// We don't use language_function.
-struct GTY (()) language_function
-{
 };
 
 // has to be in same compilation unit as session, so here for now
@@ -123,10 +105,6 @@ grs_langhook_init (void)
    built-in functions. The parameter (signed_char = false) specifies
    whether char is signed.  */
   build_common_tree_nodes (false);
-
-  // Creates a new TREE_LIST node with purpose NULL_TREE and value
-  // void_type_node
-  void_list_node = build_tree_list (NULL_TREE, void_type_node);
 
   // Builds built-ins for middle-end after all front-end built-ins are already
   // instantiated
@@ -166,6 +144,10 @@ grs_langhook_init_options_struct (struct gcc_options *opts)
   opts->x_warn_unused_const_variable = 1;
   /* And finally unused result for #[must_use] */
   opts->x_warn_unused_result = 1;
+  /* lets warn for infinite recursion*/
+  opts->x_warn_infinite_recursion = 1;
+  /* Enable exception handling (aka `panic!` in Rust) */
+  opts->x_flag_exceptions = 1;
 
   // nothing yet - used by frontends to change specific options for the language
   Rust::Session::get_instance ().init_options ();
@@ -192,38 +174,29 @@ static tree
 grs_langhook_type_for_mode (machine_mode mode, int unsignedp)
 {
   // TODO: change all this later to match rustc types
+  if (mode == QImode)
+    return unsignedp ? unsigned_intQI_type_node : intQI_type_node;
+
+  if (mode == HImode)
+    return unsignedp ? unsigned_intHI_type_node : intHI_type_node;
+
+  if (mode == SImode)
+    return unsignedp ? unsigned_intSI_type_node : intSI_type_node;
+
+  if (mode == DImode)
+    return unsignedp ? unsigned_intDI_type_node : intDI_type_node;
+
+  if (mode == TYPE_MODE (intTI_type_node))
+    return unsignedp ? unsigned_intTI_type_node : intTI_type_node;
+
   if (mode == TYPE_MODE (float_type_node))
     return float_type_node;
 
   if (mode == TYPE_MODE (double_type_node))
     return double_type_node;
 
-  if (mode == TYPE_MODE (intQI_type_node)) // quarter integer mode - single byte
-					   // treated as integer
-    return unsignedp ? unsigned_intQI_type_node : intQI_type_node;
-  if (mode
-      == TYPE_MODE (intHI_type_node)) // half integer mode - two-byte integer
-    return unsignedp ? unsigned_intHI_type_node : intHI_type_node;
-  if (mode
-      == TYPE_MODE (intSI_type_node)) // single integer mode - four-byte integer
-    return unsignedp ? unsigned_intSI_type_node : intSI_type_node;
-  if (mode
-      == TYPE_MODE (
-	intDI_type_node)) // double integer mode - eight-byte integer
-    return unsignedp ? unsigned_intDI_type_node : intDI_type_node;
-  if (mode
-      == TYPE_MODE (intTI_type_node)) // tetra integer mode - 16-byte integer
-    return unsignedp ? unsigned_intTI_type_node : intTI_type_node;
-
-  if (mode == TYPE_MODE (integer_type_node))
-    return unsignedp ? unsigned_type_node : integer_type_node;
-
-  if (mode == TYPE_MODE (long_integer_type_node))
-    return unsignedp ? long_unsigned_type_node : long_integer_type_node;
-
-  if (mode == TYPE_MODE (long_long_integer_type_node))
-    return unsignedp ? long_long_unsigned_type_node
-		     : long_long_integer_type_node;
+  if (mode == TYPE_MODE (long_double_type_node))
+    return long_double_type_node;
 
   if (COMPLEX_MODE_P (mode))
     {
@@ -236,7 +209,22 @@ grs_langhook_type_for_mode (machine_mode mode, int unsignedp)
       if (mode == TYPE_MODE (complex_integer_type_node) && !unsignedp)
 	return complex_integer_type_node;
     }
-  /* gcc_unreachable */
+
+  /* See (a) <https://github.com/Rust-GCC/gccrs/issues/1713>
+     "Test failure on msp430-elfbare target", and
+     (b) <https://gcc.gnu.org/PR46805>
+     "ICE: SIGSEGV in optab_for_tree_code (optabs.c:407) with -O
+     -fno-tree-scev-cprop -ftree-vectorize"
+     -- we have to support "random" modes/types here.
+     TODO Clean all this up (either locally, or preferably per PR46805:
+     "Ideally we'd never use lang_hooks.types.type_for_mode (or _for_size) in
+     the middle-end but had a pure middle-end based implementation".  */
+  for (size_t i = 0; i < NUM_INT_N_ENTS; i++)
+    if (int_n_enabled_p[i] && mode == int_n_data[i].m)
+      return (unsignedp ? int_n_trees[i].unsigned_type
+			: int_n_trees[i].signed_type);
+
+  /* rust_unreachable */
   return NULL;
 }
 
@@ -253,7 +241,7 @@ static bool
 grs_langhook_global_bindings_p (void)
 {
   // return current_function_decl == NULL_TREE;
-  // gcc_unreachable();
+  // rust_unreachable();
   // return true;
   return false;
 }
@@ -267,7 +255,7 @@ grs_langhook_global_bindings_p (void)
 static tree
 grs_langhook_pushdecl (tree decl ATTRIBUTE_UNUSED)
 {
-  gcc_unreachable ();
+  rust_unreachable ();
   return NULL;
 }
 
@@ -277,7 +265,7 @@ grs_langhook_pushdecl (tree decl ATTRIBUTE_UNUSED)
 static tree
 grs_langhook_getdecls (void)
 {
-  // gcc_unreachable();
+  // rust_unreachable();
   return NULL;
 }
 
@@ -355,18 +343,18 @@ convert (tree type, tree expr)
     case BOOLEAN_TYPE:
       return fold_convert (type, expr);
     case INTEGER_TYPE:
-      return fold (convert_to_integer (type, expr));
+      return convert_to_integer (type, expr);
     case POINTER_TYPE:
-      return fold (convert_to_pointer (type, expr));
+      return convert_to_pointer (type, expr);
     case REAL_TYPE:
-      return fold (convert_to_real (type, expr));
+      return convert_to_real (type, expr);
     case COMPLEX_TYPE:
-      return fold (convert_to_complex (type, expr));
+      return convert_to_complex (type, expr);
     default:
       break;
     }
 
-  gcc_unreachable ();
+  rust_unreachable ();
 }
 
 /* FIXME: This is a hack to preserve trees that we create from the
@@ -388,6 +376,8 @@ rust_localize_identifier (const char *ident)
   return identifier_to_locale (ident);
 }
 
+extern const attribute_spec grs_langhook_common_attribute_table[];
+
 /* The language hooks data structure. This is the main interface between the GCC
  * front-end and the GCC middle-end/back-end. A list of language hooks could be
  * found in <gcc>/langhooks.h
@@ -407,6 +397,8 @@ rust_localize_identifier (const char *ident)
 #undef LANG_HOOKS_WRITE_GLOBALS
 #undef LANG_HOOKS_GIMPLIFY_EXPR
 #undef LANG_HOOKS_EH_PERSONALITY
+
+#undef LANG_HOOKS_COMMON_ATTRIBUTE_TABLE
 
 #define LANG_HOOKS_NAME "GNU Rust"
 #define LANG_HOOKS_INIT grs_langhook_init
@@ -428,6 +420,8 @@ rust_localize_identifier (const char *ident)
 #define LANG_HOOKS_GIMPLIFY_EXPR grs_langhook_gimplify_expr
 #define LANG_HOOKS_EH_PERSONALITY grs_langhook_eh_personality
 
+#define LANG_HOOKS_COMMON_ATTRIBUTE_TABLE grs_langhook_common_attribute_table
+
 #if CHECKING_P
 
 #undef LANG_HOOKS_RUN_LANG_SELFTESTS
@@ -439,11 +433,14 @@ void
 run_rust_tests ()
 {
   // Call tests for the rust frontend here
+  rust_input_source_test ();
+  rust_nfc_qc_test ();
+  rust_utf8_normalize_test ();
+  rust_punycode_encode_test ();
   rust_cfg_parser_test ();
   rust_privacy_ctx_test ();
   rust_crate_name_validation_test ();
   rust_simple_path_resolve_test ();
-  rust_optional_test ();
 }
 } // namespace selftest
 

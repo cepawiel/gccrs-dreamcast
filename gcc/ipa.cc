@@ -1,5 +1,5 @@
 /* Basic IPA optimizations and utilities.
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -33,6 +33,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-utils.h"
 #include "symbol-summary.h"
 #include "tree-vrp.h"
+#include "sreal.h"
+#include "ipa-cp.h"
 #include "ipa-prop.h"
 #include "ipa-fnsummary.h"
 #include "dbgcnt.h"
@@ -182,7 +184,7 @@ walk_polymorphic_call_targets (hash_set<void *> *reachable_call_targets,
     = possible_polymorphic_call_targets
 	(edge, &final, &cache_token);
 
-  if (!reachable_call_targets->add (cache_token))
+  if (cache_token != NULL && !reachable_call_targets->add (cache_token))
     {
       for (i = 0; i < targets.length (); i++)
 	{

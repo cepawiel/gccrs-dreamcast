@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -30,6 +30,7 @@ with Checks;
 with CStand;
 with Debug;          use Debug;
 with Elists;
+with Exp_Ch6;
 with Exp_Dbug;
 with Exp_Unst;
 with Fmap;
@@ -68,6 +69,7 @@ with SCIL_LL;
 with Tbuild;         use Tbuild;
 with Types;          use Types;
 with VAST;
+with Warnsw;         use Warnsw;
 
 procedure Frontend is
 begin
@@ -424,24 +426,17 @@ begin
 
             --  Cleanup processing after completing main analysis
 
-            --  In GNATprove_Mode we do not perform most expansions but body
-            --  instantiation is needed.
-
-            pragma Assert
-              (Operating_Mode = Generate_Code
-                or else Operating_Mode = Check_Semantics);
-
-            if Operating_Mode = Generate_Code
-              or else GNATprove_Mode
-            then
-               Instantiate_Bodies;
-            end if;
-
-            --  Analyze all inlined bodies, check access-before-elaboration
-            --  rules, and remove ignored Ghost code when generating code or
-            --  compiling for GNATprove.
+            pragma Assert (Operating_Mode in Check_Semantics | Generate_Code);
 
             if Operating_Mode = Generate_Code or else GNATprove_Mode then
+
+               --  In GNATprove_Mode we do not perform most expansions but body
+               --  instantiation is needed.
+
+               Instantiate_Bodies;
+
+               --  Analyze inlined bodies if required
+
                if Inline_Processing_Required then
                   Analyze_Inlined_Bodies;
                end if;
@@ -452,6 +447,8 @@ begin
                if Debug_Flag_UU then
                   Collect_Garbage_Entities;
                end if;
+
+               --  Check access-before-elaboration rules
 
                if Legacy_Elaboration_Checks then
                   Check_Elab_Calls;
@@ -523,6 +520,16 @@ begin
       VAST.Check_Tree (Cunit (Main_Unit));
    end if;
 
+   --  Validate all the subprogram calls; this work will be done by VAST; in
+   --  the meantime it is done to check extra formals and it can be disabled
+   --  using -gnatd_X (which also disables all the other assertions on extra
+   --  formals). It is invoked using pragma Debug to avoid adding any cost
+   --  when the compiler is built with assertions disabled.
+
+   if not Debug_Flag_Underscore_XX then
+      pragma Debug (Exp_Ch6.Validate_Subprogram_Calls (Cunit (Main_Unit)));
+   end if;
+
    --  Dump the source now. Note that we do this as soon as the analysis
    --  of the tree is complete, because it is not just a dump in the case
    --  of -gnatD, where it rewrites all source locations in the tree.
@@ -558,6 +565,4 @@ begin
    if Mapping_File_Name /= null then
       Fmap.Update_Mapping_File (Mapping_File_Name.all);
    end if;
-
-   return;
 end Frontend;

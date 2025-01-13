@@ -1,6 +1,6 @@
 /* Support for simple predicate analysis.
 
-   Copyright (C) 2001-2022 Free Software Foundation, Inc.
+   Copyright (C) 2001-2024 Free Software Foundation, Inc.
    Contributed by Xinliang David Li <davidxl@google.com>
    Generalized by Martin Sebor <msebor@redhat.com>
 
@@ -42,6 +42,7 @@
 #include "value-query.h"
 #include "cfganal.h"
 #include "tree-eh.h"
+#include "gimple-fold.h"
 
 #include "gimple-predicate-analysis.h"
 
@@ -49,8 +50,8 @@
 
 /* In our predicate normal form we have MAX_NUM_CHAINS or predicates
    and in those MAX_CHAIN_LEN (inverted) and predicates.  */
-#define MAX_NUM_CHAINS 8
-#define MAX_CHAIN_LEN 5
+#define MAX_NUM_CHAINS (unsigned)param_uninit_max_num_chains
+#define MAX_CHAIN_LEN (unsigned)param_uninit_max_chain_len
 
 /* Return true if X1 is the negation of X2.  */
 
@@ -243,21 +244,18 @@ find_matching_predicate_in_rest_chains (const pred_info &pred,
    of that's the form "FLAG_VAR CMP FLAG_VAR" with value range info.
    PHI is the phi node whose incoming (interesting) paths need to be
    examined.  On success, return the comparison code, set defintion
-   gimple of FLAG_DEF and BOUNDARY_CST.  Otherwise return ERROR_MARK.  */
+   gimple of FLAG_DEF and BOUNDARY_CST.  Otherwise return ERROR_MARK.
+   I is the running iterator so the function can be called repeatedly
+   to gather all candidates.  */
 
 static tree_code
 find_var_cmp_const (pred_chain_union preds, gphi *phi, gimple **flag_def,
-		    tree *boundary_cst)
+		    tree *boundary_cst, unsigned &i)
 {
-  tree_code vrinfo_code = ERROR_MARK;
-  gimple *vrinfo_def = NULL;
-  tree vrinfo_cst = NULL;
-
   gcc_assert (preds.length () > 0);
   pred_chain chain = preds[0];
-  for (unsigned i = 0; i < chain.length (); i++)
+  for (; i < chain.length (); i++)
     {
-      bool use_vrinfo_p = false;
       const pred_info &pred = chain[i];
       tree cond_lhs = pred.pred_lhs;
       tree cond_rhs = pred.pred_rhs;
@@ -281,8 +279,7 @@ find_var_cmp_const (pred_chain_union preds, gphi *phi, gimple **flag_def,
 	}
       /* Check if we can take advantage of FLAG_VAR COMP FLAG_VAR predicate
 	 with value range info.  Note only first of such case is handled.  */
-      else if (vrinfo_code == ERROR_MARK
-	       && TREE_CODE (cond_lhs) == SSA_NAME
+      else if (TREE_CODE (cond_lhs) == SSA_NAME
 	       && TREE_CODE (cond_rhs) == SSA_NAME)
 	{
 	  gimple* lhs_def = SSA_NAME_DEF_STMT (cond_lhs);
@@ -306,7 +303,8 @@ find_var_cmp_const (pred_chain_union preds, gphi *phi, gimple **flag_def,
 	  value_range r;
 	  if (!INTEGRAL_TYPE_P (type)
 	      || !get_range_query (cfun)->range_of_expr (r, cond_rhs)
-	      || r.kind () != VR_RANGE)
+	      || r.undefined_p ()
+	      || r.varying_p ())
 	    continue;
 
 	  wide_int min = r.lower_bound ();
@@ -329,8 +327,6 @@ find_var_cmp_const (pred_chain_union preds, gphi *phi, gimple **flag_def,
 	    cond_rhs = wide_int_to_tree (type, min);
 	  else
 	    continue;
-
-	  use_vrinfo_p = true;
 	}
       else
 	continue;
@@ -343,27 +339,13 @@ find_var_cmp_const (pred_chain_union preds, gphi *phi, gimple **flag_def,
 	  || !find_matching_predicate_in_rest_chains (pred, preds))
 	continue;
 
-      /* Return if any "flag_var comp const" predicate is found.  */
-      if (!use_vrinfo_p)
-	{
-	  *boundary_cst = cond_rhs;
-	  return code;
-	}
-      /* Record if any "flag_var comp flag_var[vinfo]" predicate is found.  */
-      else if (vrinfo_code == ERROR_MARK)
-	{
-	  vrinfo_code = code;
-	  vrinfo_def = *flag_def;
-	  vrinfo_cst = cond_rhs;
-	}
+      /* Return predicate found.  */
+      *boundary_cst = cond_rhs;
+      ++i;
+      return code;
     }
-  /* Return the "flag_var cmp flag_var[vinfo]" predicate we found.  */
-  if (vrinfo_code != ERROR_MARK)
-    {
-      *flag_def = vrinfo_def;
-      *boundary_cst = vrinfo_cst;
-    }
-  return vrinfo_code;
+
+  return ERROR_MARK;
 }
 
 /* Return true if all interesting opnds are pruned, false otherwise.
@@ -639,27 +621,29 @@ uninit_analysis::overlap (gphi *phi, unsigned opnds, hash_set<gphi *> *visited,
 {
   gimple *flag_def = NULL;
   tree boundary_cst = NULL_TREE;
-  bitmap visited_flag_phis = NULL;
 
   /* Find within the common prefix of multiple predicate chains
      a predicate that is a comparison of a flag variable against
      a constant.  */
-  tree_code cmp_code = find_var_cmp_const (use_preds.chain (), phi, &flag_def,
-					   &boundary_cst);
-  if (cmp_code == ERROR_MARK)
-    return true;
+  unsigned i = 0;
+  tree_code cmp_code;
+  while ((cmp_code = find_var_cmp_const (use_preds.chain (), phi, &flag_def,
+					 &boundary_cst, i)) != ERROR_MARK)
+    {
+      /* Now check all the uninit incoming edges have a constant flag
+	 value that is in conflict with the use guard/predicate.  */
+      bitmap visited_flag_phis = NULL;
+      gphi *phi_def = as_a<gphi *> (flag_def);
+      bool all_pruned = prune_phi_opnds (phi, opnds, phi_def, boundary_cst,
+					 cmp_code, visited,
+					 &visited_flag_phis);
+      if (visited_flag_phis)
+	BITMAP_FREE (visited_flag_phis);
+      if (all_pruned)
+	return false;
+    }
 
-  /* Now check all the uninit incoming edges have a constant flag
-     value that is in conflict with the use guard/predicate.  */
-  gphi *phi_def = as_a<gphi *> (flag_def);
-  bool all_pruned = prune_phi_opnds (phi, opnds, phi_def, boundary_cst,
-				     cmp_code, visited,
-				     &visited_flag_phis);
-
-  if (visited_flag_phis)
-    BITMAP_FREE (visited_flag_phis);
-
-  return !all_pruned;
+  return true;
 }
 
 /* Return true if two predicates PRED1 and X2 are equivalent.  Assume
@@ -727,11 +711,11 @@ value_sat_pred_p (tree val, tree boundary, tree_code cmpc,
   if (cmpc != BIT_AND_EXPR)
     return is_value_included_in (val, boundary, cmpc);
 
-  wide_int andw = wi::to_wide (val) & wi::to_wide (boundary);
+  widest_int andw = wi::to_widest (val) & wi::to_widest (boundary);
   if (exact_p)
-    return andw == wi::to_wide (val);
+    return andw == wi::to_widest (val);
 
-  return andw.to_uhwi ();
+  return wi::ne_p (andw, 0);
 }
 
 /* Return true if the domain of single predicate expression PRED1
@@ -1161,11 +1145,12 @@ compute_control_dep_chain (basic_block dom_bb, const_basic_block dep_bb,
 			   vec<edge> cd_chains[], unsigned *num_chains,
 			   unsigned in_region = 0)
 {
-  auto_vec<edge, MAX_CHAIN_LEN + 1> cur_cd_chain;
+  auto_vec<edge, 10> cur_cd_chain;
   unsigned num_calls = 0;
   unsigned depth = 0;
   bool complete_p = true;
   /* Walk the post-dominator chain.  */
+  cur_cd_chain.reserve (MAX_CHAIN_LEN + 1);
   compute_control_dep_chain_pdom (dom_bb, dep_bb, NULL, cd_chains,
 				  num_chains, cur_cd_chain, &num_calls,
 				  in_region, depth, &complete_p);
@@ -1174,7 +1159,9 @@ compute_control_dep_chain (basic_block dom_bb, const_basic_block dep_bb,
 
 /* Implemented simplifications:
 
-   1) ((x IOR y) != 0) AND (x != 0) is equivalent to (x != 0);
+   1a) ((x IOR y) != 0) AND (x != 0) is equivalent to (x != 0);
+   1b) [!](X rel y) AND [!](X rel y') where y == y' or both constant
+       can possibly be simplified
    2) (X AND Y) OR (!X AND Y) is equivalent to Y;
    3) X OR (!X AND Y) is equivalent to (X OR Y);
    4) ((x IAND y) != 0) || (x != 0 AND y != 0)) is equivalent to
@@ -1184,11 +1171,11 @@ compute_control_dep_chain (basic_block dom_bb, const_basic_block dep_bb,
 
    PREDS is the predicate chains, and N is the number of chains.  */
 
-/* Implement rule 1 above.  PREDS is the AND predicate to simplify
+/* Implement rule 1a above.  PREDS is the AND predicate to simplify
    in place.  */
 
 static void
-simplify_1 (pred_chain &chain)
+simplify_1a (pred_chain &chain)
 {
   bool simplified = false;
   pred_chain s_chain = vNULL;
@@ -1245,6 +1232,68 @@ simplify_1 (pred_chain &chain)
   chain = s_chain;
 }
 
+/* Implement rule 1b above.  PREDS is the AND predicate to simplify
+   in place.  Returns true if CHAIN simplifies to true or false.  */
+
+static bool
+simplify_1b (pred_chain &chain)
+{
+  for (unsigned i = 0; i < chain.length (); i++)
+    {
+      pred_info &a_pred = chain[i];
+
+      for (unsigned j = i + 1; j < chain.length (); ++j)
+	{
+	  pred_info &b_pred = chain[j];
+
+	  if (!operand_equal_p (a_pred.pred_lhs, b_pred.pred_lhs)
+	      || (!operand_equal_p (a_pred.pred_rhs, b_pred.pred_rhs)
+		  && !(CONSTANT_CLASS_P (a_pred.pred_rhs)
+		       && CONSTANT_CLASS_P (b_pred.pred_rhs))))
+	    continue;
+
+	  tree_code a_code = a_pred.cond_code;
+	  if (a_pred.invert)
+	    a_code = invert_tree_comparison (a_code, false);
+	  tree_code b_code = b_pred.cond_code;
+	  if (b_pred.invert)
+	    b_code = invert_tree_comparison (b_code, false);
+	  /* Try to combine X a_code Y && X b_code Y'.  */
+	  tree comb = maybe_fold_and_comparisons (boolean_type_node,
+						  a_code,
+						  a_pred.pred_lhs,
+						  a_pred.pred_rhs,
+						  b_code,
+						  b_pred.pred_lhs,
+						  b_pred.pred_rhs, NULL);
+	  if (!comb)
+	    ;
+	  else if (integer_zerop (comb))
+	    return true;
+	  else if (integer_truep (comb))
+	    {
+	      chain.ordered_remove (j);
+	      chain.ordered_remove (i);
+	      if (chain.is_empty ())
+		return true;
+	      i--;
+	      break;
+	    }
+	  else if (COMPARISON_CLASS_P (comb)
+		   && operand_equal_p (a_pred.pred_lhs, TREE_OPERAND (comb, 0)))
+	    {
+	      chain.ordered_remove (j);
+	      a_pred.cond_code = TREE_CODE (comb);
+	      a_pred.pred_rhs = TREE_OPERAND (comb, 1);
+	      a_pred.invert = false;
+	      j--;
+	    }
+	}
+    }
+
+  return false;
+}
+
 /* Implements rule 2 for the OR predicate PREDS:
 
    2) (X AND Y) OR (!X AND Y) is equivalent to Y.  */
@@ -1257,63 +1306,48 @@ predicate::simplify_2 ()
   /* (X AND Y) OR (!X AND Y) is equivalent to Y.
      (X AND Y) OR (X AND !Y) is equivalent to X.  */
 
-  unsigned n = m_preds.length ();
-  for (unsigned i = 0; i < n; i++)
+  for (unsigned i = 0; i < m_preds.length (); i++)
     {
       pred_chain &a_chain = m_preds[i];
-      if (a_chain.length () != 2)
-	continue;
 
-      /* Create copies since the chain may be released below before
-	 the copy is added to the other chain.  */
-      const pred_info x = a_chain[0];
-      const pred_info y = a_chain[1];
-
-      for (unsigned j = 0; j < n; j++)
+      for (unsigned j = i + 1; j < m_preds.length (); j++)
 	{
-	  if (j == i)
-	    continue;
-
 	  pred_chain &b_chain = m_preds[j];
-	  if (b_chain.length () != 2)
+	  if (b_chain.length () != a_chain.length ())
 	    continue;
 
-	  const pred_info &x2 = b_chain[0];
-	  const pred_info &y2 = b_chain[1];
-
-	  if (pred_equal_p (x, x2) && pred_neg_p (y, y2))
+	  unsigned neg_idx = -1U;
+	  for (unsigned k = 0; k < a_chain.length (); ++k)
 	    {
-	      /* Kill a_chain.  */
-	      b_chain.release ();
-	      a_chain.release ();
-	      b_chain.safe_push (x);
-	      simplified = true;
-	      break;
+	      if (pred_equal_p (a_chain[k], b_chain[k]))
+		continue;
+	      if (neg_idx != -1U)
+		{
+		  neg_idx = -1U;
+		  break;
+		}
+	      if (pred_neg_p (a_chain[k], b_chain[k]))
+		neg_idx = k;
+	      else
+		break;
 	    }
-	  if (pred_neg_p (x, x2) && pred_equal_p (y, y2))
+	  /* If we found equal chains with one negated predicate
+	     simplify.  */
+	  if (neg_idx != -1U)
 	    {
-	      /* Kill a_chain.  */
-	      a_chain.release ();
-	      b_chain.release ();
-	      b_chain.safe_push (y);
+	      a_chain.ordered_remove (neg_idx);
+	      m_preds.ordered_remove (j);
 	      simplified = true;
+	      if (a_chain.is_empty ())
+		{
+		  /* A && !A simplifies to true, wipe the whole predicate.  */
+		  for (unsigned k = 0; k < m_preds.length (); ++k)
+		    m_preds[k].release ();
+		  m_preds.truncate (0);
+		}
 	      break;
 	    }
 	}
-    }
-  /* Now clean up the chain.  */
-  if (simplified)
-    {
-      pred_chain_union s_preds = vNULL;
-      for (unsigned i = 0; i < n; i++)
-	{
-	  if (m_preds[i].is_empty ())
-	    continue;
-	  s_preds.safe_push (m_preds[i]);
-	}
-      m_preds.release ();
-      m_preds = s_preds;
-      s_preds = vNULL;
     }
 
   return simplified;
@@ -1450,11 +1484,18 @@ predicate::simplify (gimple *use_or_def, bool is_use)
       dump (dump_file, use_or_def, is_use ? "[USE]:\n" : "[DEF]:\n");
     }
 
-  unsigned n = m_preds.length ();
-  for (unsigned i = 0; i < n; i++)
-    ::simplify_1 (m_preds[i]);
+  for (unsigned i = 0; i < m_preds.length (); i++)
+    {
+      ::simplify_1a (m_preds[i]);
+      if (::simplify_1b (m_preds[i]))
+	{
+	  m_preds[i].release ();
+	  m_preds.ordered_remove (i);
+	  i--;
+	}
+    }
 
-  if (n < 2)
+  if (m_preds.length () < 2)
     return;
 
   bool changed;
@@ -1665,10 +1706,11 @@ predicate::normalize (const pred_chain &chain)
   while (!work_list.is_empty ())
     {
       pred_info pi = work_list.pop ();
-      predicate pred;
       /* The predicate object is not modified here, only NORM_CHAIN and
 	 WORK_LIST are appended to.  */
-      pred.normalize (&norm_chain, pi, BIT_AND_EXPR, &work_list, &mark_set);
+      unsigned oldlen = m_preds.length ();
+      normalize (&norm_chain, pi, BIT_AND_EXPR, &work_list, &mark_set);
+      gcc_assert (m_preds.length () == oldlen);
     }
 
   m_preds.safe_push (norm_chain);
@@ -1686,7 +1728,7 @@ predicate::normalize (gimple *use_or_def, bool is_use)
       dump (dump_file, use_or_def, is_use ? "[USE]:\n" : "[DEF]:\n");
     }
 
-  predicate norm_preds;
+  predicate norm_preds (empty_val ());
   for (unsigned i = 0; i < m_preds.length (); i++)
     {
       if (m_preds[i].length () != 1)
@@ -1772,7 +1814,7 @@ predicate::init_from_control_deps (const vec<edge> *dep_chains,
 		}
 	    }
 	  /* Get the conditional controlling the bb exit edge.  */
-	  gimple *cond_stmt = last_stmt (guard_bb);
+	  gimple *cond_stmt = *gsi_last_bb (guard_bb);
 	  if (gimple_code (cond_stmt) == GIMPLE_COND)
 	    {
 	      /* The true edge corresponds to the uninteresting condition.
@@ -1976,7 +2018,7 @@ uninit_analysis::init_use_preds (predicate &use_preds, basic_block def_bb,
      are logical conjunctions.  Together, the DEP_CHAINS vector is
      used below to initialize an OR expression of the conjunctions.  */
   unsigned num_chains = 0;
-  auto_vec<edge> dep_chains[MAX_NUM_CHAINS];
+  auto_vec<edge> *dep_chains = new auto_vec<edge>[MAX_NUM_CHAINS];
 
   if (!dfs_mark_dominating_region (use_bb, cd_root, in_region, region)
       || !compute_control_dep_chain (cd_root, use_bb, dep_chains, &num_chains,
@@ -2001,6 +2043,7 @@ uninit_analysis::init_use_preds (predicate &use_preds, basic_block def_bb,
      Each OR subexpression is represented by one element of DEP_CHAINS,
      where each element consists of a series of AND subexpressions.  */
   use_preds.init_from_control_deps (dep_chains, num_chains, true);
+  delete[] dep_chains;
   return !use_preds.is_empty ();
 }
 
@@ -2021,6 +2064,8 @@ predicate::operator= (const predicate &rhs)
 {
   if (this == &rhs)
     return *this;
+
+  m_cval = rhs.m_cval;
 
   unsigned n = m_preds.length ();
   for (unsigned i = 0; i != n; ++i)
@@ -2083,7 +2128,7 @@ uninit_analysis::init_from_phi_def (gphi *phi)
       break;
 
   unsigned num_chains = 0;
-  auto_vec<edge> dep_chains[MAX_NUM_CHAINS];
+  auto_vec<edge> *dep_chains = new auto_vec<edge>[MAX_NUM_CHAINS];
   for (unsigned i = 0; i < nedges; i++)
     {
       edge e = def_edges[i];
@@ -2114,6 +2159,7 @@ uninit_analysis::init_from_phi_def (gphi *phi)
      which the PHI operands are defined to values for which M_EVAL is
      false.  */
   m_phi_def_preds.init_from_control_deps (dep_chains, num_chains, false);
+  delete[] dep_chains;
   return !m_phi_def_preds.is_empty ();
 }
 
@@ -2150,12 +2196,16 @@ uninit_analysis::is_use_guarded (gimple *use_stmt, basic_block use_bb,
   /* Try to build the predicate expression under which the PHI flows
      into its use.  This will be empty if the PHI is defined and used
      in the same bb.  */
-  predicate use_preds;
+  predicate use_preds (true);
   if (!init_use_preds (use_preds, def_bb, use_bb))
     return false;
 
   use_preds.simplify (use_stmt, /*is_use=*/true);
   use_preds.normalize (use_stmt, /*is_use=*/true);
+  if (use_preds.is_false ())
+    return true;
+  if (use_preds.is_true ())
+    return false;
 
   /* Try to prune the dead incoming phi edges.  */
   if (!overlap (phi, opnds, visited, use_preds))
@@ -2174,6 +2224,10 @@ uninit_analysis::is_use_guarded (gimple *use_stmt, basic_block use_bb,
 
       m_phi_def_preds.simplify (phi);
       m_phi_def_preds.normalize (phi);
+      if (m_phi_def_preds.is_false ())
+	return false;
+      if (m_phi_def_preds.is_true ())
+	return true;
     }
 
   /* Return true if the predicate guarding the valid definition (i.e.,

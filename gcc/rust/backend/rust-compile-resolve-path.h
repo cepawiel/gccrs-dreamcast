@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -20,6 +20,7 @@
 #define RUST_COMPILE_RESOLVE_PATH
 
 #include "rust-compile-base.h"
+#include "rust-hir-visitor.h"
 
 namespace Rust {
 namespace Compile {
@@ -45,12 +46,12 @@ public:
   void visit (HIR::QualifiedPathInExpression &expr) override;
 
   // Empty visit for unused Pattern HIR nodes.
-  void visit (HIR::GroupedPattern &) override {}
   void visit (HIR::IdentifierPattern &) override {}
   void visit (HIR::LiteralPattern &) override {}
   void visit (HIR::RangePattern &) override {}
   void visit (HIR::ReferencePattern &) override {}
   void visit (HIR::SlicePattern &) override {}
+  void visit (HIR::AltPattern &) override {}
   void visit (HIR::StructPattern &) override {}
   void visit (HIR::TuplePattern &) override {}
   void visit (HIR::TupleStructPattern &) override {}
@@ -61,10 +62,16 @@ public:
   {}
 
   tree resolve (const HIR::PathIdentSegment &final_segment,
-		const Analysis::NodeMapping &mappings, Location locus,
+		const Analysis::NodeMapping &mappings, location_t locus,
 		bool is_qualified_path);
 
   tree resolved;
+
+private:
+  tree
+  attempt_constructor_expression_lookup (TyTy::BaseType *lookup, Context *ctx,
+					 const Analysis::NodeMapping &mappings,
+					 location_t expr_locus);
 };
 
 } // namespace Compile

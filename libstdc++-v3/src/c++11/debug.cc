@@ -1,6 +1,6 @@
 // Debugging mode support code -*- C++ -*-
 
-// Copyright (C) 2003-2022 Free Software Foundation, Inc.
+// Copyright (C) 2003-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -24,6 +24,7 @@
 
 #include <bits/move.h>
 #include <bits/stl_iterator_base_types.h>
+#include <ext/atomicity.h> // __is_single_threaded
 
 #include <debug/formatter.h>
 #include <debug/safe_base.h>
@@ -44,24 +45,6 @@
 #include <cxxabi.h>	// for __cxa_demangle.
 
 #include "mutex_pool.h"
-
-#ifdef _GLIBCXX_VERBOSE_ASSERT
-namespace std
-{
-  [[__noreturn__]]
-  void
-  __glibcxx_assert_fail(const char* file, int line,
-			const char* function, const char* condition) noexcept
-  {
-    if (file && function && condition)
-      fprintf(stderr, "%s:%d: %s: Assertion '%s' failed.\n",
-	      file, line, function, condition);
-    else if (function)
-      fprintf(stderr, "%s: Undefined behavior detected.\n", function);
-    abort();
-  }
-}
-#endif
 
 using namespace std;
 
@@ -174,6 +157,31 @@ namespace
 	__old->_M_reset();
       }
   }
+
+  void*
+  acquire_sequence_ptr_for_lock(__gnu_debug::_Safe_sequence_base*& seq)
+  {
+#ifdef __GTHREADS
+    if (!__gnu_cxx::__is_single_threaded())
+      return __atomic_load_n(&seq, __ATOMIC_ACQUIRE);
+#endif
+    return seq;
+  }
+
+  void
+  reset_sequence_ptr(__gnu_debug::_Safe_sequence_base*& seq)
+  {
+#ifdef __GTHREADS
+    if (!__gnu_cxx::__is_single_threaded())
+      {
+	__atomic_store_n(&seq, (__gnu_debug::_Safe_sequence_base*)nullptr,
+			 __ATOMIC_RELEASE);
+	return;
+      }
+#endif
+    seq = nullptr;
+  }
+
 } // anonymous namespace
 
 namespace __gnu_debug
@@ -181,86 +189,139 @@ namespace __gnu_debug
   const char* const _S_debug_messages[] =
   {
     // General Checks
+    // __msg_valid_range
     "function requires a valid iterator range [%1.name;, %2.name;)",
+    // __msg_insert_singular
     "attempt to insert into container with a singular iterator",
+    // __msg_insert_different
     "attempt to insert into container with an iterator"
     " from a different container",
+    // __msg_erase_bad
     "attempt to erase from container with a %2.state; iterator",
+    // __msg_erase_different
     "attempt to erase from container with an iterator"
     " from a different container",
+    // __msg_subscript_oob
     "attempt to subscript container with out-of-bounds index %2;,"
     " but container only holds %3; elements",
+    // __msg_empty
     "attempt to access an element in an empty container",
+    // __msg_unpartitioned
     "elements in iterator range [%1.name;, %2.name;)"
     " are not partitioned by the value %3;",
+    // __msg_unpartitioned_pred
     "elements in iterator range [%1.name;, %2.name;)"
     " are not partitioned by the predicate %3; and value %4;",
+    // __msg_unsorted
     "elements in iterator range [%1.name;, %2.name;) are not sorted",
+    // __msg_unsorted_pred
     "elements in iterator range [%1.name;, %2.name;)"
     " are not sorted according to the predicate %3;",
+    // __msg_not_heap
     "elements in iterator range [%1.name;, %2.name;) do not form a heap",
+    // __msg_not_heap_pred
     "elements in iterator range [%1.name;, %2.name;)"
     " do not form a heap with respect to the predicate %3;",
     // std::bitset checks
+    // __msg_bad_bitset_write
     "attempt to write through a singular bitset reference",
+    // __msg_bad_bitset_read
     "attempt to read from a singular bitset reference",
+    // __msg_bad_bitset_flip
     "attempt to flip a singular bitset reference",
     // std::list checks
+    // __msg_self_splice
     "attempt to splice a list into itself",
+    // __msg_splice_alloc
     "attempt to splice lists with unequal allocators",
+    // __msg_splice_bad
     "attempt to splice elements referenced by a %1.state; iterator",
+    // __msg_splice_other
     "attempt to splice an iterator from a different container",
+    // __msg_splice_overlap
     "splice destination %1.name;"
     " occurs within source range [%2.name;, %3.name;)",
     // iterator checks
+    // __msg_init_singular
     "attempt to initialize an iterator that will immediately become singular",
+    // __msg_init_copy_singular
     "attempt to copy-construct an iterator from a singular iterator",
+    // __msg_init_const_singular
     "attempt to construct a constant iterator"
     " from a singular mutable iterator",
+    // __msg_copy_singular
     "attempt to copy from a singular iterator",
+    // __msg_bad_deref
     "attempt to dereference a %1.state; iterator",
+    // __msg_bad_inc
     "attempt to increment a %1.state; iterator",
+    // __msg_bad_dec
     "attempt to decrement a %1.state; iterator",
+    // __msg_iter_subscript_oob
     "attempt to subscript a %1.state; iterator %2; step from"
     " its current position, which falls outside its dereferenceable range",
+    // __msg_advance_oob
     "attempt to advance a %1.state; iterator %2; steps,"
     " which falls outside its valid range",
+    // __msg_retreat_oob
     "attempt to retreat a %1.state; iterator %2; steps,"
     " which falls outside its valid range",
+    // __msg_iter_compare_bad
     "attempt to compare a %1.state; iterator to a %2.state; iterator",
+    // __msg_compare_different
     "attempt to compare iterators from different sequences",
+    // __msg_iter_order_bad
     "attempt to order a %1.state; iterator to a %2.state; iterator",
+    // __msg_order_different
     "attempt to order iterators from different sequences",
+    // __msg_distance_bad
     "attempt to compute the difference between a %1.state;"
     " iterator to a %2.state; iterator",
+    // __msg_distance_different
     "attempt to compute the different between two iterators"
     " from different sequences",
     // istream_iterator
+    // __msg_deref_istream
     "attempt to dereference an end-of-stream istream_iterator",
+    // __msg_inc_istream
     "attempt to increment an end-of-stream istream_iterator",
     // ostream_iterator
+    // __msg_output_ostream
     "attempt to output via an ostream_iterator with no associated stream",
     // istreambuf_iterator
+    // __msg_deref_istreambuf
     "attempt to dereference an end-of-stream istreambuf_iterator"
     " (this is a GNU extension)",
+    // __msg_inc_istreambuf
     "attempt to increment an end-of-stream istreambuf_iterator",
     // std::forward_list
+    // __msg_insert_after_end
     "attempt to insert into container after an end iterator",
+    // __msg_erase_after_bad
     "attempt to erase from container after a %2.state; iterator not followed"
     " by a dereferenceable one",
+    // __msg_valid_range2
     "function requires a valid iterator range (%2.name;, %3.name;)"
     ", \"%2.name;\" shall be before and not equal to \"%3.name;\"",
     // std::unordered_container::local_iterator
+    // __msg_local_iter_compare_bad
     "attempt to compare local iterators from different unordered container"
     " buckets",
+    // __msg_non_empty_range
     "function requires a non-empty iterator range [%1.name;, %2.name;)",
+    // __msg_self_move_assign
     "attempt to self move assign",
+    // __msg_bucket_index_oob
     "attempt to access container with out-of-bounds bucket index %2;,"
     " container only holds %3; buckets",
+    // __msg_valid_load_factor
     "load factor shall be positive",
+    // __msg_equal_allocs
     "allocators must be equal",
+    // __msg_insert_range_from_self
     "attempt to insert with an iterator range [%1.name;, %2.name;) from this"
     " container",
+    // __msg_irreflexive_ordering
     "comparison doesn't meet irreflexive requirements, assert(!(a < a))"
   };
 
@@ -376,6 +437,8 @@ namespace __gnu_debug
 	_M_version = _M_sequence->_M_version;
 	_M_sequence->_M_attach(this, __constant);
       }
+    else
+      _M_version = 0;
   }
 
   void
@@ -391,6 +454,8 @@ namespace __gnu_debug
 	_M_version = _M_sequence->_M_version;
 	_M_sequence->_M_attach_single(this, __constant);
       }
+    else
+      _M_version = 0;
   }
 
   void
@@ -404,7 +469,7 @@ namespace __gnu_debug
     // If the sequence destructor runs between loading the pointer and
     // locking the mutex, it will detach this iterator and set _M_sequence
     // to null, and then _M_detach_single() will do nothing.
-    if (auto seq = __atomic_load_n(&_M_sequence, __ATOMIC_ACQUIRE))
+    if (auto seq = acquire_sequence_ptr_for_lock(_M_sequence))
       {
 	__gnu_cxx::__scoped_lock sentry(get_safe_base_mutex(seq));
 	_M_detach_single();
@@ -426,7 +491,7 @@ namespace __gnu_debug
   _Safe_iterator_base::
   _M_reset() throw ()
   {
-    __atomic_store_n(&_M_sequence, (_Safe_sequence_base*)0, __ATOMIC_RELEASE);
+    reset_sequence_ptr(_M_sequence);
     // Do not reset version, so that a detached iterator does not look like a
     // value-initialized one.
     // _M_version = 0;
@@ -467,6 +532,8 @@ namespace __gnu_debug
 	_M_version = _M_sequence->_M_version;
 	_M_get_container()->_M_attach_local(this, __constant);
       }
+    else
+      _M_version = 0;
   }
 
   void
@@ -482,13 +549,15 @@ namespace __gnu_debug
 	_M_version = _M_sequence->_M_version;
 	_M_get_container()->_M_attach_local_single(this, __constant);
       }
+    else
+      _M_version = 0;
   }
 
   void
   _Safe_local_iterator_base::
   _M_detach()
   {
-    if (auto seq = __atomic_load_n(&_M_sequence, __ATOMIC_ACQUIRE))
+    if (auto seq = acquire_sequence_ptr_for_lock(_M_sequence))
       {
 	__gnu_cxx::__scoped_lock sentry(get_safe_base_mutex(seq));
 	_M_detach_single();
@@ -1141,6 +1210,23 @@ namespace
 
     return ret;
   }
+
+  void
+  print_backtrace_error(void* data, const char* msg, int errnum)
+  {
+    PrintContext& ctx = *static_cast<PrintContext*>(data);
+
+    print_literal(ctx, "Backtrace unavailable: ");
+    print_word(ctx, msg ? msg : "<unknown error>");
+    if (errnum > 0)
+      {
+	char buf[64];
+	int written = __builtin_sprintf(buf, " (errno=%d)\n", errnum);
+	print_word(ctx, buf, written);
+      }
+    else
+      print_literal(ctx, "\n");
+  }
 #endif
 }
 
@@ -1193,7 +1279,7 @@ namespace __gnu_debug
       {
 	print_literal(ctx, "Backtrace:\n");
 	_M_backtrace_full(
-	  _M_backtrace_state, 1, print_backtrace, nullptr, &ctx);
+	  _M_backtrace_state, 1, print_backtrace, print_backtrace_error, &ctx);
 	ctx._M_first_line = true;
 	print_literal(ctx, "\n");
       }

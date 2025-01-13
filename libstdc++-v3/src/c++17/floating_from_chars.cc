@@ -1,6 +1,6 @@
 // std::from_chars implementation for floating-point types -*- C++ -*-
 
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -30,14 +30,18 @@
 // Prefer to use std::pmr::string if possible, which requires the cxx11 ABI.
 #define _GLIBCXX_USE_CXX11_ABI 1
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <bit>
+#include <iterator>
+#include <limits>
 #include <string>
 #include <memory_resource>
 #include <cfenv>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <locale.h>
@@ -59,15 +63,20 @@
 #endif
 // strtold for __ieee128
 extern "C" __ieee128 __strtoieee128(const char*, char**);
+#elif __FLT128_MANT_DIG__ == 113 && __LDBL_MANT_DIG__ != 113 \
+      && defined(__GLIBC_PREREQ) && defined(USE_STRTOD_FOR_FROM_CHARS)
+#define USE_STRTOF128_FOR_FROM_CHARS 1
+extern "C" _Float128 __strtof128(const char*, char**)
+  __asm ("strtof128")
+#ifndef _GLIBCXX_HAVE_FLOAT128_MATH
+  __attribute__((__weak__))
+#endif
+  ;
 #endif
 
 #if _GLIBCXX_FLOAT_IS_IEEE_BINARY32 && _GLIBCXX_DOUBLE_IS_IEEE_BINARY64 \
     && __SIZE_WIDTH__ >= 32
 # define USE_LIB_FAST_FLOAT 1
-# if __LDBL_MANT_DIG__ == __DBL_MANT_DIG__
-// No need to use strtold.
-#  undef USE_STRTOD_FOR_FROM_CHARS
-# endif
 #endif
 
 #if USE_LIB_FAST_FLOAT
@@ -584,6 +593,69 @@ namespace
     return buf.c_str();
   }
 
+  // RAII type to change and restore the locale.
+  struct auto_locale
+  {
+#if _GLIBCXX_HAVE_USELOCALE
+    // When we have uselocale we can change the current thread's locale.
+    const locale_t loc;
+    locale_t orig;
+
+    auto_locale()
+    : loc(::newlocale(LC_ALL_MASK, "C", (locale_t)0))
+    {
+      if (loc)
+	orig = ::uselocale(loc);
+      else
+	ec = errc{errno};
+    }
+
+    ~auto_locale()
+    {
+      if (loc)
+	{
+	  ::uselocale(orig);
+	  ::freelocale(loc);
+	}
+    }
+#else
+    // Otherwise, we can't change the locale and so strtod can't be used.
+    auto_locale() = delete;
+#endif
+
+    explicit operator bool() const noexcept { return ec == errc{}; }
+
+    errc ec{};
+
+    auto_locale(const auto_locale&) = delete;
+    auto_locale& operator=(const auto_locale&) = delete;
+  };
+
+  // RAII type to change and restore the floating-point environment.
+  struct auto_ferounding
+  {
+#if _GLIBCXX_USE_C99_FENV_TR1 && defined(FE_TONEAREST)
+    const int rounding = std::fegetround();
+
+    auto_ferounding()
+    {
+      if (rounding != FE_TONEAREST)
+	std::fesetround(FE_TONEAREST);
+    }
+
+    ~auto_ferounding()
+    {
+      if (rounding != FE_TONEAREST)
+	std::fesetround(rounding);
+    }
+#else
+    auto_ferounding() = default;
+#endif
+
+    auto_ferounding(const auto_ferounding&) = delete;
+    auto_ferounding& operator=(const auto_ferounding&) = delete;
+  };
+
   // Convert the NTBS `str` to a floating-point value of type `T`.
   // If `str` cannot be converted, `value` is unchanged and `0` is returned.
   // Otherwise, let N be the number of characters consumed from `str`.
@@ -594,16 +666,11 @@ namespace
   ptrdiff_t
   from_chars_impl(const char* str, T& value, errc& ec) noexcept
   {
-    if (locale_t loc = ::newlocale(LC_ALL_MASK, "C", (locale_t)0)) [[likely]]
+    auto_locale loc;
+
+    if (loc)
       {
-	locale_t orig = ::uselocale(loc);
-
-#if _GLIBCXX_USE_C99_FENV_TR1 && defined(FE_TONEAREST)
-	const int rounding = std::fegetround();
-	if (rounding != FE_TONEAREST)
-	  std::fesetround(FE_TONEAREST);
-#endif
-
+	auto_ferounding rounding;
 	const int save_errno = errno;
 	errno = 0;
 	char* endptr;
@@ -618,27 +685,34 @@ namespace
 # ifdef _GLIBCXX_LONG_DOUBLE_ALT128_COMPAT
 	else if constexpr (is_same_v<T, __ieee128>)
 	  tmpval = __strtoieee128(str, &endptr);
+# elif defined(USE_STRTOF128_FOR_FROM_CHARS)
+	else if constexpr (is_same_v<T, _Float128>)
+	  {
+#ifndef _GLIBCXX_HAVE_FLOAT128_MATH
+	    if (&__strtof128 == nullptr)
+	      tmpval = _Float128(std::strtold(str, &endptr));
+	    else
+#endif
+	      tmpval = __strtof128(str, &endptr);
+	  }
 # endif
 #else
 	tmpval = std::strtod(str, &endptr);
 #endif
 	const int conv_errno = std::__exchange(errno, save_errno);
 
-#if _GLIBCXX_USE_C99_FENV_TR1 && defined(FE_TONEAREST)
-	if (rounding != FE_TONEAREST)
-	  std::fesetround(rounding);
-#endif
-
-	::uselocale(orig);
-	::freelocale(loc);
-
 	const ptrdiff_t n = endptr - str;
 	if (conv_errno == ERANGE) [[unlikely]]
 	  {
 	    if (__builtin_isinf(tmpval)) // overflow
 	      ec = errc::result_out_of_range;
-	    else // underflow (LWG 3081 wants to set value = tmpval here)
+	    else if (tmpval == 0) // underflow (LWG 3081 wants to set value = tmpval here)
 	      ec = errc::result_out_of_range;
+	    else // denormal value
+	      {
+		value = tmpval;
+		ec = errc();
+	      }
 	  }
 	else if (n)
 	  {
@@ -647,8 +721,8 @@ namespace
 	  }
 	return n;
       }
-    else if (errno == ENOMEM)
-      ec = errc::not_enough_memory;
+    else
+      ec = loc.ec;
 
     return 0;
   }
@@ -759,11 +833,16 @@ namespace
     using uint_t = conditional_t<is_same_v<T, float>, uint32_t,
 				 conditional_t<is_same_v<T, double>, uint64_t,
 					       uint16_t>>;
+#if USE_LIB_FAST_FLOAT
     constexpr int mantissa_bits
       = fast_float::binary_format<T>::mantissa_explicit_bits();
     constexpr int exponent_bits
       = is_same_v<T, double> ? 11
 	: is_same_v<T, fast_float::floating_type_float16_t> ? 5 : 8;
+#else
+    constexpr int mantissa_bits = is_same_v<T, float> ? 23 : 52;
+    constexpr int exponent_bits = is_same_v<T, float> ? 8 : 11;
+#endif
     constexpr int exponent_bias = (1 << (exponent_bits - 1)) - 1;
 
     __glibcxx_requires_valid_range(first, last);
@@ -921,8 +1000,11 @@ namespace
 	else if (mantissa_idx >= -4)
 	  {
 	    if constexpr (is_same_v<T, float>
+#if USE_LIB_FAST_FLOAT
 			  || is_same_v<T,
-				       fast_float::floating_type_bfloat16_t>)
+				       fast_float::floating_type_bfloat16_t>
+#endif
+			 )
 	      {
 		__glibcxx_assert(mantissa_idx == -1);
 		mantissa |= hexit >> 1;
@@ -1106,6 +1188,7 @@ namespace
       }
     if constexpr (is_same_v<T, float> || is_same_v<T, double>)
       memcpy(&value, &result, sizeof(result));
+#if USE_LIB_FAST_FLOAT
     else if constexpr (is_same_v<T, fast_float::floating_type_bfloat16_t>)
       {
 	uint32_t res = uint32_t{result} << 16;
@@ -1132,6 +1215,7 @@ namespace
 		 | ((uint32_t{result} & 0x8000) << 16));
 	memcpy(value.x, &res, sizeof(res));
       }
+#endif
 
     return {first, errc{}};
   }
@@ -1173,7 +1257,7 @@ from_chars_result
 from_chars(const char* first, const char* last, long double& value,
 	   chars_format fmt) noexcept
 {
-#if ! USE_STRTOD_FOR_FROM_CHARS
+#if __LDBL_MANT_DIG__ == __DBL_MANT_DIG__ || !defined USE_STRTOD_FOR_FROM_CHARS
   // Either long double is the same as double, or we can't use strtold.
   // In the latter case, this might give an incorrect result (e.g. values
   // out of range of double give an error, even if they fit in long double).
@@ -1229,6 +1313,22 @@ __attribute__((alias ("_ZSt10from_charsPKcS0_RdSt12chars_format")));
 #ifdef _GLIBCXX_LONG_DOUBLE_ALT128_COMPAT
 from_chars_result
 from_chars(const char* first, const char* last, __ieee128& value,
+	   chars_format fmt) noexcept
+{
+  // fast_float doesn't support IEEE binary128 format, but we can use strtold.
+  return from_chars_strtod(first, last, value, fmt);
+}
+
+extern "C" from_chars_result
+_ZSt10from_charsPKcS0_RDF128_St12chars_format(const char* first,
+					      const char* last,
+					      __ieee128& value,
+					      chars_format fmt) noexcept
+__attribute__((alias ("_ZSt10from_charsPKcS0_Ru9__ieee128St12chars_format")));
+#elif defined(USE_STRTOF128_FOR_FROM_CHARS)
+// Overload for _Float128 is not defined inline in <charconv>, define it here.
+from_chars_result
+from_chars(const char* first, const char* last, _Float128& value,
 	   chars_format fmt) noexcept
 {
   // fast_float doesn't support IEEE binary128 format, but we can use strtold.

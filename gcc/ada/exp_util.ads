@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -25,6 +25,7 @@
 
 --  Package containing utility procedures used throughout the expander
 
+with Einfo.Utils;    use Einfo.Utils;
 with Exp_Tss;        use Exp_Tss;
 with Namet;          use Namet;
 with Rtsfind;        use Rtsfind;
@@ -351,6 +352,18 @@ package Exp_Util is
    --  is false, the call is for a stand-alone object, and the generated
    --  function itself must do its own cleanups.
 
+   function Build_Temporary_On_Secondary_Stack
+     (Loc  : Source_Ptr;
+      Typ  : Entity_Id;
+      Code : List_Id) return Entity_Id;
+   --  Build a temporary of type Typ on the secondary stack, appending the
+   --  necessary actions to Code, and return a constant holding the access
+   --  value designating this temporary, under the assumption that Typ does
+   --  not need finalization.
+
+   --  This should be used when Typ can potentially be large, to avoid putting
+   --  too much pressure on the primary stack, for example with storage models.
+
    procedure Build_Transient_Object_Statements
      (Obj_Decl     : Node_Id;
       Fin_Call     : out Node_Id;
@@ -360,9 +373,9 @@ package Exp_Util is
       Ptr_Decl     : out Node_Id;
       Finalize_Obj : Boolean := True);
    --  Subsidiary to the processing of transient objects in transient scopes,
-   --  if expressions, case expressions, expression_with_action nodes, array
-   --  aggregates, and record aggregates. Obj_Decl denotes the declaration of
-   --  the transient object. Generate the following nodes:
+   --  if expressions, case expressions, and expression_with_action nodes.
+   --  Obj_Decl denotes the declaration of the transient object. Generate the
+   --  following nodes:
    --
    --    * Fin_Call - the call to [Deep_]Finalize which cleans up the transient
    --    object if flag Finalize_Obj is set to True, or finalizes the hook when
@@ -387,16 +400,19 @@ package Exp_Util is
    --  since for floating-point, abs, unary "-", and unary "+" can never
    --  case overflow.
 
-   function Component_May_Be_Bit_Aligned (Comp : Entity_Id) return Boolean;
+   function Component_May_Be_Bit_Aligned
+     (Comp      : Entity_Id;
+      For_Slice : Boolean := False) return Boolean;
    --  This function is in charge of detecting record components that may cause
-   --  trouble for the back end if an attempt is made to access the component
-   --  as a whole. The back end can handle such accesses with no problem if the
-   --  components involved are small (64 bits or less) records or scalar items
+   --  trouble for the back end if an attempt is made to access the component,
+   --  either as a whole if For_Slice is False, or through an array slice if
+   --  For_Slice is True. The back end can handle such accesses only if the
+   --  components involved are small (64/128 bits or less) records or scalars
    --  (including bit-packed arrays represented with a modular type), or else
    --  if they are aligned on byte boundaries (i.e. starting on a byte boundary
    --  and occupying an integral number of bytes).
    --
-   --  However, problems arise for records larger than 64 bits, or for arrays
+   --  However problems arise for records larger than 64/128 bits or for arrays
    --  (other than bit-packed arrays represented with a modular type) if the
    --  component either does not start on a byte boundary or does not occupy an
    --  integral number of bytes (i.e. there are some bits possibly shared with
@@ -635,13 +651,6 @@ package Exp_Util is
    --  current declarative part to look for an address clause for the object
    --  being declared, and returns the clause if one is found, returns
    --  Empty otherwise.
-   --
-   --  Note: this function can be costly and must be invoked with special care.
-   --  Possibly we could introduce a flag at parse time indicating the presence
-   --  of an address clause to speed this up???
-   --
-   --  Note: currently this function does not scan the private part, that seems
-   --  like a potential bug ???
 
    type Force_Evaluation_Mode is (Relaxed, Strict);
 
@@ -660,7 +669,7 @@ package Exp_Util is
    --  of the same expression won't generate multiple side effects, whereas
    --  Force_Evaluation further guarantees that all evaluations will yield
    --  the same result. If Mode is Relaxed then calls to this subprogram have
-   --  no effect if Exp is side-effect free; if Mode is Strict and Exp is not
+   --  no effect if Exp is side-effect-free; if Mode is Strict and Exp is not
    --  a static expression then no side-effect check is performed on Exp and
    --  temporaries are unconditionally generated.
    --
@@ -732,6 +741,10 @@ package Exp_Util is
    function Has_Access_Constraint (E : Entity_Id) return Boolean;
    --  Given object or type E, determine if a discriminant is of an access type
 
+   function Has_Tag_Of_Type (Exp : Node_Id) return Boolean;
+   --  Return True if expression Exp of a tagged type is known to statically
+   --  have the tag of this tagged type as specified by RM 3.9(19-25).
+
    function Homonym_Number (Subp : Entity_Id) return Pos;
    --  Here subp is the entity for a subprogram. This routine returns the
    --  homonym number used to disambiguate overloaded subprograms in the same
@@ -757,12 +770,13 @@ package Exp_Util is
    --  Return a suitable standard integer type containing at least S bits and
    --  of the signedness given by Uns. See also Small_Integer_Type_For.
 
-   function Is_Displacement_Of_Object_Or_Function_Result
-     (Obj_Id : Entity_Id) return Boolean;
-   --  Determine whether Obj_Id is a source entity that has been initialized by
-   --  either a controlled function call or the assignment of another source
-   --  object. In both cases the initialization expression is rewritten as a
-   --  class-wide conversion of Ada.Tags.Displace.
+   function Is_Captured_Function_Call (N : Node_Id) return Boolean;
+   --  Return True if N is a captured function call, i.e. the result of calling
+   --  Remove_Side_Effects on an N_Function_Call node:
+
+   --    type Ann is access all Typ;
+   --    Rnn : constant Ann := Func (...)'reference;
+   --    Rnn.all
 
    function Is_Finalizable_Transient
      (Decl     : Node_Id;
@@ -817,6 +831,10 @@ package Exp_Util is
    --  Determine whether object Id is related to an expanded return statement.
    --  The case concerned is "return Id.all;".
 
+   --  This is effectively used to determine which temporaries generated for
+   --  return statements must be finalized because they are regular temporaries
+   --  and which ones must not be since they are allocated on the return stack.
+
    --  WARNING: There is a matching C declaration of this subprogram in fe.h
 
    function Is_Renamed_Object (N : Node_Id) return Boolean;
@@ -839,10 +857,21 @@ package Exp_Util is
 
    --  WARNING: There is a matching C declaration of this subprogram in fe.h
 
-   function Is_Tag_To_Class_Wide_Conversion
-     (Obj_Id : Entity_Id) return Boolean;
-   --  Determine whether object Obj_Id is the result of a tag-to-class-wide
-   --  type conversion.
+   function Is_Statically_Disabled
+     (N             : Node_Id;
+      Value         : Boolean;
+      Include_Valid : Boolean)
+      return Boolean
+   with Pre => Nkind (N) in N_Subexpr and then Is_Boolean_Type (Etype (N));
+   --  Returns whether N is a "statically disabled" condition which evaluates
+   --  to Value, as described in section 7.3.2 of SPARK User's Guide.
+   --
+   --  If Include_Valid is True, a reference to 'Valid or 'Valid_Scalar is
+   --  considered as disabled for Value=True, which is useful in GNATprove, as
+   --  proof considers that these attributes always return the value True. In
+   --  general, Include_Valid is set to True in the proof phase of GNATprove,
+   --  as 'Valid is assumed to always evaluate to True, but not in the flow
+   --  analysis phase of GNATprove, which does not make this assumption.
 
    function Is_Untagged_Derivation (T : Entity_Id) return Boolean;
    --  Returns true if type T is not tagged and is a derived type,
@@ -908,6 +937,17 @@ package Exp_Util is
    --  expression E. Unc_Typ is an unconstrained array or record, or a class-
    --  wide type. Set Related_Id to request an external name for the subtype
    --  rather than an internal temporary.
+
+   function Make_Tag_Assignment_From_Type
+     (Loc    : Source_Ptr;
+      Target : Node_Id;
+      Typ    : Entity_Id) return Node_Id
+   with
+     Pre => (not Is_Concurrent_Type (Typ));
+   --  Return an assignment of the tag of tagged type Typ to prefix Target,
+   --  which must be a record object of a descendant of Typ. Typ cannot be a
+   --  concurrent type; for concurrent types, the corresponding record types
+   --  should be passed to this function instead.
 
    function Make_Variant_Comparison
      (Loc      : Source_Ptr;
@@ -982,7 +1022,9 @@ package Exp_Util is
    --  address might be captured in a way we do not detect. A value of True is
    --  returned only if the replacement is safe.
 
-   function Possible_Bit_Aligned_Component (N : Node_Id) return Boolean;
+   function Possible_Bit_Aligned_Component
+     (N         : Node_Id;
+      For_Slice : Boolean := False) return Boolean;
    --  This function is used during processing the assignment of a record or an
    --  array, or the construction of an aggregate. The argument N is either the
    --  left or the right hand side of an assignment and the function determines
@@ -1032,12 +1074,12 @@ package Exp_Util is
    --  call and is analyzed and resolved on return. Name_Req may only be set to
    --  True if Exp has the form of a name, and the effect is to guarantee that
    --  any replacement maintains the form of name. If Renaming_Req is set to
-   --  True, the routine produces an object renaming reclaration capturing the
+   --  True, the routine produces an object renaming declaration capturing the
    --  expression. If Variable_Ref is set to True, a variable is considered as
    --  side effect (used in implementing Force_Evaluation). Note: after call to
    --  Remove_Side_Effects, it is safe to call New_Copy_Tree to obtain a copy
    --  of the resulting expression. If Check_Side_Effects is set to True then
-   --  no action is performed if Exp is known to be side-effect free.
+   --  no action is performed if Exp is known to be side-effect-free.
    --
    --  Related_Id denotes the entity of the context where Expr appears. Flags
    --  Is_Low_Bound and Is_High_Bound specify whether the expression to check
@@ -1168,7 +1210,7 @@ package Exp_Util is
      (L            : List_Id;
       Name_Req     : Boolean := False;
       Variable_Ref : Boolean := False) return Boolean;
-   --  Determines if all elements of the list L are side-effect free. Name_Req
+   --  Determines if all elements of the list L are side-effect-free. Name_Req
    --  and Variable_Ref are as described above.
 
    procedure Silly_Boolean_Array_Not_Test (N : Node_Id; T : Entity_Id);
@@ -1217,7 +1259,10 @@ package Exp_Util is
    --  extension to verify legality rules on inherited conditions.
 
    function Within_Case_Or_If_Expression (N : Node_Id) return Boolean;
-   --  Determine whether arbitrary node N is within a case or an if expression
+   --  Determine whether arbitrary node N is immediately within a dependent
+   --  expression of a case or an if expression. The criterion is whether
+   --  temporaries created by the actions attached to N need to outlive an
+   --  enclosing case or if expression.
 
 private
    pragma Inline (Duplicate_Subexpr);

@@ -1,5 +1,5 @@
 ; lang.opt -- Options for the D front end.
-; Copyright (C) 2006-2022 Free Software Foundation, Inc.
+; Copyright (C) 2006-2024 Free Software Foundation, Inc.
 ;
 ; GCC is free software; you can redistribute it and/or modify it under
 ; the terms of the GNU General Public License as published by the Free
@@ -133,6 +133,14 @@ D
 Werror
 D
 ; Documented in common.opt
+
+Wextra
+D Warning
+; Documented in common.opt
+
+Wmismatched-special-enum
+D Warning Var(warn_mismatched_special_enum) LangEnabledBy(D, Wextra)
+Warn when a special enum is declared with the wrong base type.
 
 Wpsabi
 D
@@ -283,6 +291,10 @@ fdump-d-original
 D
 Display the frontend AST after parsing and semantic passes.
 
+fexceptions
+D
+; Documented in common.opt
+
 fextern-std=
 D Joined RejectNegative Enum(extern_stdcpp) Var(flag_extern_stdcpp)
 -fextern-std=<standard>	Set C++ name mangling compatibility with <standard>.
@@ -360,10 +372,6 @@ fpreview=dip1021
 D RejectNegative
 Implement DIP1021: Mutable function arguments.
 
-fpreview=dip25
-D RejectNegative
-Implement DIP25: Sealed references.
-
 fpreview=dtorfields
 D RejectNegative
 Destruct fields of partially constructed objects.
@@ -412,17 +420,13 @@ frevert=dip1000
 D RejectNegative
 Revert DIP1000: Scoped pointers.
 
-frevert=dip25
-D RejectNegative
-Revert DIP25: Sealed references.
-
 frevert=dtorfields
 D RejectNegative
 Don't destruct fields of partially constructed objects.
 
 frevert=intpromote
 D RejectNegative
-Use C-style integral promotion for unary '+', '-' and '~'.
+Don't use C-style integral promotion for unary '+', '-' and '~'.
 
 frtti
 D

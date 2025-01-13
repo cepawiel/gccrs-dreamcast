@@ -1,5 +1,5 @@
 /* Preprocess only, using cpplib.
-   Copyright (C) 1995-2022 Free Software Foundation, Inc.
+   Copyright (C) 1995-2024 Free Software Foundation, Inc.
    Written by Per Bothner, 1994-95.
 
    This program is free software; you can redistribute it and/or modify it
@@ -162,6 +162,7 @@ init_pp_output (FILE *out_stream)
 
   cb->has_attribute = c_common_has_attribute;
   cb->has_builtin = c_common_has_builtin;
+  cb->has_feature = c_common_has_feature;
   cb->get_source_date_epoch = cb_get_source_date_epoch;
   cb->remap_filename = remap_macro_filename;
 
@@ -433,7 +434,15 @@ scan_translation_unit_directives_only (cpp_reader *pfile)
     lang_hooks.preprocess_token (pfile, NULL, streamer.filter);
 }
 
-/* Adjust print.src_line for newlines embedded in output.  */
+/* Adjust print.src_line for newlines embedded in output.  For example, if a raw
+   string literal contains newlines, then we need to increment our notion of the
+   current line to keep in sync and avoid outputting a line marker
+   unnecessarily.  If a raw string literal containing newlines is the result of
+   macro expansion, then we have the opposite problem, where the token takes up
+   more lines in the output than it did in the input, and hence a line marker is
+   needed to restore the correct state for subsequent lines.  In this case,
+   incrementing print.src_line still does the job, because it will cause us to
+   emit the line marker the next time a token is streamed.  */
 static void
 account_for_newlines (const unsigned char *str, size_t len)
 {
@@ -854,4 +863,9 @@ cb_read_pch (cpp_reader *pfile, const char *name,
 
   fprintf (print.outf, "#pragma GCC pch_preprocess \"%s\"\n", name);
   print.src_line++;
+
+  /* The process of reading the PCH has destroyed the frontend parser,
+     so ask the frontend to reinitialize it, in case we need it to
+     process any #pragma directives encountered while preprocessing.  */
+  c_init_preprocess ();
 }

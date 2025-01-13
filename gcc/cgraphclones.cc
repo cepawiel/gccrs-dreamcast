@@ -1,5 +1,5 @@
 /* Callgraph clones
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -78,11 +78,14 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-eh.h"
 #include "tree-cfg.h"
 #include "tree-inline.h"
+#include "attribs.h"
 #include "dumpfile.h"
 #include "gimple-pretty-print.h"
 #include "alloc-pool.h"
 #include "symbol-summary.h"
 #include "tree-vrp.h"
+#include "sreal.h"
+#include "ipa-cp.h"
 #include "ipa-prop.h"
 #include "ipa-fnsummary.h"
 #include "symtab-thunks.h"
@@ -218,7 +221,17 @@ duplicate_thunk_for_node (cgraph_node *thunk, cgraph_node *node)
       body_adj.modify_formal_parameters ();
     }
   else
-    new_decl = copy_node (thunk->decl);
+    {
+      new_decl = copy_node (thunk->decl);
+      for (tree *arg = &DECL_ARGUMENTS (new_decl);
+	   *arg; arg = &DECL_CHAIN (*arg))
+	{
+	  tree next = DECL_CHAIN (*arg);
+	  *arg = copy_node (*arg);
+	  DECL_CONTEXT (*arg) = new_decl;
+	  DECL_CHAIN (*arg) = next;
+	}
+    }
 
   gcc_checking_assert (!DECL_STRUCT_FUNCTION (new_decl));
   gcc_checking_assert (!DECL_INITIAL (new_decl));
@@ -425,7 +438,8 @@ cgraph_node::create_clone (tree new_decl, profile_count prof_count,
 	 version.  The only exception is when the edge was proved to
 	 be unreachable during the cloning procedure.  */
       if (!e->callee
-	  || !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE))
+	  || !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE,
+						  BUILT_IN_UNREACHABLE_TRAP))
         e->redirect_callee_duplicating_thunks (new_node);
     }
   new_node->expand_all_artificial_thunks ();
@@ -1037,7 +1051,17 @@ cgraph_node::create_version_clone_with_body
       location_t saved_loc = input_location;
       tree v = TREE_VALUE (target_attributes);
       input_location = DECL_SOURCE_LOCATION (new_decl);
-      bool r = targetm.target_option.valid_attribute_p (new_decl, NULL, v, 1);
+      bool r;
+      tree name_id = get_attribute_name (target_attributes);
+      const char *name_str = IDENTIFIER_POINTER (name_id);
+      if (strcmp (name_str, "target") == 0)
+	r = targetm.target_option.valid_attribute_p (new_decl, name_id, v, 1);
+      else if (strcmp (name_str, "target_version") == 0)
+	r = targetm.target_option.valid_version_attribute_p (new_decl, name_id,
+							     v, 1);
+      else
+	gcc_unreachable();
+
       input_location = saved_loc;
       if (!r)
 	return NULL;

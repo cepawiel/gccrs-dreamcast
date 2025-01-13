@@ -1,5 +1,5 @@
 /* Classes for managing a directed graph of <point, state> pairs.
-   Copyright (C) 2019-2022 Free Software Foundation, Inc.
+   Copyright (C) 2019-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -49,15 +49,19 @@ class impl_region_model_context : public region_model_context
 			     path_context *path_ctxt,
 
 			     const gimple *stmt,
-			     stmt_finder *stmt_finder = NULL);
+			     stmt_finder *stmt_finder = NULL,
+
+			     bool *out_could_have_done_work = nullptr);
 
   impl_region_model_context (program_state *state,
 			     const extrinsic_state &ext_state,
 			     uncertainty_t *uncertainty,
 			     logger *logger = NULL);
 
-  bool warn (pending_diagnostic *d) final override;
-  void add_note (pending_note *pn) final override;
+  bool warn (std::unique_ptr<pending_diagnostic> d,
+	     const stmt_finder *custom_finder = NULL) final override;
+  void add_note (std::unique_ptr<pending_note> pn) final override;
+  void add_event (std::unique_ptr<checker_event> event) final override;
   void on_svalue_leak (const svalue *) override;
   void on_liveness_change (const svalue_set &live_svalues,
 			   const region_model *model) final override;
@@ -77,6 +81,8 @@ class impl_region_model_context : public region_model_context
   void on_bounded_ranges (const svalue &sval,
 			  const bounded_ranges &ranges) final override;
 
+  void on_pop_frame (const frame_region *frame_reg) final override;
+
   void on_unknown_change (const svalue *sval, bool is_mutable) final override;
 
   void on_phi (const gphi *phi, tree rhs) final override;
@@ -90,18 +96,25 @@ class impl_region_model_context : public region_model_context
 
   void purge_state_involving (const svalue *sval) final override;
 
-  void bifurcate (custom_edge_info *info) final override;
+  void bifurcate (std::unique_ptr<custom_edge_info> info) final override;
   void terminate_path () final override;
   const extrinsic_state *get_ext_state () const final override
   {
     return &m_ext_state;
   }
-  bool get_state_map_by_name (const char *name,
-			      sm_state_map **out_smap,
-			      const state_machine **out_sm,
-			      unsigned *out_sm_idx) override;
+  bool
+  get_state_map_by_name (const char *name,
+			 sm_state_map **out_smap,
+			 const state_machine **out_sm,
+			 unsigned *out_sm_idx,
+			 std::unique_ptr<sm_context> *out_sm_context) override;
 
   const gimple *get_stmt () const override { return m_stmt; }
+  const exploded_graph *get_eg () const override { return m_eg; }
+
+  void maybe_did_work () override;
+  bool checking_for_infinite_loop_p () const override { return false; }
+  void on_unusable_in_infinite_loop () override {}
 
   exploded_graph *m_eg;
   log_user m_logger;
@@ -113,6 +126,7 @@ class impl_region_model_context : public region_model_context
   const extrinsic_state &m_ext_state;
   uncertainty_t *m_uncertainty;
   path_context *m_path_ctxt;
+  bool *m_out_could_have_done_work;
 };
 
 /* A <program_point, program_state> pair, used internally by
@@ -253,6 +267,7 @@ class exploded_node : public dnode<eg_traits>
 			 const gimple *stmt,
 			 program_state *state,
 			 uncertainty_t *uncertainty,
+			 bool *out_could_have_done_work,
 			 path_context *path_ctxt);
   void on_stmt_pre (exploded_graph &eg,
 		    const gimple *stmt,
@@ -270,15 +285,15 @@ class exploded_node : public dnode<eg_traits>
 				       const gcall *call_stmt,
 				       program_state *state,
 				       path_context *path_ctxt,
-				       function *called_fn,
-				       per_function_data *called_fn_data,
+				       const function &called_fn,
+				       per_function_data &called_fn_data,
 				       region_model_context *ctxt);
   void replay_call_summary (exploded_graph &eg,
 			    const supernode *snode,
 			    const gcall *call_stmt,
 			    program_state *state,
 			    path_context *path_ctxt,
-			    function *called_fn,
+			    const function &called_fn,
 			    call_summary *summary,
 			    region_model_context *ctxt);
 
@@ -366,9 +381,8 @@ class exploded_edge : public dedge<eg_traits>
 {
  public:
   exploded_edge (exploded_node *src, exploded_node *dest,
-		 const superedge *sedge,
-		 custom_edge_info *custom_info);
-  ~exploded_edge ();
+		 const superedge *sedge, bool could_do_work,
+		 std::unique_ptr<custom_edge_info> custom_info);
   void dump_dot (graphviz_out *gv, const dump_args_t &args)
     const final override;
   void dump_dot_label (pretty_printer *pp) const;
@@ -380,13 +394,28 @@ class exploded_edge : public dedge<eg_traits>
 
   /* NULL for most edges; will be non-NULL for special cases
      such as an unwind from a longjmp to a setjmp, or when
-     a signal is delivered to a signal-handler.
+     a signal is delivered to a signal-handler.  */
+  std::unique_ptr<custom_edge_info> m_custom_info;
 
-     Owned by this class.  */
-  custom_edge_info *m_custom_info;
+  bool could_do_work_p () const { return m_could_do_work_p; }
 
 private:
   DISABLE_COPY_AND_ASSIGN (exploded_edge);
+
+  /* For -Wanalyzer-infinite-loop.
+     Set to true during processing if any of the activity along
+     this edge is "externally-visible work" (and thus ruling this
+     out as being part of an infinite loop.
+
+     For example, given:
+
+     while (1)
+       do_something ();
+
+     although it is an infinite loop, presumably the point of the
+     program is the loop body, and thus reporting this as an infinite
+     loop is likely to be unhelpful to the user.  */
+  bool m_could_do_work_p;
 };
 
 /* Extra data for an exploded_edge that represents dynamic call info ( calls
@@ -781,7 +810,7 @@ public:
 
   exploded_node *get_origin () const { return m_origin; }
 
-  exploded_node *add_function_entry (function *fun);
+  exploded_node *add_function_entry (const function &fun);
 
   void build_initial_worklist ();
   void process_worklist ();
@@ -800,8 +829,8 @@ public:
 				     const program_state &state,
 				     exploded_node *enode_for_diag);
   exploded_edge *add_edge (exploded_node *src, exploded_node *dest,
-			   const superedge *sedge,
-			   custom_edge_info *custom = NULL);
+			   const superedge *sedge, bool could_do_work,
+			   std::unique_ptr<custom_edge_info> custom = NULL);
 
   per_program_point_data *
   get_or_create_per_program_point_data (const program_point &);
@@ -851,6 +880,14 @@ public:
   }
 
   void on_escaped_function (tree fndecl);
+
+  /* In infinite-loop.cc */
+  void detect_infinite_loops ();
+
+  /* In infinite-recursion.cc */
+  void detect_infinite_recursion (exploded_node *enode);
+  exploded_node *find_previous_entry_to (function *top_of_stack_fun,
+					 exploded_node *enode) const;
 
 private:
   void print_bar_charts (pretty_printer *pp) const;
@@ -926,7 +963,7 @@ public:
   void dump_to_file (const char *filename,
 		     const extrinsic_state &ext_state) const;
 
-  bool feasible_p (logger *logger, feasibility_problem **out,
+  bool feasible_p (logger *logger, std::unique_ptr<feasibility_problem> *out,
 		    engine *eng, const exploded_graph *eg) const;
 
   auto_vec<const exploded_edge *> m_edges;
@@ -940,18 +977,17 @@ public:
   feasibility_problem (unsigned eedge_idx,
 		       const exploded_edge &eedge,
 		       const gimple *last_stmt,
-		       rejected_constraint *rc)
+		       std::unique_ptr<rejected_constraint> rc)
   : m_eedge_idx (eedge_idx), m_eedge (eedge),
-    m_last_stmt (last_stmt), m_rc (rc)
+    m_last_stmt (last_stmt), m_rc (std::move (rc))
   {}
-  ~feasibility_problem () { delete m_rc; }
 
   void dump_to_pp (pretty_printer *pp) const;
 
   unsigned m_eedge_idx;
   const exploded_edge &m_eedge;
   const gimple *m_last_stmt;
-  rejected_constraint *m_rc;
+  std::unique_ptr<rejected_constraint> m_rc;
 };
 
 /* A class for capturing the state of a node when checking a path
@@ -962,11 +998,17 @@ class feasibility_state
 public:
   feasibility_state (region_model_manager *manager,
 		     const supergraph &sg);
+  feasibility_state (const region_model &model,
+		     const supergraph &sg);
   feasibility_state (const feasibility_state &other);
+
+  feasibility_state &operator= (const feasibility_state &other);
 
   bool maybe_update_for_edge (logger *logger,
 			      const exploded_edge *eedge,
-			      rejected_constraint **out_rc);
+			      region_model_context *ctxt,
+			      std::unique_ptr<rejected_constraint> *out_rc);
+  void update_for_stmt (const gimple *stmt);
 
   const region_model &get_model () const { return m_model; }
   const auto_sbitmap &get_snodes_visited () const { return m_snodes_visited; }
@@ -991,7 +1033,7 @@ class stmt_finder
 {
 public:
   virtual ~stmt_finder () {}
-  virtual stmt_finder *clone () const = 0;
+  virtual std::unique_ptr<stmt_finder> clone () const = 0;
   virtual const gimple *find_stmt (const exploded_path &epath) = 0;
 };
 

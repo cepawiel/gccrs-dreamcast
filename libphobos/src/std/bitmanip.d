@@ -89,22 +89,21 @@ private template createAccessors(
     }
     else
     {
-        enum ulong
-            maskAllElse = ((~0uL) >> (64 - len)) << offset,
-            signBitCheck = 1uL << (len - 1);
+        enum ulong maskAllElse = ((~0uL) >> (64 - len)) << offset;
+        enum TSize = 8 * T.sizeof;
+        enum SignShift = TSize - len;
 
         static if (T.min < 0)
         {
             enum long minVal = -(1uL << (len - 1));
             enum ulong maxVal = (1uL << (len - 1)) - 1;
-            alias UT = Unsigned!(T);
-            enum UT extendSign = cast(UT)~((~0uL) >> (64 - len));
+            enum RightShiftOp = ">>=";
         }
         else
         {
             enum ulong minVal = 0;
             enum ulong maxVal = (~0uL) >> (64 - len);
-            enum extendSign = 0;
+            enum RightShiftOp = ">>>=";
         }
 
         static if (is(T == bool))
@@ -121,15 +120,11 @@ private template createAccessors(
         else
         {
             // getter
-            enum createAccessors = "@property "~T.stringof~" "~name~"() @safe pure nothrow @nogc const { auto result = "
-                ~"("~store~" & "
-                ~ myToString(maskAllElse) ~ ") >>"
-                ~ myToString(offset) ~ ";"
-                ~ (T.min < 0
-                   ? "if (result >= " ~ myToString(signBitCheck)
-                   ~ ") result |= " ~ myToString(extendSign) ~ ";"
-                   : "")
-                ~ " return cast("~T.stringof~") result;}\n"
+            enum createAccessors = "@property "~T.stringof~" "~name~"() @safe pure nothrow @nogc const {"
+                ~ "auto result = cast("~T.stringof~") (" ~ store ~ " >>" ~ myToString(offset) ~ ");"
+                ~ "result <<= " ~ myToString(SignShift) ~ ";"
+                ~ "result " ~ RightShiftOp ~ myToString(SignShift) ~ ";"
+                ~ " return result;}\n"
             // setter
                 ~"@property void "~name~"("~T.stringof~" v) @safe pure nothrow @nogc { "
                 ~"assert(v >= "~name~`_min, "Value is smaller than the minimum value of bitfield '`~name~`'"); `
@@ -268,9 +263,9 @@ Implementation_details: `Bitfields` are internally stored in an
 `ubyte`, `ushort`, `uint` or `ulong` depending on the number of bits
 used. The bits are filled in the order given by the parameters,
 starting with the lowest significant bit. The name of the (private)
-variable used for saving the `bitfield` is created by a prefix `_bf`
-and concatenating all of the variable names, each preceded by an
-underscore.
+variable used for saving the `bitfield` is created by concatenating
+all of the variable names, each preceded by an underscore, and
+a suffix `_bf`.
 
 Params: T = A list of template parameters divided into chunks of 3
             items. Each chunk consists (in this order) of a type, a
@@ -284,10 +279,8 @@ See_Also: $(REF BitFlags, std,typecons)
 */
 string bitfields(T...)()
 {
-    import std.conv : to;
-
     static assert(T.length % 3 == 0,
-                  "Wrong number of arguments (" ~ to!string(T.length) ~ "): Must be a multiple of 3");
+                  "Wrong number of arguments (" ~ T.length.stringof ~ "): Must be a multiple of 3");
 
     static foreach (i, ARG; T)
     {
@@ -1418,9 +1411,9 @@ public:
     /**
       Flips a single bit, specified by `pos`
      */
-    void flip(size_t i) @nogc pure nothrow
+    void flip(size_t pos) @nogc pure nothrow
     {
-        bt(_ptr, i) ? btr(_ptr, i) : bts(_ptr, i);
+        bt(_ptr, pos) ? btr(_ptr, pos) : bts(_ptr, pos);
     }
 
     ///

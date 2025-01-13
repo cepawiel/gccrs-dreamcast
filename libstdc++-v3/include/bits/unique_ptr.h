@@ -1,6 +1,7 @@
+
 // unique_ptr implementation -*- C++ -*-
 
-// Copyright (C) 2008-2022 Free Software Foundation, Inc.
+// Copyright (C) 2008-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -40,14 +41,6 @@
 # include <compare>
 # if _GLIBCXX_HOSTED
 #  include <ostream>
-# endif
-#endif
-
-#if __cplusplus > 202002L && __cpp_constexpr_dynamic_alloc
-# if __cpp_lib_constexpr_memory < 202202L
-// Defined with older value in bits/ptr_traits.h for C++20
-#  undef __cpp_lib_constexpr_memory
-#  define __cpp_lib_constexpr_memory 202202L
 # endif
 #endif
 
@@ -522,6 +515,14 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // Disable copy from lvalue.
       unique_ptr(const unique_ptr&) = delete;
       unique_ptr& operator=(const unique_ptr&) = delete;
+
+    private:
+#ifdef __glibcxx_out_ptr
+      template<typename, typename, typename...>
+	friend class out_ptr_t;
+      template<typename, typename, typename...>
+	friend class inout_ptr_t;
+#endif
   };
 
   // 20.7.1.3 unique_ptr for array objects with a runtime length
@@ -796,6 +797,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       // Disable copy from lvalue.
       unique_ptr(const unique_ptr&) = delete;
       unique_ptr& operator=(const unique_ptr&) = delete;
+
+    private:
+#ifdef __glibcxx_out_ptr
+      template<typename, typename, typename...> friend class out_ptr_t;
+      template<typename, typename, typename...> friend class inout_ptr_t;
+#endif
     };
 
   /// @{
@@ -1030,9 +1037,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       public __uniq_ptr_hash<unique_ptr<_Tp, _Dp>>
     { };
 
-#if __cplusplus >= 201402L && _GLIBCXX_HOSTED
-#define __cpp_lib_make_unique 201304L
-
+#ifdef __glibcxx_make_unique // C++ >= 14 && HOSTED
   /// @cond undocumented
 namespace __detail
 {
@@ -1148,6 +1153,13 @@ namespace __detail
       return __os;
     }
 #endif // C++20 && HOSTED
+
+#if __cpp_variable_templates
+  template<typename _Tp>
+    static constexpr bool __is_unique_ptr = false;
+  template<typename _Tp, typename _Del>
+    static constexpr bool __is_unique_ptr<unique_ptr<_Tp, _Del>> = true;
+#endif
 
   /// @} group pointer_abstractions
 

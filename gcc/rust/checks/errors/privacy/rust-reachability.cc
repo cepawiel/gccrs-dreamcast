@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -132,7 +132,7 @@ ReachabilityVisitor::visit (HIR::StructStruct &struct_item)
     {
       for (auto &field : struct_item.get_fields ())
 	if (field.get_visibility ().is_public ())
-	  ctx.update_reachability (field.get_field_type ()->get_mappings (),
+	  ctx.update_reachability (field.get_field_type ().get_mappings (),
 				   struct_reach);
     }
 
@@ -140,7 +140,7 @@ ReachabilityVisitor::visit (HIR::StructStruct &struct_item)
 }
 
 void
-ReachabilityVisitor::visit (HIR::TupleStruct &tuple_struct)
+ReachabilityVisitor::visit (HIR::TupleStruct &)
 {}
 
 void
@@ -227,7 +227,7 @@ ReachabilityVisitor::visit (HIR::ImplBlock &impl)
 }
 
 void
-ReachabilityVisitor::visit (HIR::ExternBlock &block)
+ReachabilityVisitor::visit (HIR::ExternBlock &)
 {}
 
 // FIXME: How can we visit Blocks in the current configuration? Have a full

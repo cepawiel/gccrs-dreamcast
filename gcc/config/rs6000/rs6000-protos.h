@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for IBM RS/6000.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2024 Free Software Foundation, Inc.
    Contributed by Richard Kenner (kenner@vlsi1.ultra.nyu.edu)
 
    This file is part of GCC.
@@ -32,9 +32,13 @@ extern void init_cumulative_args (CUMULATIVE_ARGS *, tree, rtx, int, int, int,
 
 extern int easy_altivec_constant (rtx, machine_mode);
 extern bool xxspltib_constant_p (rtx, machine_mode, int *, int *);
+extern bool vspltisw_vupkhsw_constant_p (rtx, machine_mode, int * = nullptr);
 extern int vspltis_shifted (rtx);
 extern HOST_WIDE_INT const_vector_elt_as_int (rtx, unsigned int);
 extern bool macho_lo_sum_memory_operand (rtx, machine_mode);
+extern bool can_be_rotated_to_lowbits (unsigned HOST_WIDE_INT, int, int *);
+extern bool can_be_rotated_to_positive_16bits (HOST_WIDE_INT);
+extern bool can_be_rotated_to_negative_15bits (HOST_WIDE_INT);
 extern int num_insns_constant (rtx, machine_mode);
 extern int small_data_operand (rtx, machine_mode);
 extern bool mem_operand_gpr (rtx, machine_mode);
@@ -331,6 +335,8 @@ extern unsigned char rs6000_class_max_nregs[][LIM_REG_CLASSES];
 extern unsigned char rs6000_hard_regno_nregs[][FIRST_PSEUDO_REGISTER];
 
 extern bool rs6000_linux_float_exceptions_rounding_supported_p (void);
+extern unsigned rs6000_linux_libm_function_max_error (unsigned, machine_mode,
+						      bool);
 
 /* Pass management.  */
 namespace gcc { class context; }
@@ -344,4 +350,6 @@ extern rtx rs6000_gen_lvx (enum machine_mode, rtx, rtx);
 extern rtx rs6000_gen_stvx (enum machine_mode, rtx, rtx);
 
 extern void rs6000_emit_xxspltidp_v2df (rtx, long value);
+extern gimple *currently_expanding_gimple_stmt;
+extern bool rs6000_opaque_type_invalid_use_p (gimple *);
 #endif  /* rs6000-protos.h */

@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,7 +21,11 @@
 
 #include "rust-ast-resolve-base.h"
 #include "rust-ast-resolve-expr.h"
-#include "rust-ast-full.h"
+#include "rust-diagnostics.h"
+#include "rust-hir-map.h"
+#include "rust-path.h"
+#include "rust-type.h"
+#include "util/rust-hir-map.h"
 
 namespace Rust {
 namespace Resolver {
@@ -57,20 +61,51 @@ class ResolveType : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static NodeId go (AST::Type *type)
+  static NodeId go (AST::TypePath &type_path)
+  {
+    return ResolveType::go ((AST::Type &) type_path);
+  }
+
+  static NodeId go (AST::Path &type_path)
+  {
+    if (type_path.get_path_kind () == AST::Path::Kind::LangItem)
+      {
+	auto &type = static_cast<AST::LangItemPath &> (type_path);
+
+	auto lang_item = Analysis::Mappings::get ()
+			   .lookup_lang_item_node (type.get_lang_item_kind ())
+			   .value ();
+
+	auto resolver = Resolver::get ();
+	resolver->insert_resolved_type (type.get_node_id (), lang_item);
+
+	return lang_item;
+      }
+
+    rust_assert (type_path.get_path_kind () == AST::Path::Kind::Type);
+
+    // We have to do this dance to first downcast to a typepath, and then upcast
+    // to a Type. The altnernative is to split `go` into `go` and `go_inner` or
+    // something, but eventually this will need to change as we'll need
+    // `ResolveType::` to resolve other kinds of `Path`s as well.
+    return ResolveType::go (
+      (AST::Type &) static_cast<AST::TypePath &> (type_path));
+  }
+
+  static NodeId go (AST::Type &type)
   {
     ResolveType resolver;
-    type->accept_vis (resolver);
+    type.accept_vis (resolver);
     return resolver.resolved_node;
   }
 
   void visit (AST::BareFunctionType &fntype) override
   {
     for (auto &param : fntype.get_function_params ())
-      ResolveType::go (param.get_type ().get ());
+      ResolveType::go (param.get_type ());
 
     if (fntype.has_return_type ())
-      ResolveType::go (fntype.get_return_type ().get ());
+      ResolveType::go (fntype.get_return_type ());
   }
 
   void visit (AST::TupleType &tuple) override
@@ -82,7 +117,7 @@ public:
       }
 
     for (auto &elem : tuple.get_elems ())
-      ResolveType::go (elem.get ());
+      ResolveType::go (*elem);
   }
 
   void visit (AST::TypePath &path) override
@@ -109,6 +144,8 @@ public:
 
   void visit (AST::TraitObjectType &type) override;
 
+  void visit (AST::ParenthesisedType &type) override;
+
   void visit (AST::SliceType &type) override;
 
 private:
@@ -120,16 +157,16 @@ class ResolveTypeBound : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static NodeId go (AST::TypeParamBound *type)
+  static NodeId go (AST::TypeParamBound &type)
   {
     ResolveTypeBound resolver;
-    type->accept_vis (resolver);
+    type.accept_vis (resolver);
     return resolver.resolved_node;
   };
 
   void visit (AST::TraitBound &bound) override
   {
-    resolved_node = ResolveType::go (&bound.get_type_path ());
+    resolved_node = ResolveType::go (bound.get_type_path ());
   }
 
 private:
@@ -141,21 +178,21 @@ class ResolveGenericParam : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static NodeId go (AST::GenericParam *param, const CanonicalPath &prefix,
+  static NodeId go (AST::GenericParam &param, const CanonicalPath &prefix,
 		    const CanonicalPath &canonical_prefix)
   {
     ResolveGenericParam resolver (prefix, canonical_prefix);
-    param->accept_vis (resolver);
+    param.accept_vis (resolver);
     return resolver.resolved_node;
   }
 
   void visit (AST::ConstGenericParam &param) override
   {
-    ResolveType::go (param.get_type ().get ());
+    ResolveType::go (param.get_type ());
 
     if (param.has_default_value ())
-      ResolveExpr::go (param.get_default_value ().get_expression ().get (),
-		       prefix, canonical_prefix);
+      ResolveExpr::go (param.get_default_value ().get_expression (), prefix,
+		       canonical_prefix);
 
     ok = true;
   }
@@ -164,27 +201,28 @@ public:
   {
     // if it has a type lets resolve it
     if (param.has_type ())
-      ResolveType::go (param.get_type ().get ());
+      ResolveType::go (param.get_type ());
 
     if (param.has_type_param_bounds ())
       {
 	for (auto &bound : param.get_type_param_bounds ())
 	  {
-	    ResolveTypeBound::go (bound.get ());
+	    ResolveTypeBound::go (*bound);
 	  }
       }
 
-    auto seg = CanonicalPath::new_seg (param.get_node_id (),
-				       param.get_type_representation ());
+    auto seg
+      = CanonicalPath::new_seg (param.get_node_id (),
+				param.get_type_representation ().as_string ());
     resolver->get_type_scope ().insert (
-      seg, param.get_node_id (), param.get_locus (), false,
-      [&] (const CanonicalPath &, NodeId, Location locus) -> void {
+      seg, param.get_node_id (), param.get_locus (), false, Rib::ItemType::Type,
+      [&] (const CanonicalPath &, NodeId, location_t locus) -> void {
 	rust_error_at (param.get_locus (),
 		       "generic param redefined multiple times");
 	rust_error_at (locus, "was defined here");
       });
 
-    mappings->insert_canonical_path (param.get_node_id (), seg);
+    mappings.insert_canonical_path (param.get_node_id (), seg);
   }
 
 private:
@@ -213,12 +251,12 @@ public:
 
   void visit (AST::TypeBoundWhereClauseItem &item) override
   {
-    ResolveType::go (item.get_type ().get ());
+    ResolveType::go (item.get_type ());
     if (item.has_type_param_bounds ())
       {
 	for (auto &bound : item.get_type_param_bounds ())
 	  {
-	    ResolveTypeBound::go (bound.get ());
+	    ResolveTypeBound::go (*bound);
 	  }
       }
   }
@@ -232,7 +270,7 @@ class ResolveTypeToCanonicalPath : public ResolverBase
   using Rust::Resolver::ResolverBase::visit;
 
 public:
-  static bool go (AST::Type *type, CanonicalPath &result);
+  static bool go (AST::Type &type, CanonicalPath &result);
 
   void visit (AST::TypePath &path) override;
 
@@ -245,6 +283,10 @@ public:
   void visit (AST::TraitObjectTypeOneBound &type) override;
 
   void visit (AST::TraitObjectType &type) override;
+
+  void visit (AST::NeverType &type) override;
+
+  void visit (AST::TupleType &type) override;
 
 private:
   ResolveTypeToCanonicalPath ();

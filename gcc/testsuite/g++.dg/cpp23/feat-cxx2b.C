@@ -134,8 +134,8 @@
 
 #ifndef __cpp_constexpr
 #  error "__cpp_constexpr"
-#elif __cpp_constexpr != 202110
-#  error "__cpp_constexpr != 202110"
+#elif __cpp_constexpr != 202211
+#  error "__cpp_constexpr != 202211"
 #endif
 
 #ifndef __cpp_decltype_auto
@@ -480,8 +480,8 @@
 
 #ifndef __cpp_consteval
 #  error "__cpp_consteval"
-#elif __cpp_consteval != 201811
-#  error "__cpp_consteval != 201811"
+#elif __cpp_consteval != 202211L
+#  error "__cpp_consteval != 202211L"
 #endif
 
 #ifndef __cpp_concepts
@@ -556,8 +556,8 @@
 
 #ifndef __cpp_multidimensional_subscript
 #  error "__cpp_multidimensional_subscript"
-#elif __cpp_multidimensional_subscript != 202110
-#  error "__cpp_multidimensional_subscript != 202110"
+#elif __cpp_multidimensional_subscript != 202211
+#  error "__cpp_multidimensional_subscript != 202211"
 #endif
 
 #ifndef __cpp_named_character_escapes
@@ -576,6 +576,18 @@
 #  error "__cpp_implicit_move"
 #elif __cpp_implicit_move != 202207
 #  error "__cpp_implicit_move != 202207"
+#endif
+
+#ifndef __cpp_explicit_this_parameter
+#  error "__cpp_explicit_this_parameter"
+#elif __cpp_explicit_this_parameter != 202110
+#  error "__cpp_explicit_this_parameter != 202110"
+#endif
+
+#ifndef __cpp_auto_cast
+#  error "__cpp_auto_cast"
+#elif __cpp_auto_cast != 202110
+#  error "__cpp_auto_cast != 202110"
 #endif
 
 //  C++23 attributes:

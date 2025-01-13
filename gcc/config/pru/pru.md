@@ -1,5 +1,5 @@
 ;; Machine Description for TI PRU.
-;; Copyright (C) 2014-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2014-2024 Free Software Foundation, Inc.
 ;; Contributed by Dimitar Dimitrov <dimitar@dinux.eu>
 ;; Based on the NIOS2 GCC port.
 ;;
@@ -1489,6 +1489,68 @@
     gcc_unreachable ();
 })
 
+;; Emit efficient code for two specific cstore cases:
+;;   X == 0
+;;   X != 0
+;;
+;; These can be efficiently compiled on the PRU using the umin
+;; instruction.
+;;
+;; This expansion does not handle "X > 0 unsigned" and "X >= 1 unsigned"
+;; because it is assumed that those would have been replaced with the
+;; canonical "X != 0".
+(define_expand "cstore<mode>4"
+  [(set (match_operand:QISI 0 "register_operand")
+	(match_operator:QISI 1 "pru_cstore_comparison_operator"
+	  [(match_operand:QISI 2 "register_operand")
+	   (match_operand:QISI 3 "const_0_operand")]))]
+  ""
+{
+  const enum rtx_code op1code = GET_CODE (operands[1]);
+
+  /* Crash if OP1 is GTU.  It would mean that "X > 0 unsigned"
+     had not been canonicalized before calling this expansion.  */
+  gcc_assert (op1code == NE || op1code == EQ);
+  gcc_assert (CONST_INT_P (operands[3]) && INTVAL (operands[3]) == 0);
+
+  if (op1code == NE)
+    {
+      emit_insn (gen_umin<mode>3 (operands[0], operands[2], const1_rtx));
+      DONE;
+    }
+  else if (op1code == EQ)
+    {
+      rtx tmpval = gen_reg_rtx (<MODE>mode);
+      emit_insn (gen_umin<mode>3 (tmpval, operands[2], const1_rtx));
+      emit_insn (gen_xor<mode>3 (operands[0], tmpval, const1_rtx));
+      DONE;
+    }
+
+  gcc_unreachable ();
+})
+
+(define_expand "cstoredi4"
+  [(set (match_operand:SI 0 "register_operand")
+	(match_operator:SI 1 "pru_cstore_comparison_operator"
+	  [(match_operand:DI 2 "register_operand")
+	   (match_operand:DI 3 "const_0_operand")]))]
+  ""
+{
+  /* Combining the two SImode suboperands with IOR works only for
+     the currently supported set of cstoresi3 operations.  */
+  const enum rtx_code op1code = GET_CODE (operands[1]);
+  gcc_assert (op1code == NE || op1code == EQ);
+  gcc_assert (CONST_INT_P (operands[3]) && INTVAL (operands[3]) == 0);
+
+  rtx tmpval = gen_reg_rtx (SImode);
+  rtx src_lo = simplify_gen_subreg (SImode, operands[2], DImode, 0);
+  rtx src_hi = simplify_gen_subreg (SImode, operands[2], DImode, 4);
+  emit_insn (gen_iorsi3 (tmpval, src_lo, src_hi));
+  emit_insn (gen_cstoresi4 (operands[0], operands[1], tmpval, const0_rtx));
+
+  DONE;
+})
+
 ;
 ; Bit test branch
 
@@ -1723,8 +1785,16 @@
   [(set_attr "type" "control")])
 
 ;; Count Leading Zeros implemented using LMBD.
-;; LMBD returns 32 if bit value is not present, and we subtract 31 to get CLZ.
-;; Hence we get a defined value -1 for CLZ_DEFINED_VALUE_AT_ZERO.
+;;
+;; LMBD returns 32 if bit value is not present, for any kind of input MODE.
+;; The LMBD's search result for a "1" bit is subtracted from the
+;; mode bit size minus one, in order to get CLZ.
+;;
+;; Hence for SImode we get a defined value -1 for CLZ_DEFINED_VALUE_AT_ZERO.
+;;
+;; The QImode and HImode defined values for zero inputs end up to be
+;; non-standard (-25 and -17).  But this is considered acceptable in
+;; order to keep the CLZ expansion to only two instructions.
 (define_expand "clz<mode>2"
   [(set (match_operand:QISI 0 "register_operand")
 	(clz:QISI (match_operand:QISI 1 "register_operand")))]
@@ -1735,7 +1805,8 @@
   rtx tmpval = gen_reg_rtx (<MODE>mode);
 
   emit_insn (gen_pru_lmbd (<MODE>mode, tmpval, src, const1_rtx));
-  emit_insn (gen_sub3_insn (dst, GEN_INT (31), tmpval));
+  int msb_bitn = GET_MODE_BITSIZE (<MODE>mode) - 1;
+  emit_insn (gen_sub3_insn (dst, GEN_INT (msb_bitn), tmpval));
   DONE;
 })
 

@@ -1,4 +1,4 @@
-/* Copyright (C) 1989-2022 Free Software Foundation, Inc.
+/* Copyright (C) 1989-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -124,6 +124,10 @@ typedef __gnuc_va_list va_list;
 #endif /* not _VA_LIST_, except on certain systems */
 
 #endif /* not __svr4__ */
+
+#if defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L
+#define __STDC_VERSION_STDARG_H__	202311L
+#endif
 
 #endif /* _STDARG_H */
 

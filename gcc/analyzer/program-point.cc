@@ -1,5 +1,5 @@
 /* Classes for representing locations within the program.
-   Copyright (C) 2019-2022 Free Software Foundation, Inc.
+   Copyright (C) 2019-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -19,6 +19,7 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #include "config.h"
+#define INCLUDE_MEMORY
 #include "system.h"
 #include "coretypes.h"
 #include "tree.h"
@@ -51,6 +52,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "shortest-paths.h"
 #include "analyzer/exploded-graph.h"
 #include "analyzer/analysis-plan.h"
+#include "analyzer/inlining-iterator.h"
 
 #if ENABLE_ANALYZER
 
@@ -228,7 +230,7 @@ function_point::final_stmt_p () const
 /* Create a function_point representing the entrypoint of function FUN.  */
 
 function_point
-function_point::from_function_entry (const supergraph &sg, function *fun)
+function_point::from_function_entry (const supergraph &sg, const function &fun)
 {
   return before_supernode (sg.get_node_for_function_entry (fun), NULL);
 }
@@ -254,8 +256,8 @@ public:
   debug_diagnostic_context ()
   {
     diagnostic_initialize (this, 0);
-    show_line_numbers_p = true;
-    show_caret = true;
+    m_source_printing.show_line_numbers_p = true;
+    m_source_printing.enabled = true;
   }
   ~debug_diagnostic_context ()
   {
@@ -424,9 +426,22 @@ program_point::on_edge (exploded_graph &eg,
       {
 	const cfg_superedge *cfg_sedge = as_a <const cfg_superedge *> (succ);
 
-	/* Reject abnormal edges; we special-case setjmp/longjmp.  */
 	if (cfg_sedge->get_flags () & EDGE_ABNORMAL)
-	  return false;
+	  {
+	    const supernode *src_snode = cfg_sedge->m_src;
+	    if (gimple *last_stmt = src_snode->get_last_stmt ())
+	      if (last_stmt->code == GIMPLE_GOTO)
+		{
+		  /* For the program_point aspect here, consider all
+		     out-edges from goto stmts to be valid; we'll
+		     consider state separately.  */
+		  return true;
+		}
+
+	    /* Reject other kinds of abnormal edges;
+	       we special-case setjmp/longjmp.  */
+	    return false;
+	  }
       }
       break;
 
@@ -683,7 +698,7 @@ program_point::origin (const region_model_manager &mgr)
 program_point
 program_point::from_function_entry (const region_model_manager &mgr,
 				    const supergraph &sg,
-				    function *fun)
+				    const function &fun)
 {
   return program_point (function_point::from_function_entry (sg, fun),
 			mgr.get_empty_call_string ());
@@ -716,6 +731,47 @@ program_point::get_next () const
 	  return after_supernode (get_supernode (), get_call_string ());
       }
     }
+}
+
+/* Return true iff POINT_A and POINT_B share the same function and
+   call_string, both directly, and when attempting to undo inlining
+   information.  */
+
+bool
+program_point::effectively_intraprocedural_p (const program_point &point_a,
+					      const program_point &point_b)
+{
+  /* First, compare without considering inlining info.  */
+  if (point_a.get_function ()
+      != point_b.get_function ())
+    return false;
+  if (&point_a.get_call_string ()
+      != &point_b.get_call_string ())
+    return false;
+
+  /* Consider inlining info; they must have originally come from
+     the same function and have been inlined in the same way.  */
+  location_t loc_a = point_a.get_location ();
+  location_t loc_b = point_b.get_location ();
+  inlining_iterator iter_a (loc_a);
+  inlining_iterator iter_b (loc_b);
+  while (!(iter_a.done_p () || iter_b.done_p ()))
+    {
+      if (iter_a.done_p () || iter_b.done_p ())
+	return false;
+
+      if (iter_a.get_fndecl () != iter_b.get_fndecl ())
+	return false;
+      if (iter_a.get_callsite () != iter_b.get_callsite ())
+	return false;
+      if (iter_a.get_block () != iter_b.get_block ())
+	return false;
+
+      iter_a.next ();
+      iter_b.next ();
+    }
+
+  return true;
 }
 
 #if CHECKING_P
