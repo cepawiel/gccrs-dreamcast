@@ -1,5 +1,5 @@
 /* Definitions of floating-point access for GNU compiler.
-   Copyright (C) 1989-2022 Free Software Foundation, Inc.
+   Copyright (C) 1989-2024 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -286,11 +286,12 @@ extern bool real_isnan (const REAL_VALUE_TYPE *);
 /* Determine whether a floating-point value X is a signaling NaN.  */
 extern bool real_issignaling_nan (const REAL_VALUE_TYPE *);
 
-/* Determine whether a floating-point value X is a denormal.  */
+/* Determine whether floating-point value R is a denormal.  This
+   function is only valid for normalized values.  */
 inline bool
-real_isdenormal (const REAL_VALUE_TYPE *r)
+real_isdenormal (const REAL_VALUE_TYPE *r, machine_mode mode)
 {
-  return r->cl == rvc_normal && (r->sig[SIGSZ-1] & SIG_MSB) == 0;
+  return r->cl == rvc_normal && REAL_EXP (r) < REAL_MODE_FORMAT (mode)->emin;
 }
 
 /* Determine whether a floating-point value X is finite.  */
@@ -467,6 +468,7 @@ extern void real_ldexp (REAL_VALUE_TYPE *, const REAL_VALUE_TYPE *, int);
 extern REAL_VALUE_TYPE dconst0;
 extern REAL_VALUE_TYPE dconst1;
 extern REAL_VALUE_TYPE dconst2;
+extern REAL_VALUE_TYPE dconstm0;
 extern REAL_VALUE_TYPE dconstm1;
 extern REAL_VALUE_TYPE dconsthalf;
 extern REAL_VALUE_TYPE dconstinf;
@@ -478,9 +480,13 @@ extern REAL_VALUE_TYPE dconstninf;
 #define dconst_sixth() (*dconst_sixth_ptr ())
 #define dconst_ninth() (*dconst_ninth_ptr ())
 #define dconst_sqrt2() (*dconst_sqrt2_ptr ())
+#define dconst_pi() (*dconst_pi_ptr ())
 
 /* Function to return the real value special constant 'e'.  */
-extern const REAL_VALUE_TYPE * dconst_e_ptr (void);
+extern const REAL_VALUE_TYPE *dconst_e_ptr (void);
+
+/* Function to return the real value special constant 'pi'.  */
+extern const REAL_VALUE_TYPE *dconst_pi_ptr (void);
 
 /* Returns a cached REAL_VALUE_TYPE corresponding to 1/n, for various n.  */
 extern const REAL_VALUE_TYPE *dconst_third_ptr (void);

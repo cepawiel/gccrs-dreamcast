@@ -1,5 +1,5 @@
 /* Header file for the value range relational processing.
-   Copyright (C) 2020-2022 Free Software Foundation, Inc.
+   Copyright (C) 2020-2024 Free Software Foundation, Inc.
    Contributed by Andrew MacLeod <amacleod@redhat.com>
 
 This file is part of GCC.
@@ -32,7 +32,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "alloc-pool.h"
 #include "dominance.h"
 
-static const char *kind_string[VREL_LAST] =
+static const char *const kind_string[VREL_LAST] =
 { "varying", "undefined", "<", "<=", ">", ">=", "==", "!=", "pe8", "pe16",
   "pe32", "pe64" };
 
@@ -45,7 +45,7 @@ print_relation (FILE *f, relation_kind rel)
 }
 
 // This table is used to negate the operands.  op1 REL op2 -> !(op1 REL op2).
-relation_kind rr_negate_table[VREL_LAST] = {
+static const unsigned char rr_negate_table[VREL_LAST] = {
   VREL_VARYING, VREL_UNDEFINED, VREL_GE, VREL_GT, VREL_LE, VREL_LT, VREL_NE,
   VREL_EQ };
 
@@ -54,11 +54,11 @@ relation_kind rr_negate_table[VREL_LAST] = {
 relation_kind
 relation_negate (relation_kind r)
 {
-  return rr_negate_table [r];
+  return relation_kind (rr_negate_table [r]);
 }
 
 // This table is used to swap the operands.  op1 REL op2 -> op2 REL op1.
-relation_kind rr_swap_table[VREL_LAST] = {
+static const unsigned char rr_swap_table[VREL_LAST] = {
   VREL_VARYING, VREL_UNDEFINED, VREL_GT, VREL_GE, VREL_LT, VREL_LE, VREL_EQ,
   VREL_NE };
 
@@ -67,12 +67,12 @@ relation_kind rr_swap_table[VREL_LAST] = {
 relation_kind
 relation_swap (relation_kind r)
 {
-  return rr_swap_table [r];
+  return relation_kind (rr_swap_table [r]);
 }
 
 // This table is used to perform an intersection between 2 relations.
 
-relation_kind rr_intersect_table[VREL_LAST][VREL_LAST] = {
+static const unsigned char rr_intersect_table[VREL_LAST][VREL_LAST] = {
 // VREL_VARYING
   { VREL_VARYING, VREL_UNDEFINED, VREL_LT, VREL_LE, VREL_GT, VREL_GE, VREL_EQ,
     VREL_NE },
@@ -104,18 +104,18 @@ relation_kind rr_intersect_table[VREL_LAST][VREL_LAST] = {
 relation_kind
 relation_intersect (relation_kind r1, relation_kind r2)
 {
-  return rr_intersect_table[r1][r2];
+  return relation_kind (rr_intersect_table[r1][r2]);
 }
 
 
 // This table is used to perform a union between 2 relations.
 
-relation_kind rr_union_table[VREL_LAST][VREL_LAST] = {
+static const unsigned char rr_union_table[VREL_LAST][VREL_LAST] = {
 // VREL_VARYING
   { VREL_VARYING, VREL_VARYING, VREL_VARYING, VREL_VARYING, VREL_VARYING,
     VREL_VARYING, VREL_VARYING, VREL_VARYING },
 // VREL_UNDEFINED
-  { VREL_VARYING, VREL_LT, VREL_LE, VREL_GT, VREL_GE, VREL_UNDEFINED,
+  { VREL_VARYING, VREL_UNDEFINED, VREL_LT, VREL_LE, VREL_GT, VREL_GE,
     VREL_EQ, VREL_NE },
 // VREL_LT
   { VREL_VARYING, VREL_LT, VREL_LT, VREL_LE, VREL_NE, VREL_VARYING, VREL_LE,
@@ -141,14 +141,14 @@ relation_kind rr_union_table[VREL_LAST][VREL_LAST] = {
 relation_kind
 relation_union (relation_kind r1, relation_kind r2)
 {
-  return rr_union_table[r1][r2];
+  return relation_kind (rr_union_table[r1][r2]);
 }
 
 
 // This table is used to determine transitivity between 2 relations.
 // (A relation0 B) and (B relation1 C) implies  (A result C)
 
-relation_kind rr_transitive_table[VREL_LAST][VREL_LAST] = {
+static const unsigned char rr_transitive_table[VREL_LAST][VREL_LAST] = {
 // VREL_VARYING
   { VREL_VARYING, VREL_VARYING, VREL_VARYING, VREL_VARYING, VREL_VARYING,
     VREL_VARYING, VREL_VARYING, VREL_VARYING },
@@ -180,12 +180,31 @@ relation_kind rr_transitive_table[VREL_LAST][VREL_LAST] = {
 relation_kind
 relation_transitive (relation_kind r1, relation_kind r2)
 {
-  return rr_transitive_table[r1][r2];
+  return relation_kind (rr_transitive_table[r1][r2]);
 }
+
+// When one name is an equivalence of another, ensure the equivalence
+// range is correct.  Specifically for floating point, a +0 is also
+// equivalent to a -0 which may not be reflected.  See PR 111694.
+
+void
+adjust_equivalence_range (vrange &range)
+{
+  if (range.undefined_p () || !is_a<frange> (range))
+    return;
+
+  frange fr = as_a<frange> (range);
+  // If range includes 0 make sure both signs of zero are included.
+  if (fr.contains_p (dconst0) || fr.contains_p (dconstm0))
+    {
+      frange zeros (range.type (), dconstm0, dconst0);
+      range.union_ (zeros);
+    }
+ }
 
 // This vector maps a relation to the equivalent tree code.
 
-tree_code relation_to_code [VREL_LAST] = {
+static const tree_code relation_to_code [VREL_LAST] = {
   ERROR_MARK, ERROR_MARK, LT_EXPR, LE_EXPR, GT_EXPR, GE_EXPR, EQ_EXPR,
   NE_EXPR };
 
@@ -218,7 +237,7 @@ relation_oracle::validate_relation (relation_kind rel, vrange &op1, vrange &op2)
     return VREL_VARYING;
 
   // If there is no handler, leave the relation as is.
-  range_op_handler handler (code, t1);
+  range_op_handler handler (code);
   if (!handler)
     return rel;
 
@@ -260,9 +279,12 @@ relation_oracle::valid_equivs (bitmap b, const_bitmap equivs, basic_block bb)
   EXECUTE_IF_SET_IN_BITMAP (equivs, 0, i, bi)
     {
       tree ssa = ssa_name (i);
-      const_bitmap ssa_equiv = equiv_set (ssa, bb);
-      if (ssa_equiv == equivs)
-	bitmap_set_bit (b, i);
+      if (ssa && !SSA_NAME_IN_FREE_LIST (ssa))
+	{
+	  const_bitmap ssa_equiv = equiv_set (ssa, bb);
+	  if (ssa_equiv == equivs)
+	    bitmap_set_bit (b, i);
+	}
     }
 }
 
@@ -370,6 +392,9 @@ equiv_oracle::add_partial_equiv (relation_kind r, tree op1, tree op2)
       // In either case, if PE2 has an entry, we simply do nothing.
       if (pe2.members)
 	return;
+      // If there are no uses of op2, do not register.
+      if (has_zero_uses (op2))
+	return;
       // PE1 is the LHS and already has members, so everything in the set
       // should be a slice of PE2 rather than PE1.
       pe2.code = pe_min (r, pe1.code);
@@ -387,6 +412,9 @@ equiv_oracle::add_partial_equiv (relation_kind r, tree op1, tree op2)
     }
   if (pe2.members)
     {
+      // If there are no uses of op1, do not register.
+      if (has_zero_uses (op1))
+	return;
       pe1.ssa_base = pe2.ssa_base;
       // If pe2 is a 16 bit value, but only an 8 bit copy, we can't be any
       // more than an 8 bit equivalence here, so choose MIN value.
@@ -396,6 +424,9 @@ equiv_oracle::add_partial_equiv (relation_kind r, tree op1, tree op2)
     }
   else
     {
+      // If there are no uses of either operand, do not register.
+      if (has_zero_uses (op1) || has_zero_uses (op2))
+	return;
       // Neither name has an entry, simply create op1 as slice of op2.
       pe2.code = bits_to_pe (TYPE_PRECISION (TREE_TYPE (op2)));
       if (pe2.code == VREL_VARYING)
@@ -484,7 +515,7 @@ equiv_oracle::query_relation (basic_block bb, tree ssa1, tree ssa2)
   return partial_equiv (ssa1, ssa2);
 }
 
-// Query if thre is a relation (equivalence) between 2 SSA_NAMEs.
+// Query if there is a relation (equivalence) between 2 SSA_NAMEs.
 
 relation_kind
 equiv_oracle::query_relation (basic_block bb ATTRIBUTE_UNUSED, const_bitmap e1,
@@ -531,7 +562,7 @@ equiv_oracle::find_equiv_dom (tree name, basic_block bb) const
   return NULL;
 }
 
-// Register equivalance between ssa_name V and set EQUIV in block BB,
+// Register equivalence between ssa_name V and set EQUIV in block BB,
 
 bitmap
 equiv_oracle::register_equiv (basic_block bb, unsigned v, equiv_chain *equiv)
@@ -614,7 +645,7 @@ equiv_oracle::register_initial_def (tree ssa)
 
 // Register an equivalence between SSA1 and SSA2 in block BB.
 // The equivalence oracle maintains a vector of equivalencies indexed by basic
-// block. When an equivalence bteween SSA1 and SSA2 is registered in block BB,
+// block. When an equivalence between SSA1 and SSA2 is registered in block BB,
 // a query is made as to what equivalences both names have already, and
 // any preexisting equivalences are merged to create a single equivalence
 // containing all the ssa_names in this basic block.
@@ -678,7 +709,7 @@ equiv_oracle::register_relation (basic_block bb, relation_kind k, tree ssa1,
 }
 
 // Add an equivalency record in block BB containing bitmap EQUIV_SET.
-// Note the internal caller is responible for allocating EQUIV_SET properly.
+// Note the internal caller is responsible for allocating EQUIV_SET properly.
 
 void
 equiv_oracle::add_equiv_to_block (basic_block bb, bitmap equiv_set)
@@ -687,6 +718,7 @@ equiv_oracle::add_equiv_to_block (basic_block bb, bitmap equiv_set)
 
   // Check if this is the first time a block has an equivalence added.
   // and create a header block. And set the summary for this block.
+  limit_check (bb);
   if (!m_equiv[bb->index])
     {
       ptr = (equiv_chain *) obstack_alloc (&m_chain_obstack,
@@ -823,7 +855,7 @@ value_relation::apply_transitive (const value_relation &rel)
 {
   relation_kind k = VREL_VARYING;
 
-  // Idenity any common operand, and notrmalize the relations to
+  // Identify any common operand, and normalize the relations to
   // the form : A < B  B < C produces A < C
   if (rel.op1 () == name2)
     {
@@ -883,6 +915,40 @@ value_relation::apply_transitive (const value_relation &rel)
   return false;
 }
 
+// Create a trio from this value relation given LHS, OP1 and OP2.
+
+relation_trio
+value_relation::create_trio (tree lhs, tree op1, tree op2)
+{
+  relation_kind lhs_1;
+  if (lhs == name1 && op1 == name2)
+    lhs_1 = related;
+  else if (lhs == name2 && op1 == name1)
+    lhs_1 = relation_swap (related);
+  else
+    lhs_1 = VREL_VARYING;
+
+  relation_kind lhs_2;
+  if (lhs == name1 && op2 == name2)
+    lhs_2 = related;
+  else if (lhs == name2 && op2 == name1)
+    lhs_2 = relation_swap (related);
+  else
+    lhs_2 = VREL_VARYING;
+
+  relation_kind op_op;
+  if (op1 == name1 && op2 == name2)
+    op_op = related;
+  else if (op1 == name2 && op2 == name1)
+    op_op = relation_swap (related);
+  else if  (op1 == op2)
+    op_op = VREL_EQ;
+  else
+    op_op = VREL_VARYING;
+
+  return relation_trio (lhs_1, lhs_2, op_op);
+}
+
 // Dump the relation to file F.
 
 void
@@ -919,11 +985,11 @@ relation_chain_head::find_relation (const_bitmap b1, const_bitmap b2) const
   if (!m_names)
     return VREL_VARYING;
 
-  // If both b1 and b2 aren't referenced in thie block, cant be a relation
+  // If both b1 and b2 aren't referenced in this block, cant be a relation
   if (!bitmap_intersect_p (m_names, b1) || !bitmap_intersect_p (m_names, b2))
     return VREL_VARYING;
 
-  // Search for the fiorst relation that contains BOTH an element from B1
+  // Search for the first relation that contains BOTH an element from B1
   // and B2, and return that relation.
   for (relation_chain *ptr = m_head; ptr ; ptr = ptr->m_next)
     {
@@ -1251,7 +1317,7 @@ dom_oracle::query_relation (basic_block bb, const_bitmap b1,
   if (bitmap_equal_p (b1, b2))
     return VREL_EQ;
 
-  // If either name does not occur in a relation anywhere, there isnt one.
+  // If either name does not occur in a relation anywhere, there isn't one.
   if (!bitmap_intersect_p (m_relation_set, b1)
       || !bitmap_intersect_p (m_relation_set, b2))
     return VREL_VARYING;
@@ -1281,7 +1347,7 @@ dom_oracle::find_relation_block (int bb, unsigned v1, unsigned v2,
   if (!bm)
     return VREL_VARYING;
 
-  // If both b1 and b2 aren't referenced in thie block, cant be a relation
+  // If both b1 and b2 aren't referenced in this block, cant be a relation
   if (!bitmap_bit_p (bm, v1) || !bitmap_bit_p (bm, v2))
     return VREL_VARYING;
 
@@ -1314,7 +1380,7 @@ relation_kind
 dom_oracle::find_relation_dom (basic_block bb, unsigned v1, unsigned v2) const
 {
   relation_kind r;
-  // IF either name does not occur in a relation anywhere, there isnt one.
+  // IF either name does not occur in a relation anywhere, there isn't one.
   if (!bitmap_bit_p (m_relation_set, v1) || !bitmap_bit_p (m_relation_set, v2))
     return VREL_VARYING;
 
@@ -1339,6 +1405,12 @@ dom_oracle::query_relation (basic_block bb, tree ssa1, tree ssa2)
   unsigned v2 = SSA_NAME_VERSION (ssa2);
   if (v1 == v2)
     return VREL_EQ;
+
+  // If v1 or v2 do not have any relations or equivalences, a partial
+  // equivalence is the only possibility.
+  if ((!bitmap_bit_p (m_relation_set, v1) && !has_equiv_p (v1))
+      || (!bitmap_bit_p (m_relation_set, v2) && !has_equiv_p (v2)))
+    return partial_equiv (ssa1, ssa2);
 
   // Check for equivalence first.  They must be in each equivalency set.
   const_bitmap equiv1 = equiv_set (ssa1, bb);
@@ -1443,7 +1515,7 @@ path_oracle::equiv_set (tree ssa, basic_block bb)
   return tmp;
 }
 
-// Register an equivalence between SSA1 and SSA2 resolving unkowns from
+// Register an equivalence between SSA1 and SSA2 resolving unknowns from
 // block BB.
 
 void
@@ -1718,3 +1790,28 @@ equiv_relation_iterator::get_name (relation_kind *rel)
     }
   return NULL_TREE;
 }
+
+#if CHECKING_P
+#include "selftest.h"
+
+namespace selftest
+{
+void
+relation_tests ()
+{
+  // rr_*_table tables use unsigned char rather than relation_kind.
+  ASSERT_LT (VREL_LAST, UCHAR_MAX);
+  // Verify commutativity of relation_intersect and relation_union.
+  for (relation_kind r1 = VREL_VARYING; r1 < VREL_PE8;
+       r1 = relation_kind (r1 + 1))
+    for (relation_kind r2 = VREL_VARYING; r2 < VREL_PE8;
+	 r2 = relation_kind (r2 + 1))
+      {
+	ASSERT_EQ (relation_intersect (r1, r2), relation_intersect (r2, r1));
+	ASSERT_EQ (relation_union (r1, r2), relation_union (r2, r1));
+      }
+}
+
+} // namespace selftest
+
+#endif // CHECKING_P

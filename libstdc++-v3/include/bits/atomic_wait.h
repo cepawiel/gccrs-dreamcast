@@ -1,6 +1,6 @@
 // -*- C++ -*- header.
 
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -32,8 +32,10 @@
 
 #pragma GCC system_header
 
-#include <bits/c++config.h>
-#if defined _GLIBCXX_HAS_GTHREADS || defined _GLIBCXX_HAVE_LINUX_FUTEX
+#include <bits/version.h>
+
+#if __glibcxx_atomic_wait
+#include <cstdint>
 #include <bits/functional_hash.h>
 #include <bits/gthr.h>
 #include <ext/numeric_traits.h>
@@ -48,8 +50,6 @@
 
 # include <bits/std_mutex.h>  // std::mutex, std::__condvar
 
-#define __cpp_lib_atomic_wait 201907L
-
 namespace std _GLIBCXX_VISIBILITY(default)
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION
@@ -58,14 +58,18 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 #ifdef _GLIBCXX_HAVE_LINUX_FUTEX
 #define _GLIBCXX_HAVE_PLATFORM_WAIT 1
     using __platform_wait_t = int;
-    static constexpr size_t __platform_wait_alignment = 4;
+    inline constexpr size_t __platform_wait_alignment = 4;
 #else
 // define _GLIBCX_HAVE_PLATFORM_WAIT and implement __platform_wait()
 // and __platform_notify() if there is a more efficient primitive supported
 // by the platform (e.g. __ulock_wait()/__ulock_wake()) which is better than
 // a mutex/condvar based wait.
-    using __platform_wait_t = uint64_t;
-    static constexpr size_t __platform_wait_alignment
+# if ATOMIC_LONG_LOCK_FREE == 2
+    using __platform_wait_t = unsigned long;
+# else
+    using __platform_wait_t = unsigned int;
+# endif
+    inline constexpr size_t __platform_wait_alignment
       = __alignof__(__platform_wait_t);
 #endif
   } // namespace __detail
@@ -142,8 +146,8 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 #endif
     }
 
-    constexpr auto __atomic_spin_count_relax = 12;
-    constexpr auto __atomic_spin_count = 16;
+    inline constexpr auto __atomic_spin_count_relax = 12;
+    inline constexpr auto __atomic_spin_count = 16;
 
     struct __default_spin_policy
     {
@@ -472,5 +476,5 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
   }
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std
-#endif // GTHREADS || LINUX_FUTEX
+#endif // __glibcxx_atomic_wait
 #endif // _GLIBCXX_ATOMIC_WAIT_H

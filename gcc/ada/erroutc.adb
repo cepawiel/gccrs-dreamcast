@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -44,6 +44,7 @@ with Stringt;  use Stringt;
 with Targparm;
 with Uintp;    use Uintp;
 with Widechar; use Widechar;
+with Warnsw;   use Warnsw;
 
 package body Erroutc is
 
@@ -311,32 +312,33 @@ package body Erroutc is
 
    begin
       w ("Dumping error message, Id = ", Int (Id));
-      w ("  Text     = ", E.Text.all);
-      w ("  Next     = ", Int (E.Next));
-      w ("  Prev     = ", Int (E.Prev));
-      w ("  Sfile    = ", Int (E.Sfile));
+      w ("  Text               = ", E.Text.all);
+      w ("  Next               = ", Int (E.Next));
+      w ("  Prev               = ", Int (E.Prev));
+      w ("  Sfile              = ", Int (E.Sfile));
 
       Write_Str
-        ("  Sptr     = ");
+        ("  Sptr               = ");
       Write_Location (E.Sptr.Ptr);  --  ??? Do not write the full span for now
       Write_Eol;
 
       Write_Str
-        ("  Optr     = ");
-      Write_Location (E.Optr);
+        ("  Optr               = ");
+      Write_Location (E.Optr.Ptr);
       Write_Eol;
 
-      w ("  Line     = ", Int (E.Line));
-      w ("  Col      = ", Int (E.Col));
-      w ("  Warn     = ", E.Warn);
-      w ("  Warn_Err = ", E.Warn_Err);
-      w ("  Warn_Chr = '" & E.Warn_Chr & ''');
-      w ("  Style    = ", E.Style);
-      w ("  Serious  = ", E.Serious);
-      w ("  Uncond   = ", E.Uncond);
-      w ("  Msg_Cont = ", E.Msg_Cont);
-      w ("  Deleted  = ", E.Deleted);
-      w ("  Node     = ", Int (E.Node));
+      w ("  Line               = ", Int (E.Line));
+      w ("  Col                = ", Int (E.Col));
+      w ("  Warn               = ", E.Warn);
+      w ("  Warn_Err           = ", E.Warn_Err);
+      w ("  Warn_Runtime_Raise = ", E.Warn_Runtime_Raise);
+      w ("  Warn_Chr           = '" & E.Warn_Chr & ''');
+      w ("  Style              = ", E.Style);
+      w ("  Serious            = ", E.Serious);
+      w ("  Uncond             = ", E.Uncond);
+      w ("  Msg_Cont           = ", E.Msg_Cont);
+      w ("  Deleted            = ", E.Deleted);
+      w ("  Node               = ", Int (E.Node));
 
       Write_Eol;
    end dmsg;
@@ -365,17 +367,25 @@ package body Erroutc is
 
    function Get_Warning_Option (Id : Error_Msg_Id) return String is
       Warn     : constant Boolean         := Errors.Table (Id).Warn;
+      Style    : constant Boolean         := Errors.Table (Id).Style;
       Warn_Chr : constant String (1 .. 2) := Errors.Table (Id).Warn_Chr;
+
    begin
-      if Warn and then Warn_Chr /= "  " and then Warn_Chr (1) /= '?' then
+      if (Warn or Style)
+        and then Warn_Chr /= "  "
+        and then Warn_Chr (1) /= '?'
+      then
          if Warn_Chr = "$ " then
             return "-gnatel";
+         elsif Style then
+            return "-gnaty" & Warn_Chr (1);
          elsif Warn_Chr (2) = ' ' then
             return "-gnatw" & Warn_Chr (1);
          else
             return "-gnatw" & Warn_Chr;
          end if;
       end if;
+
       return "";
    end Get_Warning_Option;
 
@@ -385,10 +395,12 @@ package body Erroutc is
 
    function Get_Warning_Tag (Id : Error_Msg_Id) return String is
       Warn     : constant Boolean         := Errors.Table (Id).Warn;
+      Style    : constant Boolean         := Errors.Table (Id).Style;
       Warn_Chr : constant String (1 .. 2) := Errors.Table (Id).Warn_Chr;
       Option   : constant String          := Get_Warning_Option (Id);
+
    begin
-      if Warn then
+      if Warn or Style then
          if Warn_Chr = "? " then
             return "[enabled by default]";
          elsif Warn_Chr = "* " then
@@ -878,7 +890,7 @@ package body Erroutc is
             J := J + 1;
 
          elsif J < Msg'Last and then Msg (J + 1) = C
-           and then Msg (J) in 'a' .. 'z' | '*' | '$'
+           and then Msg (J) in 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '*' | '$'
          then
             Message_Class := Msg (J) & " ";
             J := J + 2;
@@ -947,6 +959,7 @@ package body Erroutc is
       end if;
 
       Has_Double_Exclam  := False;
+      Has_Error_Code     := False;
       Has_Insertion_Line := False;
 
       --  Loop through message looking for relevant insertion sequences
@@ -962,19 +975,20 @@ package body Erroutc is
          --  Warning message (? or < insertion sequence)
 
          elsif Msg (J) = '?' or else Msg (J) = '<' then
-            Is_Warning_Msg := Msg (J) = '?' or else Error_Msg_Warn;
-            J := J + 1;
-
-            if Is_Warning_Msg then
+            if Msg (J) = '?' or else Error_Msg_Warn then
+               Is_Warning_Msg := not Is_Style_Msg;
+               J := J + 1;
                Warning_Msg_Char := Parse_Message_Class;
+
+               --  Bomb if untagged warning message. This code can be
+               --  uncommented for debugging when looking for untagged warning
+               --  messages.
+
+               --  pragma Assert (Warning_Msg_Char /= "  ");
+
+            else
+               J := J + 1;
             end if;
-
-            --  Bomb if untagged warning message. This code can be uncommented
-            --  for debugging when looking for untagged warning messages.
-
-            --  if Is_Warning_Msg and then Warning_Msg_Char = ' ' then
-            --     raise Program_Error;
-            --  end if;
 
          --  Unconditional message (! insertion)
 
@@ -998,6 +1012,15 @@ package body Erroutc is
          elsif Msg (J) = '|' then
             Is_Serious_Error := False;
             J := J + 1;
+
+         --  Error code ([] insertion)
+
+         elsif Msg (J) = '['
+           and then J < Msg'Last
+           and then Msg (J + 1) = ']'
+         then
+            Has_Error_Code := True;
+            J := J + 2;
 
          else
             J := J + 1;
@@ -1142,6 +1165,42 @@ package body Erroutc is
          Msg_Buffer (Msglen) := C;
       end if;
    end Set_Msg_Char;
+
+   ----------------------------
+   -- Set_Msg_Insertion_Code --
+   ----------------------------
+
+   procedure Set_Msg_Insertion_Code is
+      H : constant array (Nat range 0 .. 9) of Character := "0123456789";
+      P10 : constant array (Natural range 0 .. 3) of Nat :=
+        (10 ** 0,
+         10 ** 1,
+         10 ** 2,
+         10 ** 3);
+
+      Code_Len : constant Natural :=
+        (case Error_Msg_Code is
+           when    0         => 0,
+           when    1 ..    9 => 1,
+           when   10 ..   99 => 2,
+           when  100 ..  999 => 3,
+           when 1000 .. 9999 => 4);
+      Code_Rest  : Nat := Error_Msg_Code;
+      Code_Digit : Nat;
+
+   begin
+      Set_Msg_Char ('E');
+
+      for J in 1 .. Error_Msg_Code_Digits - Code_Len loop
+         Set_Msg_Char ('0');
+      end loop;
+
+      for J in 1 .. Code_Len loop
+         Code_Digit := Code_Rest / P10 (Code_Len - J);
+         Set_Msg_Char (H (Code_Digit));
+         Code_Rest := Code_Rest - Code_Digit * P10 (Code_Len - J);
+      end loop;
+   end Set_Msg_Insertion_Code;
 
    ---------------------------------
    -- Set_Msg_Insertion_File_Name --

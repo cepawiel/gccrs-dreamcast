@@ -1,5 +1,5 @@
 /* Maintain binary trees of symbols.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2024 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -1107,6 +1107,12 @@ gfc_add_contiguous (symbol_attribute *attr, const char *name, locus *where)
 
   if (check_used (attr, name, where))
     return false;
+
+  if (attr->contiguous)
+    {
+      duplicate_attr ("CONTIGUOUS", where);
+      return false;
+    }
 
   attr->contiguous = 1;
   return gfc_check_conflict (attr, name, where);
@@ -2942,7 +2948,7 @@ gfc_new_symtree (gfc_symtree **root, const char *name)
 
 /* Delete a symbol from the tree.  Does not free the symbol itself!  */
 
-void
+static void
 gfc_delete_symtree (gfc_symtree **root, const char *name)
 {
   gfc_symtree st, *st0;
@@ -2957,10 +2963,8 @@ gfc_delete_symtree (gfc_symtree **root, const char *name)
   else
     p = name;
 
-  st0 = gfc_find_symtree (*root, p);
-
   st.name = gfc_get_string ("%s", p);
-  gfc_delete_bbt (root, &st, compare_symtree);
+  st0 = (gfc_symtree *) gfc_delete_bbt (root, &st, compare_symtree);
 
   free (st0);
 }
@@ -3101,13 +3105,14 @@ gfc_free_symbol (gfc_symbol *&sym)
 }
 
 
-/* Decrease the reference counter and free memory when we reach zero.  */
+/* Decrease the reference counter and free memory when we reach zero.
+   Returns true if the symbol has been freed, false otherwise.  */
 
-void
+bool
 gfc_release_symbol (gfc_symbol *&sym)
 {
   if (sym == NULL)
-    return;
+    return false;
 
   if (sym->formal_ns != NULL && sym->refs == 2 && sym->formal_ns != sym->ns
       && (!sym->attr.entry || !sym->module))
@@ -3121,10 +3126,11 @@ gfc_release_symbol (gfc_symbol *&sym)
 
   sym->refs--;
   if (sym->refs > 0)
-    return;
+    return false;
 
   gcc_assert (sym->refs == 0);
   gfc_free_symbol (sym);
+  return true;
 }
 
 
@@ -3208,9 +3214,9 @@ gfc_find_symtree_in_proc (const char* name, gfc_namespace* ns)
 
 /* Search for a symtree starting in the current namespace, resorting to
    any parent namespaces if requested by a nonzero parent_flag.
-   Returns nonzero if the name is ambiguous.  */
+   Returns true if the name is ambiguous.  */
 
-int
+bool
 gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 		   gfc_symtree **result)
 {
@@ -3232,10 +3238,10 @@ gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 	  if (st->ambiguous && !st->n.sym->attr.generic)
 	    {
 	      ambiguous_symbol (name, st);
-	      return 1;
+	      return true;
 	    }
 
-	  return 0;
+	  return false;
 	}
 
       if (!parent_flag)
@@ -3264,12 +3270,12 @@ gfc_find_sym_tree (const char *name, gfc_namespace *ns, int parent_flag,
 	    }
 	}
       *result = st;
-      return 0;
+      return false;
     }
 
   *result = NULL;
 
-  return 0;
+  return false;
 }
 
 
@@ -3645,6 +3651,29 @@ gfc_drop_last_undo_checkpoint (void)
 }
 
 
+/* Remove the reference to the symbol SYM in the symbol tree held by NS
+   and free SYM if the last reference to it has been removed.
+   Returns whether the symbol has been freed.  */
+
+static bool
+delete_symbol_from_ns (gfc_symbol *sym, gfc_namespace *ns)
+{
+  if (ns == nullptr)
+    return false;
+
+  /* The derived type is saved in the symtree with the first
+     letter capitalized; the all lower-case version to the
+     derived type contains its associated generic function.  */
+  const char *sym_name = gfc_fl_struct (sym->attr.flavor)
+			 ? gfc_dt_upper_string (sym->name)
+			 : sym->name;
+
+  gfc_delete_symtree (&ns->sym_root, sym_name);
+
+  return gfc_release_symbol (sym);
+}
+
+
 /* Undoes all the changes made to symbols since the previous checkpoint.
    This subroutine is made simpler due to the fact that attributes are
    never removed once added.  */
@@ -3655,7 +3684,7 @@ gfc_restore_last_undo_checkpoint (void)
   gfc_symbol *p;
   unsigned i;
 
-  FOR_EACH_VEC_ELT (latest_undo_chgset->syms, i, p)
+  FOR_EACH_VEC_ELT_REVERSE (latest_undo_chgset->syms, i, p)
     {
       /* Symbol in a common block was new. Or was old and just put in common */
       if (p->common_block
@@ -3699,15 +3728,23 @@ gfc_restore_last_undo_checkpoint (void)
 	}
       if (p->gfc_new)
 	{
-	  /* The derived type is saved in the symtree with the first
-	     letter capitalized; the all lower-case version to the
-	     derived type contains its associated generic function.  */
-	  if (gfc_fl_struct (p->attr.flavor))
-	    gfc_delete_symtree (&p->ns->sym_root,gfc_dt_upper_string (p->name));
-          else
-	    gfc_delete_symtree (&p->ns->sym_root, p->name);
+	  bool freed = delete_symbol_from_ns (p, p->ns);
 
-	  gfc_release_symbol (p);
+	  /* If the symbol is a procedure (function or subroutine), remove
+	     it from the procedure body namespace as well as from the outer
+	     namespace.  */
+	  if (!freed
+	      && p->formal_ns != p->ns)
+	    freed = delete_symbol_from_ns (p, p->formal_ns);
+
+	  /* If the formal_ns field has not been set yet, the previous
+	     conditional does nothing.  In that case, we can assume that
+	     gfc_current_ns is the procedure body namespace, and remove the
+	     symbol from there.  */
+	  if (!freed
+	      && gfc_current_ns != p->ns
+	      && gfc_current_ns != p->formal_ns)
+	    freed = delete_symbol_from_ns (p, gfc_current_ns);
 	}
       else
 	restore_old_symbol (p);
@@ -3755,7 +3792,11 @@ free_old_symbol (gfc_symbol *sym)
   if (sym->old_symbol == NULL)
     return;
 
-  if (sym->old_symbol->as != sym->as)
+  if (sym->old_symbol->as != NULL
+      && sym->old_symbol->as != sym->as
+      && !(sym->ts.type == BT_CLASS
+	   && sym->ts.u.derived->attr.is_class
+	   && sym->old_symbol->as == CLASS_DATA (sym)->as))
     gfc_free_array_spec (sym->old_symbol->as);
 
   if (sym->old_symbol->value != sym->value)
@@ -4715,6 +4756,13 @@ gfc_copy_formal_args_intr (gfc_symbol *dest, gfc_intrinsic_sym *src,
       formal_arg->sym->attr.flavor = FL_VARIABLE;
       formal_arg->sym->attr.dummy = 1;
 
+      /* Do not treat an actual deferred-length character argument wrongly
+	 as template for the formal argument.  */
+      if (formal_arg->sym->ts.type == BT_CHARACTER
+	  && !(formal_arg->sym->attr.allocatable
+	       || formal_arg->sym->attr.pointer))
+	formal_arg->sym->ts.deferred = false;
+
       if (formal_arg->sym->ts.type == BT_CHARACTER)
 	formal_arg->sym->ts.u.cl = gfc_new_charlen (gfc_current_ns, NULL);
 
@@ -5124,6 +5172,33 @@ gfc_type_is_extension_of (gfc_symbol *t1, gfc_symbol *t2)
   return gfc_compare_derived_types (t1, t2);
 }
 
+/* Check if parameterized derived type t2 is an instance of pdt template t1
+
+   gfc_symbol *t1 -> pdt template to verify t2 against.
+   gfc_symbol *t2 -> pdt instance to be verified.
+
+   In decl.cc, gfc_get_pdt_instance, a pdt instance is given a 3 character
+   prefix "Pdt", followed by an underscore list of the kind parameters,
+   up to a maximum of 8 kind parameters.  To verify if a PDT Type corresponds
+   to the template, this functions extracts t2's derive_type name,
+   and compares it to the derive_type name of t1 for compatibility.
+
+   For example:
+
+   t2->name = Pdtf_2_2; extract out the 'f' and compare with t1->name.  */
+
+bool
+gfc_pdt_is_instance_of (gfc_symbol *t1, gfc_symbol *t2)
+{
+  if ( !t1->attr.pdt_template || !t2->attr.pdt_type )
+    return false;
+
+  /* Limit comparison to length of t1->name to ignore new kind params.  */
+  if ( !(strncmp (&(t2->name[3]), t1->name, strlen (t1->name)) == 0) )
+    return false;
+
+  return true;
+}
 
 /* Check if two typespecs are type compatible (F03:5.1.1.2):
    If ts1 is nonpolymorphic, ts2 must be the same type.

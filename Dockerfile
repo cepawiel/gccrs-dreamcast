@@ -1,4 +1,4 @@
-FROM debian:11 AS gcc-builder
+FROM debian:12 AS gcc-builder
 
 RUN apt-get update; \
     DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
@@ -63,11 +63,6 @@ RUN /bin/sh -c set -ex; \
 RUN /bin/sh -c set -ex; \
     echo '/usr/local/lib64' > /etc/ld.so.conf.d/local-lib64.conf; \
     ldconfig -v
-
-RUN /bin/sh -c set -ex; \
-    dpkg-divert --divert /usr/bin/gcc.orig --rename /usr/bin/gcc; \
-    dpkg-divert --divert /usr/bin/g++.orig --rename /usr/bin/g++; \
-    update-alternatives --install /usr/bin/cc cc /usr/local/bin/gcc 999
 
 FROM rust:latest
 COPY --from=gcc-builder /usr/ /usr/

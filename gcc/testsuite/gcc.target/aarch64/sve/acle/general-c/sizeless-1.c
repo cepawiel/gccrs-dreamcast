@@ -30,8 +30,7 @@ union union1 {
 /* Pointers to sizeless types.  */
 
 svint8_t *global_sve_sc_ptr;
-svint8_t *invalid_sve_sc_ptr = &(svint8_t) { *global_sve_sc_ptr }; /* { dg-error {initializer element is not constant} } */
-  /* { dg-error {SVE type 'svint8_t' does not have a fixed size} "2nd line" { target *-*-* } .-1 } */
+svint8_t *invalid_sve_sc_ptr = &(svint8_t) {};  /* { dg-error {SVE type 'svint8_t' does not have a fixed size} } */
 
 /* Sizeless arguments and return values.  */
 
@@ -106,8 +105,8 @@ statements (int n)
 
   /* Pointer assignment.  */
 
-  gnu_sc_ptr = sve_sc_ptr; /* { dg-warning {assignment to [^\n]* from incompatible pointer type} } */
-  sve_sc_ptr = gnu_sc_ptr; /* { dg-warning {assignment to [^\n]* from incompatible pointer type} } */
+  gnu_sc_ptr = sve_sc_ptr; /* { dg-error {assignment to [^\n]* from incompatible pointer type} } */
+  sve_sc_ptr = gnu_sc_ptr; /* { dg-error {assignment to [^\n]* from incompatible pointer type} } */
 
   /* Pointer arithmetic.  */
 
@@ -154,8 +153,8 @@ statements (int n)
   0 ? 0 : sve_sc1; /* { dg-error {type mismatch in conditional expression} } */
   0 ?: sve_sc1; /* { dg-error {type mismatch in conditional expression} } */
   0 ? sve_sc_ptr : sve_sc_ptr;
-  0 ? sve_sc_ptr : gnu_sc_ptr; /* { dg-warning {pointer type mismatch in conditional expression} } */
-  0 ? gnu_sc_ptr : sve_sc_ptr; /* { dg-warning {pointer type mismatch in conditional expression} } */
+  0 ? sve_sc_ptr : gnu_sc_ptr; /* { dg-error {pointer type mismatch in conditional expression} } */
+  0 ? gnu_sc_ptr : sve_sc_ptr; /* { dg-error {pointer type mismatch in conditional expression} } */
 
   /* Generic associations.  */
 

@@ -1,4 +1,8 @@
 // { dg-additional-options "-w" }
+#![feature(intrinsics)]
+
+#[lang = "sized"]
+pub trait Sized {}
 
 mod intrinsics {
     extern "rust-intrinsic" {
@@ -39,7 +43,6 @@ macro_rules! impl_uint {
                 }
 
                 pub fn to_le(self) -> Self {
-                    #[cfg(target_endian = "little")]
                     {
                         self
                     }

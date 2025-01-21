@@ -1,5 +1,5 @@
 /* Conversion of SESE regions to Polyhedra.
-   Copyright (C) 2009-2022 Free Software Foundation, Inc.
+   Copyright (C) 2009-2024 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com>.
 
 This file is part of GCC.
@@ -391,8 +391,9 @@ add_conditions_to_domain (poly_bb_p pbb)
       {
       case GIMPLE_COND:
 	  {
-            /* Don't constrain on anything else than INTEGER_TYPE.  */
-	    if (TREE_CODE (TREE_TYPE (gimple_cond_lhs (stmt))) != INTEGER_TYPE)
+	    /* Don't constrain on anything else than INTEGRAL_TYPE_P.  */
+	    tree cmp_type = TREE_TYPE (gimple_cond_lhs (stmt));
+	    if (!INTEGRAL_TYPE_P (cmp_type))
               break;
 
 	    gcond *cond_stmt = as_a <gcond *> (stmt);
@@ -536,9 +537,9 @@ bounds_are_valid (tree ref, tree low, tree high)
       || !tree_fits_shwi_p (high))
     return false;
 
-  /* 1-element arrays at end of structures may extend over
+  /* An array that has flexible size may extend over
      their declared size.  */
-  if (array_at_struct_end_p (ref)
+  if (array_ref_flexible_size_p (ref)
       && operand_equal_p (low, high, 0))
     return false;
 

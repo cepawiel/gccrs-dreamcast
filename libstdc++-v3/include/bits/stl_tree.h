@@ -1,6 +1,6 @@
 // RB tree implementation -*- C++ -*-
 
-// Copyright (C) 2001-2022 Free Software Foundation, Inc.
+// Copyright (C) 2001-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -75,10 +75,6 @@
 namespace std _GLIBCXX_VISIBILITY(default)
 {
 _GLIBCXX_BEGIN_NAMESPACE_VERSION
-
-#if __cplusplus > 201103L
-# define __cpp_lib_generic_associative_lookup 201304L
-#endif
 
   // Red-black tree class, designed for use in implementing STL
   // associative containers (set, multiset, map, and multimap). The
@@ -405,12 +401,14 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       _Base_ptr _M_node;
     };
 
+  __attribute__((__nonnull__))
   void
   _Rb_tree_insert_and_rebalance(const bool __insert_left,
 				_Rb_tree_node_base* __x,
 				_Rb_tree_node_base* __p,
 				_Rb_tree_node_base& __header) throw ();
 
+  __attribute__((__nonnull__,__returns_nonnull__))
   _Rb_tree_node_base*
   _Rb_tree_rebalance_for_erase(_Rb_tree_node_base* const __z,
 			       _Rb_tree_node_base& __header) throw ();
@@ -1123,7 +1121,6 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__enable_if_t<!__same_value_type<_InputIterator>::value>
 	_M_insert_range_equal(_InputIterator __first, _InputIterator __last)
 	{
-	  _Alloc_node __an(*this);
 	  for (; __first != __last; ++__first)
 	    _M_emplace_equal(*__first);
 	}
@@ -1553,7 +1550,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	  = _Rb_tree<_Key, _Val, _KeyOfValue, _Compare2, _Alloc>;
 
       template<typename, typename>
-	friend class _Rb_tree_merge_helper;
+	friend struct _Rb_tree_merge_helper;
 
       /// Merge from a compatible container into one with unique keys.
       template<typename _Compare2>

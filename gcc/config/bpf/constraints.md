@@ -1,5 +1,5 @@
 ;; Constraint definitions for eBPF.
-;; Copyright (C) 2019-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2019-2024 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -29,3 +29,17 @@
 (define_constraint "S"
   "A constant call address."
   (match_code "const,symbol_ref,label_ref,const_int"))
+
+(define_register_constraint "t" "R0"
+  "Register r0")
+
+;;
+;; Memory constraints.
+;;
+
+; Just like 'm' but disallows const_int.
+; Used for ldx[b,h,w,dw] and stx[b,h,w,dw] instructions.
+(define_memory_constraint "q"
+  "Memory reference which is not a constant integer."
+  (and (match_code "mem")
+       (match_test "GET_CODE(XEXP(op, 0)) != CONST_INT")))

@@ -1,11 +1,11 @@
 /* Test BTF generation for 64 bits enums.  */
 
 /* { dg-do compile } */
-/* { dg-options "-O0 -gbtf -dA" } */
+/* { dg-options "-O0 -gbtf -gno-strict-dwarf -dA" } */
 
-/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]myenum1,\[\t \]8" 1 } } */
-/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]myenum2,\[\t \]8" 1 } } */
-/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]myenum3,\[\t \]8" 1 } } */
+/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]_?myenum1,\[\t \]8" 1 } } */
+/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]_?myenum2,\[\t \]8" 1 } } */
+/* { dg-final { scan-assembler-times "\[\t \].size\[\t \]_?myenum3,\[\t \]8" 1 } } */
 /* { dg-final { scan-assembler-times "\[\t \]0x13000003\[\t \]+\[^\n\]*btt_info" 2 } } */
 /* { dg-final { scan-assembler-times "\[\t \]0x93000003\[\t \]+\[^\n\]*btt_info" 1 } } */
 /* { dg-final { scan-assembler-times "\[\t \]0xffffffaa\[\t \]+\[^\n\]*bte_value_lo32" 2 } } */

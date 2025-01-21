@@ -1,6 +1,6 @@
 // The template and inlines for the -*- C++ -*- complex number classes.
 
-// Copyright (C) 1997-2022 Free Software Foundation, Inc.
+// Copyright (C) 1997-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -47,9 +47,14 @@
 // Get rid of a macro possibly defined in <complex.h>
 #undef complex
 
-#if __cplusplus > 201703L
-# define __cpp_lib_constexpr_complex 201711L
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc99-extensions"
 #endif
+
+#define __glibcxx_want_constexpr_complex
+#define __glibcxx_want_complex_udls
+#include <bits/version.h>
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -598,6 +603,264 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     { return __z.imag(); }
 #endif
 
+#if _GLIBCXX_USE_C99_COMPLEX
+#if defined(__STDCPP_FLOAT16_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
+  inline _Float16
+  __complex_abs(__complex__ _Float16 __z)
+  { return _Float16(__builtin_cabsf(__z)); }
+
+  inline _Float16
+  __complex_arg(__complex__ _Float16 __z)
+  { return _Float16(__builtin_cargf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_cos(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_ccosf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_cosh(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_ccoshf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_exp(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_cexpf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_log(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_clogf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_sin(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_csinf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_sinh(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_csinhf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_sqrt(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_csqrtf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_tan(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_ctanf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_tanh(__complex__ _Float16 __z)
+  { return static_cast<__complex__ _Float16>(__builtin_ctanhf(__z)); }
+
+  inline __complex__ _Float16
+  __complex_pow(__complex__ _Float16 __x, __complex__ _Float16 __y)
+  { return static_cast<__complex__ _Float16>(__builtin_cpowf(__x, __y)); }
+#endif
+
+#if defined(__STDCPP_FLOAT32_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
+  inline _Float32
+  __complex_abs(__complex__ _Float32 __z) { return __builtin_cabsf(__z); }
+
+  inline _Float32
+  __complex_arg(__complex__ _Float32 __z) { return __builtin_cargf(__z); }
+
+  inline __complex__ _Float32
+  __complex_cos(__complex__ _Float32 __z) { return __builtin_ccosf(__z); }
+
+  inline __complex__ _Float32
+  __complex_cosh(__complex__ _Float32 __z) { return __builtin_ccoshf(__z); }
+
+  inline __complex__ _Float32
+  __complex_exp(__complex__ _Float32 __z) { return __builtin_cexpf(__z); }
+
+  inline __complex__ _Float32
+  __complex_log(__complex__ _Float32 __z) { return __builtin_clogf(__z); }
+
+  inline __complex__ _Float32
+  __complex_sin(__complex__ _Float32 __z) { return __builtin_csinf(__z); }
+
+  inline __complex__ _Float32
+  __complex_sinh(__complex__ _Float32 __z) { return __builtin_csinhf(__z); }
+
+  inline __complex__ _Float32
+  __complex_sqrt(__complex__ _Float32 __z) { return __builtin_csqrtf(__z); }
+
+  inline __complex__ _Float32
+  __complex_tan(__complex__ _Float32 __z) { return __builtin_ctanf(__z); }
+
+  inline __complex__ _Float32
+  __complex_tanh(__complex__ _Float32 __z) { return __builtin_ctanhf(__z); }
+
+  inline __complex__ _Float32
+  __complex_pow(__complex__ _Float32 __x, __complex__ _Float32 __y)
+  { return __builtin_cpowf(__x, __y); }
+#endif
+
+#if defined(__STDCPP_FLOAT64_T__) && defined(_GLIBCXX_DOUBLE_IS_IEEE_BINARY64)
+  inline _Float64
+  __complex_abs(__complex__ _Float64 __z) { return __builtin_cabs(__z); }
+
+  inline _Float64
+  __complex_arg(__complex__ _Float64 __z) { return __builtin_carg(__z); }
+
+  inline __complex__ _Float64
+  __complex_cos(__complex__ _Float64 __z) { return __builtin_ccos(__z); }
+
+  inline __complex__ _Float64
+  __complex_cosh(__complex__ _Float64 __z) { return __builtin_ccosh(__z); }
+
+  inline __complex__ _Float64
+  __complex_exp(__complex__ _Float64 __z) { return __builtin_cexp(__z); }
+
+  inline __complex__ _Float64
+  __complex_log(__complex__ _Float64 __z) { return __builtin_clog(__z); }
+
+  inline __complex__ _Float64
+  __complex_sin(__complex__ _Float64 __z) { return __builtin_csin(__z); }
+
+  inline __complex__ _Float64
+  __complex_sinh(__complex__ _Float64 __z) { return __builtin_csinh(__z); }
+
+  inline __complex__ _Float64
+  __complex_sqrt(__complex__ _Float64 __z) { return __builtin_csqrt(__z); }
+
+  inline __complex__ _Float64
+  __complex_tan(__complex__ _Float64 __z) { return __builtin_ctan(__z); }
+
+  inline __complex__ _Float64
+  __complex_tanh(__complex__ _Float64 __z) { return __builtin_ctanh(__z); }
+
+  inline __complex__ _Float64
+  __complex_pow(__complex__ _Float64 __x, __complex__ _Float64 __y)
+  { return __builtin_cpow(__x, __y); }
+#endif
+
+#if defined(__STDCPP_FLOAT128_T__) && defined(_GLIBCXX_LDOUBLE_IS_IEEE_BINARY128)
+  inline _Float128
+  __complex_abs(__complex__ _Float128 __z) { return __builtin_cabsl(__z); }
+
+  inline _Float128
+  __complex_arg(__complex__ _Float128 __z) { return __builtin_cargl(__z); }
+
+  inline __complex__ _Float128
+  __complex_cos(__complex__ _Float128 __z) { return __builtin_ccosl(__z); }
+
+  inline __complex__ _Float128
+  __complex_cosh(__complex__ _Float128 __z) { return __builtin_ccoshl(__z); }
+
+  inline __complex__ _Float128
+  __complex_exp(__complex__ _Float128 __z) { return __builtin_cexpl(__z); }
+
+  inline __complex__ _Float128
+  __complex_log(__complex__ _Float128 __z) { return __builtin_clogl(__z); }
+
+  inline __complex__ _Float128
+  __complex_sin(__complex__ _Float128 __z) { return __builtin_csinl(__z); }
+
+  inline __complex__ _Float128
+  __complex_sinh(__complex__ _Float128 __z) { return __builtin_csinhl(__z); }
+
+  inline __complex__ _Float128
+  __complex_sqrt(__complex__ _Float128 __z) { return __builtin_csqrtl(__z); }
+
+  inline __complex__ _Float128
+  __complex_tan(__complex__ _Float128 __z) { return __builtin_ctanl(__z); }
+
+  inline __complex__ _Float128
+  __complex_tanh(__complex__ _Float128 __z) { return __builtin_ctanhl(__z); }
+
+  inline __complex__ _Float128
+  __complex_pow(__complex__ _Float128 __x, __complex__ _Float128 __y)
+  { return __builtin_cpowl(__x, __y); }
+#elif defined(__STDCPP_FLOAT128_T__) && defined(_GLIBCXX_HAVE_FLOAT128_MATH)
+  inline _Float128
+  __complex_abs(__complex__ _Float128 __z) { return __builtin_cabsf128(__z); }
+
+  inline _Float128
+  __complex_arg(__complex__ _Float128 __z) { return __builtin_cargf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_cos(__complex__ _Float128 __z) { return __builtin_ccosf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_cosh(__complex__ _Float128 __z) { return __builtin_ccoshf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_exp(__complex__ _Float128 __z) { return __builtin_cexpf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_log(__complex__ _Float128 __z) { return __builtin_clogf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_sin(__complex__ _Float128 __z) { return __builtin_csinf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_sinh(__complex__ _Float128 __z) { return __builtin_csinhf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_sqrt(__complex__ _Float128 __z) { return __builtin_csqrtf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_tan(__complex__ _Float128 __z) { return __builtin_ctanf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_tanh(__complex__ _Float128 __z) { return __builtin_ctanhf128(__z); }
+
+  inline __complex__ _Float128
+  __complex_pow(__complex__ _Float128 __x, __complex__ _Float128 __y)
+  { return __builtin_cpowf128(__x, __y); }
+#endif
+
+#if defined(__STDCPP_BFLOAT16_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
+  inline __gnu_cxx::__bfloat16_t
+  __complex_abs(__complex__ decltype(0.0bf16) __z)
+  { return __gnu_cxx::__bfloat16_t(__builtin_cabsf(__z)); }
+
+  inline __gnu_cxx::__bfloat16_t
+  __complex_arg(__complex__ decltype(0.0bf16) __z)
+  { return __gnu_cxx::__bfloat16_t(__builtin_cargf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_cos(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ccosf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_cosh(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ccoshf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_exp(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_cexpf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_log(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_clogf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_sin(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csinf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_sinh(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csinhf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_sqrt(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csqrtf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_tan(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ctanf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_tanh(__complex__ decltype(0.0bf16) __z)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ctanhf(__z)); }
+
+  inline __complex__ decltype(0.0bf16)
+  __complex_pow(__complex__ decltype(0.0bf16) __x,
+		__complex__ decltype(0.0bf16) __y)
+  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_cpowf(__x,
+								      __y)); }
+#endif
+#endif
+
   // 26.2.7/3 abs(__z):  Returns the magnitude of __z.
   template<typename _Tp>
     inline _Tp
@@ -1080,264 +1343,6 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	                 : std::pow(complex<_Tp>(__x), __y);
     }
 
-#if _GLIBCXX_USE_C99_COMPLEX
-#if defined(__STDCPP_FLOAT16_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
-  inline _Float16
-  __complex_abs(__complex__ _Float16 __z)
-  { return _Float16(__builtin_cabsf(__z)); }
-
-  inline _Float16
-  __complex_arg(__complex__ _Float16 __z)
-  { return _Float16(__builtin_cargf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_cos(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_ccosf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_cosh(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_ccoshf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_exp(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_cexpf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_log(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_clogf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_sin(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_csinf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_sinh(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_csinhf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_sqrt(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_csqrtf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_tan(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_ctanf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_tanh(__complex__ _Float16 __z)
-  { return static_cast<__complex__ _Float16>(__builtin_ctanhf(__z)); }
-
-  inline __complex__ _Float16
-  __complex_pow(__complex__ _Float16 __x, __complex__ _Float16 __y)
-  { return static_cast<__complex__ _Float16>(__builtin_cpowf(__x, __y)); }
-#endif
-
-#if defined(__STDCPP_FLOAT32_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
-  inline _Float32
-  __complex_abs(__complex__ _Float32 __z) { return __builtin_cabsf(__z); }
-
-  inline _Float32
-  __complex_arg(__complex__ _Float32 __z) { return __builtin_cargf(__z); }
-
-  inline __complex__ _Float32
-  __complex_cos(__complex__ _Float32 __z) { return __builtin_ccosf(__z); }
-
-  inline __complex__ _Float32
-  __complex_cosh(__complex__ _Float32 __z) { return __builtin_ccoshf(__z); }
-
-  inline __complex__ _Float32
-  __complex_exp(__complex__ _Float32 __z) { return __builtin_cexpf(__z); }
-
-  inline __complex__ _Float32
-  __complex_log(__complex__ _Float32 __z) { return __builtin_clogf(__z); }
-
-  inline __complex__ _Float32
-  __complex_sin(__complex__ _Float32 __z) { return __builtin_csinf(__z); }
-
-  inline __complex__ _Float32
-  __complex_sinh(__complex__ _Float32 __z) { return __builtin_csinhf(__z); }
-
-  inline __complex__ _Float32
-  __complex_sqrt(__complex__ _Float32 __z) { return __builtin_csqrtf(__z); }
-
-  inline __complex__ _Float32
-  __complex_tan(__complex__ _Float32 __z) { return __builtin_ctanf(__z); }
-
-  inline __complex__ _Float32
-  __complex_tanh(__complex__ _Float32 __z) { return __builtin_ctanhf(__z); }
-
-  inline __complex__ _Float32
-  __complex_pow(__complex__ _Float32 __x, __complex__ _Float32 __y)
-  { return __builtin_cpowf(__x, __y); }
-#endif
-
-#if defined(__STDCPP_FLOAT64_T__) && defined(_GLIBCXX_DOUBLE_IS_IEEE_BINARY64)
-  inline _Float64
-  __complex_abs(__complex__ _Float64 __z) { return __builtin_cabs(__z); }
-
-  inline _Float64
-  __complex_arg(__complex__ _Float64 __z) { return __builtin_carg(__z); }
-
-  inline __complex__ _Float64
-  __complex_cos(__complex__ _Float64 __z) { return __builtin_ccos(__z); }
-
-  inline __complex__ _Float64
-  __complex_cosh(__complex__ _Float64 __z) { return __builtin_ccosh(__z); }
-
-  inline __complex__ _Float64
-  __complex_exp(__complex__ _Float64 __z) { return __builtin_cexp(__z); }
-
-  inline __complex__ _Float64
-  __complex_log(__complex__ _Float64 __z) { return __builtin_clog(__z); }
-
-  inline __complex__ _Float64
-  __complex_sin(__complex__ _Float64 __z) { return __builtin_csin(__z); }
-
-  inline __complex__ _Float64
-  __complex_sinh(__complex__ _Float64 __z) { return __builtin_csinh(__z); }
-
-  inline __complex__ _Float64
-  __complex_sqrt(__complex__ _Float64 __z) { return __builtin_csqrt(__z); }
-
-  inline __complex__ _Float64
-  __complex_tan(__complex__ _Float64 __z) { return __builtin_ctan(__z); }
-
-  inline __complex__ _Float64
-  __complex_tanh(__complex__ _Float64 __z) { return __builtin_ctanh(__z); }
-
-  inline __complex__ _Float64
-  __complex_pow(__complex__ _Float64 __x, __complex__ _Float64 __y)
-  { return __builtin_cpow(__x, __y); }
-#endif
-
-#if defined(__STDCPP_FLOAT128_T__) && defined(_GLIBCXX_LDOUBLE_IS_IEEE_BINARY128)
-  inline _Float128
-  __complex_abs(__complex__ _Float128 __z) { return __builtin_cabsl(__z); }
-
-  inline _Float128
-  __complex_arg(__complex__ _Float128 __z) { return __builtin_cargl(__z); }
-
-  inline __complex__ _Float128
-  __complex_cos(__complex__ _Float128 __z) { return __builtin_ccosl(__z); }
-
-  inline __complex__ _Float128
-  __complex_cosh(__complex__ _Float128 __z) { return __builtin_ccoshl(__z); }
-
-  inline __complex__ _Float128
-  __complex_exp(__complex__ _Float128 __z) { return __builtin_cexpl(__z); }
-
-  inline __complex__ _Float128
-  __complex_log(__complex__ _Float128 __z) { return __builtin_clogl(__z); }
-
-  inline __complex__ _Float128
-  __complex_sin(__complex__ _Float128 __z) { return __builtin_csinl(__z); }
-
-  inline __complex__ _Float128
-  __complex_sinh(__complex__ _Float128 __z) { return __builtin_csinhl(__z); }
-
-  inline __complex__ _Float128
-  __complex_sqrt(__complex__ _Float128 __z) { return __builtin_csqrtl(__z); }
-
-  inline __complex__ _Float128
-  __complex_tan(__complex__ _Float128 __z) { return __builtin_ctanl(__z); }
-
-  inline __complex__ _Float128
-  __complex_tanh(__complex__ _Float128 __z) { return __builtin_ctanhl(__z); }
-
-  inline __complex__ _Float128
-  __complex_pow(__complex__ _Float128 __x, __complex__ _Float128 __y)
-  { return __builtin_cpowl(__x, __y); }
-#elif defined(__STDCPP_FLOAT128_T__) && defined(_GLIBCXX_HAVE_FLOAT128_MATH)
-  inline _Float128
-  __complex_abs(__complex__ _Float128 __z) { return __builtin_cabsf128(__z); }
-
-  inline _Float128
-  __complex_arg(__complex__ _Float128 __z) { return __builtin_cargf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_cos(__complex__ _Float128 __z) { return __builtin_ccosf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_cosh(__complex__ _Float128 __z) { return __builtin_ccoshf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_exp(__complex__ _Float128 __z) { return __builtin_cexpf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_log(__complex__ _Float128 __z) { return __builtin_clogf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_sin(__complex__ _Float128 __z) { return __builtin_csinf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_sinh(__complex__ _Float128 __z) { return __builtin_csinhf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_sqrt(__complex__ _Float128 __z) { return __builtin_csqrtf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_tan(__complex__ _Float128 __z) { return __builtin_ctanf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_tanh(__complex__ _Float128 __z) { return __builtin_ctanhf128(__z); }
-
-  inline __complex__ _Float128
-  __complex_pow(__complex__ _Float128 __x, __complex__ _Float128 __y)
-  { return __builtin_cpowf128(__x, __y); }
-#endif
-
-#if defined(__STDCPP_BFLOAT16_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
-  inline __gnu_cxx::__bfloat16_t
-  __complex_abs(__complex__ decltype(0.0bf16) __z)
-  { return __gnu_cxx::__bfloat16_t(__builtin_cabsf(__z)); }
-
-  inline __gnu_cxx::__bfloat16_t
-  __complex_arg(__complex__ decltype(0.0bf16) __z)
-  { return __gnu_cxx::__bfloat16_t(__builtin_cargf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_cos(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ccosf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_cosh(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ccoshf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_exp(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_cexpf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_log(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_clogf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_sin(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csinf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_sinh(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csinhf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_sqrt(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_csqrtf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_tan(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ctanf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_tanh(__complex__ decltype(0.0bf16) __z)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_ctanhf(__z)); }
-
-  inline __complex__ decltype(0.0bf16)
-  __complex_pow(__complex__ decltype(0.0bf16) __x,
-		__complex__ decltype(0.0bf16) __y)
-  { return static_cast<__complex__ decltype(0.0bf16)>(__builtin_cpowf(__x,
-								      __y)); }
-#endif
-#endif
-
   /// 26.2.3  complex specializations
   /// complex<float> specialization
   template<>
@@ -1357,6 +1362,10 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__real__ _M_value = __r;
 	__imag__ _M_value = __i;
       }
+#endif
+
+#if __cplusplus >= 201103L
+      _GLIBCXX14_CONSTEXPR complex(const complex&) = default;
 #endif
 
 #if __cplusplus > 202002L
@@ -1512,6 +1521,10 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       }
 #endif
 
+#if __cplusplus >= 201103L
+      _GLIBCXX14_CONSTEXPR complex(const complex&) = default;
+#endif
+
 #if __cplusplus > 202002L
       template<typename _Up>
 	explicit(!requires(_Up __u) { value_type{__u}; })
@@ -1664,6 +1677,10 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 	__real__ _M_value = __r;
 	__imag__ _M_value = __i;
       }
+#endif
+
+#if __cplusplus >= 201103L
+      _GLIBCXX14_CONSTEXPR complex(const complex&) = default;
 #endif
 
 #if __cplusplus > 202002L
@@ -1835,12 +1852,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 #endif
 
   template<typename _Tp>
-    requires(__complex_type<_Tp>::type)
+    requires requires { typename __complex_type<_Tp>::type; }
     class complex<_Tp>
     {
     public:
       typedef _Tp value_type;
-      typedef std::__complex_type<_Tp>::type _ComplexT;
+      typedef typename std::__complex_type<_Tp>::type _ComplexT;
 
       constexpr complex(_ComplexT __z) : _M_value(__z) { }
 
@@ -1901,6 +1918,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
       // Let the compiler synthesize the copy and assignment
       // operator.  It always does a pretty good job.
+      constexpr complex(const complex&) = default;
       constexpr complex& operator=(const complex&) = default;
 
       template<typename _Up>
@@ -2021,233 +2039,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       return std::complex<_Tp>(__pi_2 - __t.real(), -__t.imag());
     }
 
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_acos(__complex__ float __z)
-  { return __builtin_cacosf(__z); }
-
-  inline __complex__ double
-  __complex_acos(__complex__ double __z)
-  { return __builtin_cacos(__z); }
-
-  inline __complex__ long double
-  __complex_acos(const __complex__ long double& __z)
-  { return __builtin_cacosl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    acos(const std::complex<_Tp>& __z)
-    { return __complex_acos(__z.__rep()); }
-#else
-  /// acos(__z) [8.1.2].
-  //  Effects:  Behaves the same as C99 function cacos, defined
-  //            in subclause 7.3.5.1.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    acos(const std::complex<_Tp>& __z)
-    { return __complex_acos(__z); }
-#endif
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    __complex_asin(const std::complex<_Tp>& __z)
-    {
-      std::complex<_Tp> __t(-__z.imag(), __z.real());
-      __t = std::asinh(__t);
-      return std::complex<_Tp>(__t.imag(), -__t.real());
-    }
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_asin(__complex__ float __z)
-  { return __builtin_casinf(__z); }
-
-  inline __complex__ double
-  __complex_asin(__complex__ double __z)
-  { return __builtin_casin(__z); }
-
-  inline __complex__ long double
-  __complex_asin(const __complex__ long double& __z)
-  { return __builtin_casinl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    asin(const std::complex<_Tp>& __z)
-    { return __complex_asin(__z.__rep()); }
-#else
-  /// asin(__z) [8.1.3].
-  //  Effects:  Behaves the same as C99 function casin, defined
-  //            in subclause 7.3.5.2.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    asin(const std::complex<_Tp>& __z)
-    { return __complex_asin(__z); }
-#endif
-
-  template<typename _Tp>
-    std::complex<_Tp>
-    __complex_atan(const std::complex<_Tp>& __z)
-    {
-      const _Tp __r2 = __z.real() * __z.real();
-      const _Tp __x = _Tp(1.0) - __r2 - __z.imag() * __z.imag();
-
-      _Tp __num = __z.imag() + _Tp(1.0);
-      _Tp __den = __z.imag() - _Tp(1.0);
-
-      __num = __r2 + __num * __num;
-      __den = __r2 + __den * __den;
-
-      return std::complex<_Tp>(_Tp(0.5) * atan2(_Tp(2.0) * __z.real(), __x),
-			       _Tp(0.25) * log(__num / __den));
-    }
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_atan(__complex__ float __z)
-  { return __builtin_catanf(__z); }
-
-  inline __complex__ double
-  __complex_atan(__complex__ double __z)
-  { return __builtin_catan(__z); }
-
-  inline __complex__ long double
-  __complex_atan(const __complex__ long double& __z)
-  { return __builtin_catanl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    atan(const std::complex<_Tp>& __z)
-    { return __complex_atan(__z.__rep()); }
-#else
-  /// atan(__z) [8.1.4].
-  //  Effects:  Behaves the same as C99 function catan, defined
-  //            in subclause 7.3.5.3.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    atan(const std::complex<_Tp>& __z)
-    { return __complex_atan(__z); }
-#endif
-
-  template<typename _Tp>
-    std::complex<_Tp>
-    __complex_acosh(const std::complex<_Tp>& __z)
-    {
-      // Kahan's formula.
-      return _Tp(2.0) * std::log(std::sqrt(_Tp(0.5) * (__z + _Tp(1.0)))
-				 + std::sqrt(_Tp(0.5) * (__z - _Tp(1.0))));
-    }
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_acosh(__complex__ float __z)
-  { return __builtin_cacoshf(__z); }
-
-  inline __complex__ double
-  __complex_acosh(__complex__ double __z)
-  { return __builtin_cacosh(__z); }
-
-  inline __complex__ long double
-  __complex_acosh(const __complex__ long double& __z)
-  { return __builtin_cacoshl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    acosh(const std::complex<_Tp>& __z)
-    { return __complex_acosh(__z.__rep()); }
-#else
-  /// acosh(__z) [8.1.5].
-  //  Effects:  Behaves the same as C99 function cacosh, defined
-  //            in subclause 7.3.6.1.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    acosh(const std::complex<_Tp>& __z)
-    { return __complex_acosh(__z); }
-#endif
-
-  template<typename _Tp>
-    std::complex<_Tp>
-    __complex_asinh(const std::complex<_Tp>& __z)
-    {
-      std::complex<_Tp> __t((__z.real() - __z.imag())
-			    * (__z.real() + __z.imag()) + _Tp(1.0),
-			    _Tp(2.0) * __z.real() * __z.imag());
-      __t = std::sqrt(__t);
-
-      return std::log(__t + __z);
-    }
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_asinh(__complex__ float __z)
-  { return __builtin_casinhf(__z); }
-
-  inline __complex__ double
-  __complex_asinh(__complex__ double __z)
-  { return __builtin_casinh(__z); }
-
-  inline __complex__ long double
-  __complex_asinh(const __complex__ long double& __z)
-  { return __builtin_casinhl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    asinh(const std::complex<_Tp>& __z)
-    { return __complex_asinh(__z.__rep()); }
-#else
-  /// asinh(__z) [8.1.6].
-  //  Effects:  Behaves the same as C99 function casin, defined
-  //            in subclause 7.3.6.2.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    asinh(const std::complex<_Tp>& __z)
-    { return __complex_asinh(__z); }
-#endif
-
-  template<typename _Tp>
-    std::complex<_Tp>
-    __complex_atanh(const std::complex<_Tp>& __z)
-    {
-      const _Tp __i2 = __z.imag() * __z.imag();
-      const _Tp __x = _Tp(1.0) - __i2 - __z.real() * __z.real();
-
-      _Tp __num = _Tp(1.0) + __z.real();
-      _Tp __den = _Tp(1.0) - __z.real();
-
-      __num = __i2 + __num * __num;
-      __den = __i2 + __den * __den;
-
-      return std::complex<_Tp>(_Tp(0.25) * (log(__num) - log(__den)),
-			       _Tp(0.5) * atan2(_Tp(2.0) * __z.imag(), __x));
-    }
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
-  inline __complex__ float
-  __complex_atanh(__complex__ float __z)
-  { return __builtin_catanhf(__z); }
-
-  inline __complex__ double
-  __complex_atanh(__complex__ double __z)
-  { return __builtin_catanh(__z); }
-
-  inline __complex__ long double
-  __complex_atanh(const __complex__ long double& __z)
-  { return __builtin_catanhl(__z); }
-
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    atanh(const std::complex<_Tp>& __z)
-    { return __complex_atanh(__z.__rep()); }
-#else
-  /// atanh(__z) [8.1.7].
-  //  Effects:  Behaves the same as C99 function catanh, defined
-  //            in subclause 7.3.6.3.
-  template<typename _Tp>
-    inline std::complex<_Tp>
-    atanh(const std::complex<_Tp>& __z)
-    { return __complex_atanh(__z); }
-#endif
-
-#if _GLIBCXX_USE_C99_COMPLEX_TR1
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
 #if defined(__STDCPP_FLOAT16_T__) && defined(_GLIBCXX_FLOAT_IS_IEEE_BINARY32)
   inline __complex__ _Float16
   __complex_acos(__complex__ _Float16 __z)
@@ -2403,6 +2195,232 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 #endif
 #endif
 
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_acos(__complex__ float __z)
+  { return __builtin_cacosf(__z); }
+
+  inline __complex__ double
+  __complex_acos(__complex__ double __z)
+  { return __builtin_cacos(__z); }
+
+  inline __complex__ long double
+  __complex_acos(const __complex__ long double& __z)
+  { return __builtin_cacosl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    acos(const std::complex<_Tp>& __z)
+    { return __complex_acos(__z.__rep()); }
+#else
+  /// acos(__z) [8.1.2].
+  //  Effects:  Behaves the same as C99 function cacos, defined
+  //            in subclause 7.3.5.1.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    acos(const std::complex<_Tp>& __z)
+    { return __complex_acos(__z); }
+#endif
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    __complex_asin(const std::complex<_Tp>& __z)
+    {
+      std::complex<_Tp> __t(-__z.imag(), __z.real());
+      __t = std::asinh(__t);
+      return std::complex<_Tp>(__t.imag(), -__t.real());
+    }
+
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_asin(__complex__ float __z)
+  { return __builtin_casinf(__z); }
+
+  inline __complex__ double
+  __complex_asin(__complex__ double __z)
+  { return __builtin_casin(__z); }
+
+  inline __complex__ long double
+  __complex_asin(const __complex__ long double& __z)
+  { return __builtin_casinl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    asin(const std::complex<_Tp>& __z)
+    { return __complex_asin(__z.__rep()); }
+#else
+  /// asin(__z) [8.1.3].
+  //  Effects:  Behaves the same as C99 function casin, defined
+  //            in subclause 7.3.5.2.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    asin(const std::complex<_Tp>& __z)
+    { return __complex_asin(__z); }
+#endif
+
+  template<typename _Tp>
+    std::complex<_Tp>
+    __complex_atan(const std::complex<_Tp>& __z)
+    {
+      const _Tp __r2 = __z.real() * __z.real();
+      const _Tp __x = _Tp(1.0) - __r2 - __z.imag() * __z.imag();
+
+      _Tp __num = __z.imag() + _Tp(1.0);
+      _Tp __den = __z.imag() - _Tp(1.0);
+
+      __num = __r2 + __num * __num;
+      __den = __r2 + __den * __den;
+
+      return std::complex<_Tp>(_Tp(0.5) * atan2(_Tp(2.0) * __z.real(), __x),
+			       _Tp(0.25) * log(__num / __den));
+    }
+
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_atan(__complex__ float __z)
+  { return __builtin_catanf(__z); }
+
+  inline __complex__ double
+  __complex_atan(__complex__ double __z)
+  { return __builtin_catan(__z); }
+
+  inline __complex__ long double
+  __complex_atan(const __complex__ long double& __z)
+  { return __builtin_catanl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    atan(const std::complex<_Tp>& __z)
+    { return __complex_atan(__z.__rep()); }
+#else
+  /// atan(__z) [8.1.4].
+  //  Effects:  Behaves the same as C99 function catan, defined
+  //            in subclause 7.3.5.3.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    atan(const std::complex<_Tp>& __z)
+    { return __complex_atan(__z); }
+#endif
+
+  template<typename _Tp>
+    std::complex<_Tp>
+    __complex_acosh(const std::complex<_Tp>& __z)
+    {
+      // Kahan's formula.
+      return _Tp(2.0) * std::log(std::sqrt(_Tp(0.5) * (__z + _Tp(1.0)))
+				 + std::sqrt(_Tp(0.5) * (__z - _Tp(1.0))));
+    }
+
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_acosh(__complex__ float __z)
+  { return __builtin_cacoshf(__z); }
+
+  inline __complex__ double
+  __complex_acosh(__complex__ double __z)
+  { return __builtin_cacosh(__z); }
+
+  inline __complex__ long double
+  __complex_acosh(const __complex__ long double& __z)
+  { return __builtin_cacoshl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    acosh(const std::complex<_Tp>& __z)
+    { return __complex_acosh(__z.__rep()); }
+#else
+  /// acosh(__z) [8.1.5].
+  //  Effects:  Behaves the same as C99 function cacosh, defined
+  //            in subclause 7.3.6.1.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    acosh(const std::complex<_Tp>& __z)
+    { return __complex_acosh(__z); }
+#endif
+
+  template<typename _Tp>
+    std::complex<_Tp>
+    __complex_asinh(const std::complex<_Tp>& __z)
+    {
+      std::complex<_Tp> __t((__z.real() - __z.imag())
+			    * (__z.real() + __z.imag()) + _Tp(1.0),
+			    _Tp(2.0) * __z.real() * __z.imag());
+      __t = std::sqrt(__t);
+
+      return std::log(__t + __z);
+    }
+
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_asinh(__complex__ float __z)
+  { return __builtin_casinhf(__z); }
+
+  inline __complex__ double
+  __complex_asinh(__complex__ double __z)
+  { return __builtin_casinh(__z); }
+
+  inline __complex__ long double
+  __complex_asinh(const __complex__ long double& __z)
+  { return __builtin_casinhl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    asinh(const std::complex<_Tp>& __z)
+    { return __complex_asinh(__z.__rep()); }
+#else
+  /// asinh(__z) [8.1.6].
+  //  Effects:  Behaves the same as C99 function casin, defined
+  //            in subclause 7.3.6.2.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    asinh(const std::complex<_Tp>& __z)
+    { return __complex_asinh(__z); }
+#endif
+
+  template<typename _Tp>
+    std::complex<_Tp>
+    __complex_atanh(const std::complex<_Tp>& __z)
+    {
+      const _Tp __i2 = __z.imag() * __z.imag();
+      const _Tp __x = _Tp(1.0) - __i2 - __z.real() * __z.real();
+
+      _Tp __num = _Tp(1.0) + __z.real();
+      _Tp __den = _Tp(1.0) - __z.real();
+
+      __num = __i2 + __num * __num;
+      __den = __i2 + __den * __den;
+
+      return std::complex<_Tp>(_Tp(0.25) * (log(__num) - log(__den)),
+			       _Tp(0.5) * atan2(_Tp(2.0) * __z.imag(), __x));
+    }
+
+#if _GLIBCXX_USE_C99_COMPLEX_ARC
+  inline __complex__ float
+  __complex_atanh(__complex__ float __z)
+  { return __builtin_catanhf(__z); }
+
+  inline __complex__ double
+  __complex_atanh(__complex__ double __z)
+  { return __builtin_catanh(__z); }
+
+  inline __complex__ long double
+  __complex_atanh(const __complex__ long double& __z)
+  { return __builtin_catanhl(__z); }
+
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    atanh(const std::complex<_Tp>& __z)
+    { return __complex_atanh(__z.__rep()); }
+#else
+  /// atanh(__z) [8.1.7].
+  //  Effects:  Behaves the same as C99 function catanh, defined
+  //            in subclause 7.3.6.3.
+  template<typename _Tp>
+    inline std::complex<_Tp>
+    atanh(const std::complex<_Tp>& __z)
+    { return __complex_atanh(__z); }
+#endif
+
   template<typename _Tp>
     inline _Tp
     /// fabs(__z) [8.1.8].
@@ -2528,13 +2546,13 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 #endif
 
   template<typename _Tp>
-    requires(__complex_type<_Tp>::type)
+    requires requires { typename __complex_type<_Tp>::type; }
     inline complex<_Tp>
     __complex_proj(const complex<_Tp>& __z)
     { return __complex_proj(__z.__rep()); }
 #endif
 
-#elif defined _GLIBCXX_USE_C99_MATH_TR1
+#elif defined _GLIBCXX_USE_C99_MATH_FUNCS
   inline complex<float>
   __complex_proj(const complex<float>& __z)
   {
@@ -2586,13 +2604,12 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       return std::complex<__type>(__x, -__type());
     }
 
-#if __cplusplus > 201103L
+#ifdef __cpp_lib_complex_udls // C++ >= 14
 
 inline namespace literals {
 inline namespace complex_literals {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wliteral-suffix"
-#define __cpp_lib_complex_udls 201309L
 
   constexpr std::complex<float>
   operator""if(long double __num)
@@ -2622,11 +2639,15 @@ inline namespace complex_literals {
 } // inline namespace complex_literals
 } // inline namespace literals
 
-#endif // C++14
+#endif // __cpp_lib_complex_udls
 
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace
 
 #endif  // C++11
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 #endif  /* _GLIBCXX_COMPLEX */

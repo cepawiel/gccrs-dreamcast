@@ -1,5 +1,5 @@
 /* Declaration statement matcher
-   Copyright (C) 2002-2022 Free Software Foundation, Inc.
+   Copyright (C) 2002-2024 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -1056,6 +1056,7 @@ static match
 char_len_param_value (gfc_expr **expr, bool *deferred)
 {
   match m;
+  gfc_expr *p;
 
   *expr = NULL;
   *deferred = false;
@@ -1081,10 +1082,12 @@ char_len_param_value (gfc_expr **expr, bool *deferred)
   if (!gfc_expr_check_typed (*expr, gfc_current_ns, false))
     return MATCH_ERROR;
 
-  /* If gfortran gets an EXPR_OP, try to simplifiy it.  This catches things
-     like CHARACTER(([1])).   */
-  if ((*expr)->expr_type == EXPR_OP)
-    gfc_simplify_expr (*expr, 1);
+  /* Try to simplify the expression to catch things like CHARACTER(([1])).   */
+  p = gfc_copy_expr (*expr);
+  if (gfc_is_constant_expr (p) && gfc_simplify_expr (p, 1))
+    gfc_replace_expr (*expr, p);
+  else
+    gfc_free_expr (p);
 
   if ((*expr)->expr_type == EXPR_FUNCTION)
     {
@@ -1401,7 +1404,9 @@ get_proc_name (const char *name, gfc_symbol **result, bool module_fcn_entry)
       /* Trap declarations of attributes in encompassing scope.  The
 	 signature for this is that ts.kind is nonzero for no-CLASS
 	 entity.  For a CLASS entity, ts.kind is zero.  */
-      if ((sym->ts.kind != 0 || sym->ts.type == BT_CLASS)
+      if ((sym->ts.kind != 0
+	   || sym->ts.type == BT_CLASS
+	   || sym->ts.type == BT_DERIVED)
 	  && !sym->attr.implicit_type
 	  && sym->attr.proc == 0
 	  && gfc_current_ns->parent != NULL
@@ -1576,7 +1581,7 @@ gfc_verify_c_interop_param (gfc_symbol *sym)
 	    }
 
           /* Character strings are only C interoperable if they have a
-	     length of 1.  However, as an argument they are also iteroperable
+	     length of 1.  However, as an argument they are also interoperable
 	     when passed as descriptor (which requires len=: or len=*).  */
 	  if (sym->ts.type == BT_CHARACTER)
 	    {
@@ -1957,6 +1962,45 @@ gfc_free_enum_history (void)
 }
 
 
+/* Function to fix initializer character length if the length of the
+   symbol or component is constant.  */
+
+static bool
+fix_initializer_charlen (gfc_typespec *ts, gfc_expr *init)
+{
+  if (!gfc_specification_expr (ts->u.cl->length))
+    return false;
+
+  int k = gfc_validate_kind (BT_INTEGER, gfc_charlen_int_kind, false);
+
+  /* resolve_charlen will complain later on if the length
+     is too large.  Just skip the initialization in that case.  */
+  if (mpz_cmp (ts->u.cl->length->value.integer,
+	       gfc_integer_kinds[k].huge) <= 0)
+    {
+      HOST_WIDE_INT len
+		= gfc_mpz_get_hwi (ts->u.cl->length->value.integer);
+
+      if (init->expr_type == EXPR_CONSTANT)
+	gfc_set_constant_character_len (len, init, -1);
+      else if (init->expr_type == EXPR_ARRAY)
+	{
+	  gfc_constructor *cons;
+
+	  /* Build a new charlen to prevent simplification from
+	     deleting the length before it is resolved.  */
+	  init->ts.u.cl = gfc_new_charlen (gfc_current_ns, NULL);
+	  init->ts.u.cl->length = gfc_copy_expr (ts->u.cl->length);
+	  cons = gfc_constructor_first (init->value.constructor);
+	  for (; cons; cons = gfc_constructor_next (cons))
+	    gfc_set_constant_character_len (len, cons->expr, -1);
+	}
+    }
+
+  return true;
+}
+
+
 /* Function called by variable_decl() that adds an initialization
    expression to a symbol.  */
 
@@ -2070,40 +2114,10 @@ add_init_expr_to_sym (const char *name, gfc_expr **initp, locus *var_locus)
 				gfc_copy_expr (init->ts.u.cl->length);
 		}
 	    }
-	  /* Update initializer character length according symbol.  */
-	  else if (sym->ts.u.cl->length->expr_type == EXPR_CONSTANT)
-	    {
-	      if (!gfc_specification_expr (sym->ts.u.cl->length))
-		return false;
-
-	      int k = gfc_validate_kind (BT_INTEGER, gfc_charlen_int_kind,
-					 false);
-	      /* resolve_charlen will complain later on if the length
-		 is too large.  Just skeep the initialization in that case.  */
-	      if (mpz_cmp (sym->ts.u.cl->length->value.integer,
-			   gfc_integer_kinds[k].huge) <= 0)
-		{
-		  HOST_WIDE_INT len
-		    = gfc_mpz_get_hwi (sym->ts.u.cl->length->value.integer);
-
-		  if (init->expr_type == EXPR_CONSTANT)
-		    gfc_set_constant_character_len (len, init, -1);
-		  else if (init->expr_type == EXPR_ARRAY)
-		    {
-		      gfc_constructor *c;
-
-		      /* Build a new charlen to prevent simplification from
-			 deleting the length before it is resolved.  */
-		      init->ts.u.cl = gfc_new_charlen (gfc_current_ns, NULL);
-		      init->ts.u.cl->length
-			= gfc_copy_expr (sym->ts.u.cl->length);
-
-		      for (c = gfc_constructor_first (init->value.constructor);
-			   c; c = gfc_constructor_next (c))
-			gfc_set_constant_character_len (len, c->expr, -1);
-		    }
-		}
-	    }
+	  /* Update initializer character length according to symbol.  */
+	  else if (sym->ts.u.cl->length->expr_type == EXPR_CONSTANT
+		   && !fix_initializer_charlen (&sym->ts, init))
+	    return false;
 	}
 
       if (sym->attr.flavor == FL_PARAMETER && sym->attr.dimension && sym->as
@@ -2221,6 +2235,14 @@ add_init_expr_to_sym (const char *name, gfc_expr **initp, locus *var_locus)
 	    sym->ts.f90_type = init->ts.f90_type;
 	}
 
+      /* Catch the case:  type(t), parameter :: x = z'1'.  */
+      if (sym->ts.type == BT_DERIVED && init->ts.type == BT_BOZ)
+	{
+	  gfc_error ("Entity %qs at %L is incompatible with a BOZ "
+		     "literal constant", name, &sym->declared_at);
+	  return false;
+	}
+
       /* Add initializer.  Make sure we keep the ranks sane.  */
       if (sym->attr.dimension && init->rank == 0)
 	{
@@ -2231,8 +2253,7 @@ add_init_expr_to_sym (const char *name, gfc_expr **initp, locus *var_locus)
 	      && gfc_is_constant_expr (init)
 	      && (init->expr_type == EXPR_CONSTANT
 		  || init->expr_type == EXPR_STRUCTURE)
-	      && spec_size (sym->as, &size)
-	      && mpz_cmp_si (size, 0) > 0)
+	      && spec_size (sym->as, &size))
 	    {
 	      array = gfc_get_array_expr (init->ts.type, init->ts.kind,
 					  &init->where);
@@ -2358,6 +2379,13 @@ build_struct (const char *name, gfc_charlen *cl, gfc_expr **init,
 
   c->initializer = *init;
   *init = NULL;
+
+  /* Update initializer character length according to component.  */
+  if (c->ts.type == BT_CHARACTER && c->ts.u.cl->length
+      && c->ts.u.cl->length->expr_type == EXPR_CONSTANT
+      && c->initializer && c->initializer->ts.type == BT_CHARACTER
+      && !fix_initializer_charlen (&c->ts, c->initializer))
+    return false;
 
   c->as = *as;
   if (c->as != NULL)
@@ -2690,7 +2718,7 @@ variable_decl (int elem)
 	}
 
       gfc_seen_div0 = false;
-      
+
       /* F2018:C830 (R816) An explicit-shape-spec whose bounds are not
 	 constant expressions shall appear only in a subprogram, derived
 	 type definition, BLOCK construct, or interface body.  */
@@ -2761,7 +2789,7 @@ variable_decl (int elem)
 	      if (e->expr_type != EXPR_CONSTANT)
 		{
 		  n = gfc_copy_expr (e);
-		  if (!gfc_simplify_expr (n, 1)  && gfc_seen_div0) 
+		  if (!gfc_simplify_expr (n, 1)  && gfc_seen_div0)
 		    {
 		      m = MATCH_ERROR;
 		      goto cleanup;
@@ -2776,12 +2804,12 @@ variable_decl (int elem)
 	      if (e->expr_type != EXPR_CONSTANT)
 		{
 		  n = gfc_copy_expr (e);
-		  if (!gfc_simplify_expr (n, 1)  && gfc_seen_div0) 
+		  if (!gfc_simplify_expr (n, 1)  && gfc_seen_div0)
 		    {
 		      m = MATCH_ERROR;
 		      goto cleanup;
 		    }
-		  
+
 		  if (n->expr_type == EXPR_CONSTANT)
 		    gfc_replace_expr (e, n);
 		  else
@@ -2839,7 +2867,7 @@ variable_decl (int elem)
 	}
     }
 
-  /* The dummy arguments and result of the abreviated form of MODULE
+  /* The dummy arguments and result of the abbreviated form of MODULE
      PROCEDUREs, used in SUBMODULES should not be redefined.  */
   if (gfc_current_ns->proc_name
       && gfc_current_ns->proc_name->abr_modproc_decl)
@@ -3109,7 +3137,7 @@ variable_decl (int elem)
 	}
     }
 
-  /* Before adding a possible initilizer, do a simple check for compatibility
+  /* Before adding a possible initializer, do a simple check for compatibility
      of lhs and rhs types.  Assigning a REAL value to a derived type is not a
      good thing.  */
   if (current_ts.type == BT_DERIVED && initializer
@@ -3359,6 +3387,7 @@ close_brackets:
       else
 	gfc_error ("Missing right parenthesis at %C");
       m = MATCH_ERROR;
+      goto no_match;
     }
   else
      /* All tests passed.  */
@@ -4054,6 +4083,21 @@ gfc_get_pdt_instance (gfc_actual_arglist *param_list, gfc_symbol **sym,
 	  continue;
 	}
 
+      /* Addressing PR82943, this will fix the issue where a function or
+	 subroutine is declared as not a member of the PDT instance.
+	 The reason for this is because the PDT instance did not have access
+	 to its template's f2k_derived namespace in order to find the
+	 typebound procedures.
+
+	 The number of references to the PDT template's f2k_derived will
+	 ensure that f2k_derived is properly freed later on.  */
+
+      if (!instance->f2k_derived && pdt->f2k_derived)
+	{
+	  instance->f2k_derived = pdt->f2k_derived;
+	  instance->f2k_derived->refs++;
+	}
+
       /* Set the component kind using the parameterized expression.  */
       if ((c1->ts.kind == 0 || c1->ts.type == BT_CHARACTER)
 	   && c1->kind_expr != NULL)
@@ -4696,6 +4740,9 @@ get_kind:
     }
 
   m = gfc_match_kind_spec (ts, false);
+  if (m == MATCH_ERROR)
+    return MATCH_ERROR;
+
   if (m == MATCH_NO && ts->type != BT_CHARACTER)
     {
       m = gfc_match_old_kind_spec (ts);
@@ -5990,10 +6037,14 @@ verify_bind_c_sym (gfc_symbol *tmp_sym, gfc_typespec *ts,
 	    }
 	  else
 	    {
-              if (tmp_sym->ts.type == BT_DERIVED || ts->type == BT_DERIVED)
-                gfc_error ("Type declaration %qs at %L is not C "
-                           "interoperable but it is BIND(C)",
-                           tmp_sym->name, &(tmp_sym->declared_at));
+	      if (tmp_sym->ts.type == BT_DERIVED || ts->type == BT_DERIVED
+		  || tmp_sym->ts.type == BT_CLASS || ts->type == BT_CLASS)
+		{
+		  gfc_error ("Type declaration %qs at %L is not C "
+			     "interoperable but it is BIND(C)",
+			     tmp_sym->name, &(tmp_sym->declared_at));
+		  retval = false;
+		}
               else if (warn_c_binding_type)
                 gfc_warning (OPT_Wc_binding_type, "Variable %qs at %L "
                              "may not be a C interoperable "
@@ -6046,9 +6097,7 @@ verify_bind_c_sym (gfc_symbol *tmp_sym, gfc_typespec *ts,
 
       /* BIND(C) functions cannot return a character string.  */
       if (bind_c_function && tmp_sym->ts.type == BT_CHARACTER)
-	if (tmp_sym->ts.u.cl == NULL || tmp_sym->ts.u.cl->length == NULL
-	    || tmp_sym->ts.u.cl->length->expr_type != EXPR_CONSTANT
-	    || mpz_cmp_si (tmp_sym->ts.u.cl->length->value.integer, 1) != 0)
+	if (!gfc_length_one_character_type_p (&tmp_sym->ts))
 	  gfc_error ("Return type of BIND(C) function %qs of character "
 		     "type at %L must have length 1", tmp_sym->name,
 			 &(tmp_sym->declared_at));
@@ -6762,12 +6811,25 @@ ok:
 	      || (p->next == NULL && q->next != NULL))
 	    arg_count_mismatch = true;
 	  else if ((p->sym == NULL && q->sym == NULL)
-		    || strcmp (p->sym->name, q->sym->name) == 0)
+		    || (p->sym && q->sym
+			&& strcmp (p->sym->name, q->sym->name) == 0))
 	    continue;
 	  else
-	    gfc_error_now ("Mismatch in MODULE PROCEDURE formal "
-			   "argument names (%s/%s) at %C",
-			   p->sym->name, q->sym->name);
+	    {
+	      if (q->sym == NULL)
+		gfc_error_now ("MODULE PROCEDURE formal argument %qs "
+			       "conflicts with alternate return at %C",
+			       p->sym->name);
+	      else if (p->sym == NULL)
+		gfc_error_now ("MODULE PROCEDURE formal argument is "
+			       "alternate return and conflicts with "
+			       "%qs in the separate declaration at %C",
+			       q->sym->name);
+	      else
+		gfc_error_now ("Mismatch in MODULE PROCEDURE formal "
+			       "argument names (%s/%s) at %C",
+			       p->sym->name, q->sym->name);
+	    }
 	}
 
       if (arg_count_mismatch)
@@ -8336,7 +8398,7 @@ gfc_match_end (gfc_statement *st)
   match m;
   gfc_namespace *parent_ns, *ns, *prev_ns;
   gfc_namespace **nsp;
-  bool abreviated_modproc_decl = false;
+  bool abbreviated_modproc_decl = false;
   bool got_matching_end = false;
 
   old_loc = gfc_current_locus;
@@ -8360,7 +8422,7 @@ gfc_match_end (gfc_statement *st)
       state = gfc_state_stack->previous->state;
       block_name = gfc_state_stack->previous->sym == NULL
 		 ? NULL : gfc_state_stack->previous->sym->name;
-      abreviated_modproc_decl = gfc_state_stack->previous->sym
+      abbreviated_modproc_decl = gfc_state_stack->previous->sym
 		&& gfc_state_stack->previous->sym->abr_modproc_decl;
       break;
 
@@ -8368,8 +8430,8 @@ gfc_match_end (gfc_statement *st)
       break;
     }
 
-  if (!abreviated_modproc_decl)
-    abreviated_modproc_decl = gfc_current_block ()
+  if (!abbreviated_modproc_decl)
+    abbreviated_modproc_decl = gfc_current_block ()
 			      && gfc_current_block ()->abr_modproc_decl;
 
   switch (state)
@@ -8383,7 +8445,7 @@ gfc_match_end (gfc_statement *st)
 
     case COMP_SUBROUTINE:
       *st = ST_END_SUBROUTINE;
-      if (!abreviated_modproc_decl)
+      if (!abbreviated_modproc_decl)
       target = " subroutine";
       else
 	target = " procedure";
@@ -8392,7 +8454,7 @@ gfc_match_end (gfc_statement *st)
 
     case COMP_FUNCTION:
       *st = ST_END_FUNCTION;
-      if (!abreviated_modproc_decl)
+      if (!abbreviated_modproc_decl)
       target = " function";
       else
 	target = " procedure";
@@ -8521,7 +8583,7 @@ gfc_match_end (gfc_statement *st)
 	{
 	  if (!gfc_notify_std (GFC_STD_F2008, "END statement "
 			       "instead of %s statement at %L",
-			       abreviated_modproc_decl ? "END PROCEDURE"
+			       abbreviated_modproc_decl ? "END PROCEDURE"
 			       : gfc_ascii_statement(*st), &old_loc))
 	    goto cleanup;
 	}
@@ -8539,7 +8601,7 @@ gfc_match_end (gfc_statement *st)
   /* Verify that we've got the sort of end-block that we're expecting.  */
   if (gfc_match (target) != MATCH_YES)
     {
-      gfc_error ("Expecting %s statement at %L", abreviated_modproc_decl
+      gfc_error ("Expecting %s statement at %L", abbreviated_modproc_decl
 		 ? "END PROCEDURE" : gfc_ascii_statement(*st), &old_loc);
       goto cleanup;
     }
@@ -8728,43 +8790,23 @@ attr_decl1 (void)
 	}
     }
 
-  /* Update symbol table.  DIMENSION attribute is set in
-     gfc_set_array_spec().  For CLASS variables, this must be applied
-     to the first component, or '_data' field.  */
-  if (sym->ts.type == BT_CLASS && sym->ts.u.derived->attr.is_class)
-    {
-      /* gfc_set_array_spec sets sym->attr not CLASS_DATA(sym)->attr.  Check
-	 for duplicate attribute here.  */
-      if (CLASS_DATA(sym)->attr.dimension == 1 && as)
-	{
-	  gfc_error ("Duplicate DIMENSION attribute at %C");
-	  m = MATCH_ERROR;
-	  goto cleanup;
-	}
-
-      if (!gfc_copy_attr (&CLASS_DATA(sym)->attr, &current_attr, &var_locus))
-	{
-	  m = MATCH_ERROR;
-	  goto cleanup;
-	}
-    }
-  else
-    {
-      if (current_attr.dimension == 0 && current_attr.codimension == 0
-	  && !gfc_copy_attr (&sym->attr, &current_attr, &var_locus))
-	{
-	  m = MATCH_ERROR;
-	  goto cleanup;
-	}
-    }
-
   if (sym->ts.type == BT_CLASS
-      && !gfc_build_class_symbol (&sym->ts, &sym->attr, &sym->as))
+      && sym->ts.u.derived
+      && sym->ts.u.derived->attr.is_class)
+    {
+      sym->attr.pointer = CLASS_DATA(sym)->attr.class_pointer;
+      sym->attr.allocatable = CLASS_DATA(sym)->attr.allocatable;
+      sym->attr.dimension = CLASS_DATA(sym)->attr.dimension;
+      sym->attr.codimension = CLASS_DATA(sym)->attr.codimension;
+      if (CLASS_DATA (sym)->as)
+	sym->as = gfc_copy_array_spec (CLASS_DATA (sym)->as);
+    }
+  if (current_attr.dimension == 0 && current_attr.codimension == 0
+      && !gfc_copy_attr (&sym->attr, &current_attr, &var_locus))
     {
       m = MATCH_ERROR;
       goto cleanup;
     }
-
   if (!gfc_set_array_spec (sym, as, &var_locus))
     {
       m = MATCH_ERROR;
@@ -8788,6 +8830,24 @@ attr_decl1 (void)
   if ((current_attr.external || current_attr.intrinsic)
       && sym->attr.flavor != FL_PROCEDURE
       && !gfc_add_flavor (&sym->attr, FL_PROCEDURE, sym->name, NULL))
+    {
+      m = MATCH_ERROR;
+      goto cleanup;
+    }
+
+  if (sym->ts.type == BT_CLASS && sym->ts.u.derived->attr.is_class
+      && !as && !current_attr.pointer && !current_attr.allocatable
+      && !current_attr.external)
+    {
+      sym->attr.pointer = 0;
+      sym->attr.allocatable = 0;
+      sym->attr.dimension = 0;
+      sym->attr.codimension = 0;
+      gfc_free_array_spec (sym->as);
+      sym->as = NULL;
+    }
+  else if (sym->ts.type == BT_CLASS
+      && !gfc_build_class_symbol (&sym->ts, &sym->attr, &sym->as))
     {
       m = MATCH_ERROR;
       goto cleanup;
@@ -9985,9 +10045,10 @@ gfc_match_modproc (void)
   gfc_namespace *module_ns;
   gfc_interface *old_interface_head, *interface;
 
-  if ((gfc_state_stack->state != COMP_INTERFACE
-       && gfc_state_stack->state != COMP_CONTAINS)
-      || gfc_state_stack->previous == NULL
+  if (gfc_state_stack->previous == NULL
+      || (gfc_state_stack->state != COMP_INTERFACE
+	  && (gfc_state_stack->state != COMP_CONTAINS
+	      || gfc_state_stack->previous->state != COMP_INTERFACE))
       || current_interface.type == INTERFACE_NAMELESS
       || current_interface.type == INTERFACE_ABSTRACT)
     {
@@ -11626,8 +11687,9 @@ gfc_match_final_decl (void)
   block = gfc_state_stack->previous->sym;
   gcc_assert (block);
 
-  if (!gfc_state_stack->previous || !gfc_state_stack->previous->previous
-      || gfc_state_stack->previous->previous->state != COMP_MODULE)
+  if (gfc_state_stack->previous->previous
+      && gfc_state_stack->previous->previous->state != COMP_MODULE
+      && gfc_state_stack->previous->previous->state != COMP_SUBMODULE)
     {
       gfc_error ("Derived type declaration with FINAL at %C must be in the"
 		 " specification part of a MODULE");
@@ -11718,6 +11780,9 @@ const ext_attr_t ext_attr_list[] = {
   { "fastcall",     EXT_ATTR_FASTCALL,     "fastcall"  },
   { "no_arg_check", EXT_ATTR_NO_ARG_CHECK, NULL        },
   { "deprecated",   EXT_ATTR_DEPRECATED,   NULL	       },
+  { "noinline",     EXT_ATTR_NOINLINE,     NULL	       },
+  { "noreturn",     EXT_ATTR_NORETURN,     NULL	       },
+  { "weak",	    EXT_ATTR_WEAK,	   NULL	       },
   { NULL,           EXT_ATTR_LAST,         NULL        }
 };
 

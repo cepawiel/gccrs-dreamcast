@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1997-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1997-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -64,6 +64,7 @@ with Table;
 with Tbuild;         use Tbuild;
 with Uintp;          use Uintp;
 with Uname;          use Uname;
+with Warnsw;         use Warnsw;
 
 with GNAT;                 use GNAT;
 with GNAT.Dynamic_HTables; use GNAT.Dynamic_HTables;
@@ -879,6 +880,10 @@ package body Sem_Elab is
       Traversal : Body_Traversal_Kind := No_Traversal;
       --  The subprogram body traversal mode. Once set, this value should not
       --  be changed.
+
+      Within_Freezing_Actions : Boolean := False;
+      --  This flag is set when the Processing phase is currently examining a
+      --  scenario which was reached from the actions of a freeze node.
 
       Within_Generic : Boolean := False;
       --  This flag is set when the Processing phase is currently within a
@@ -5352,6 +5357,7 @@ package body Sem_Elab is
          Subp_Id   : constant Entity_Id     := Target (Call_Rep);
          Subp_Rep  : constant Target_Rep_Id :=
                        Target_Representation_Of (Subp_Id, In_State);
+         Body_Decl : constant Node_Id       := Body_Declaration (Subp_Rep);
          Subp_Decl : constant Node_Id       := Spec_Declaration (Subp_Rep);
 
          SPARK_Rules_On : constant Boolean :=
@@ -5451,6 +5457,16 @@ package body Sem_Elab is
              or else not Elaboration_Warnings_OK (Call_Rep)
              or else not Elaboration_Warnings_OK (Subp_Rep);
 
+         --  The call occurs in freezing actions context when a prior scenario
+         --  is already in that mode, or when the target is a subprogram whose
+         --  body has been generated as a freezing action. Update the state of
+         --  the Processing phase to reflect this.
+
+         New_In_State.Within_Freezing_Actions :=
+           New_In_State.Within_Freezing_Actions
+             or else (Present (Body_Decl)
+                       and then Nkind (Parent (Body_Decl)) = N_Freeze_Entity);
+
          --  The call occurs in an initial condition context when a prior
          --  scenario is already in that mode, or when the target is an
          --  Initial_Condition procedure. Update the state of the Processing
@@ -5501,7 +5517,7 @@ package body Sem_Elab is
             In_State => New_In_State);
 
          Traverse_Conditional_ABE_Body
-           (N        => Body_Declaration (Subp_Rep),
+           (N        => Body_Decl,
             In_State => New_In_State);
       end Process_Conditional_ABE_Call;
 
@@ -5718,6 +5734,13 @@ package body Sem_Elab is
             --  this traversal has suppressed elaboration warnings.
 
             if In_State.Suppress_Warnings then
+               null;
+
+            --  Do not emit any ABE diagnostics when the call occurs in a
+            --  freezing actions context because this leads to incorrect
+            --  diagnostics.
+
+            elsif In_State.Within_Freezing_Actions then
                null;
 
             --  Do not emit any ABE diagnostics when the call occurs in an
@@ -15240,10 +15263,13 @@ package body Sem_Elab is
             --  Nothing to do for predefined primitives because they are
             --  artifacts of tagged type expansion and cannot override source
             --  primitives. Nothing to do as well for inherited primitives, as
-            --  the check concerns overriding ones.
+            --  the check concerns overriding ones. Finally, nothing to do for
+            --  abstract subprograms, because they have no body that could be
+            --  examined.
 
             if Is_Predefined_Dispatching_Operation (Prim)
               or else not Is_Overriding_Subprogram (Prim)
+              or else Is_Abstract_Subprogram (Prim)
             then
                return;
             end if;
@@ -15290,9 +15316,10 @@ package body Sem_Elab is
 
             if Earlier_In_Extended_Unit (FNode, Region) then
                Error_Msg_Node_2 := Prim;
+               Error_Msg_Code := GEC_Type_Early_Call_Region;
                Error_Msg_NE
                  ("first freezing point of type & must appear within early "
-                  & "call region of primitive body & (SPARK RM 7.7(8))",
+                  & "call region of primitive body '[[]']",
                   Typ_Decl, Typ);
 
                Error_Msg_Sloc := Sloc (Region);
@@ -19594,7 +19621,7 @@ package body Sem_Elab is
                     Etype (First (Parameter_Associations (Call)));
          begin
             Elab_Unit := Scope (Typ);
-            while (Present (Elab_Unit))
+            while Present (Elab_Unit)
               and then not Is_Compilation_Unit (Elab_Unit)
             loop
                Elab_Unit := Scope (Elab_Unit);

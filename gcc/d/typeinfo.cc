@@ -1,5 +1,5 @@
 /* typeinfo.cc -- D runtime type identification.
-   Copyright (C) 2013-2022 Free Software Foundation, Inc.
+   Copyright (C) 2013-2024 Free Software Foundation, Inc.
 
 GCC is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 
 #include "dmd/aggregate.h"
+#include "dmd/dsymbol.h"
 #include "dmd/enum.h"
 #include "dmd/errors.h"
 #include "dmd/expression.h"
@@ -205,7 +206,7 @@ make_frontend_typeinfo (Identifier *ident, ClassDeclaration *base = NULL)
 
   /* Create object module in order to complete the semantic.  */
   if (!object_module->_scope)
-    object_module->importAll (NULL);
+    dmd::importAll (object_module, NULL);
 
   /* Object class doesn't exist, create a stub one that will cause an error if
      used.  */
@@ -231,7 +232,7 @@ make_frontend_typeinfo (Identifier *ident, ClassDeclaration *base = NULL)
 						      true);
   tinfo->parent = object_module;
   tinfo->members = d_gc_malloc<Dsymbols> ();
-  dsymbolSemantic (tinfo, object_module->_scope);
+  dmd::dsymbolSemantic (tinfo, object_module->_scope);
   tinfo->baseClass = base;
   /* This is a compiler generated class, and shouldn't be mistaken for being
      the type declared in the runtime library.  */
@@ -258,7 +259,9 @@ create_tinfo_types (Module *mod)
 			  array_type_node, array_type_node, array_type_node,
 			  array_type_node, ptr_type_node, ptr_type_node,
 			  ptr_type_node, d_uint_type, ptr_type_node,
-			  array_type_node, ptr_type_node, ptr_type_node, NULL);
+			  array_type_node, ptr_type_node, ptr_type_node,
+			  d_uint_type, d_uint_type, d_uint_type, d_uint_type,
+			  NULL);
 
   object_module = mod;
 }
@@ -412,7 +415,7 @@ class TypeInfoVisitor : public Visitor
     tree decl = this->internal_reference (value);
     TREE_READONLY (decl) = 1;
 
-    value = d_array_value (build_ctype (Type::tchar->arrayOf ()),
+    value = d_array_value (build_ctype (dmd::arrayOf (Type::tchar)),
 			   size_int (len), build_address (decl));
     this->layout_field (value);
   }
@@ -574,8 +577,8 @@ public:
 
   void visit (TypeInfoConstDeclaration *d) final override
   {
-    Type *tm = d->tinfo->mutableOf ();
-    tm = tm->merge2 ();
+    Type *tm = dmd::mutableOf (d->tinfo);
+    tm = dmd::merge2 (tm);
 
     /* The vtable for TypeInfo_Const.  */
     this->layout_base (Type::typeinfoconst);
@@ -591,8 +594,8 @@ public:
 
   void visit (TypeInfoInvariantDeclaration *d) final override
   {
-    Type *tm = d->tinfo->mutableOf ();
-    tm = tm->merge2 ();
+    Type *tm = dmd::mutableOf (d->tinfo);
+    tm = dmd::merge2 (tm);
 
     /* The vtable for TypeInfo_Invariant.  */
     this->layout_base (Type::typeinfoinvariant);
@@ -608,8 +611,8 @@ public:
 
   void visit (TypeInfoSharedDeclaration *d) final override
   {
-    Type *tm = d->tinfo->unSharedOf ();
-    tm = tm->merge2 ();
+    Type *tm = dmd::unSharedOf (d->tinfo);
+    tm = dmd::merge2 (tm);
 
     /* The vtable for TypeInfo_Shared.  */
     this->layout_base (Type::typeinfoshared);
@@ -625,8 +628,8 @@ public:
 
   void visit (TypeInfoWildDeclaration *d) final override
   {
-    Type *tm = d->tinfo->mutableOf ();
-    tm = tm->merge2 ();
+    Type *tm = dmd::mutableOf (d->tinfo);
+    tm = dmd::merge2 (tm);
 
     /* The vtable for TypeInfo_Inout.  */
     this->layout_base (Type::typeinfowild);
@@ -813,6 +816,7 @@ public:
 	void *deallocator;
 	OffsetTypeInfo[] m_offTi;
 	void function(Object) defaultConstructor;
+	ulong[2] nameSig
 	immutable(void)* m_RTInfo;
 
      Information relating to interfaces, and their vtables are laid out
@@ -938,6 +942,12 @@ public:
 	  this->layout_field (size_one_node);
 	else
 	  this->layout_field (null_pointer_node);
+
+	/* uint[4] nameSig;  */
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
       }
     else
       {
@@ -983,6 +993,12 @@ public:
 	  this->layout_field (build_expr (cd->getRTInfo, true));
 	else
 	  this->layout_field (null_pointer_node);
+
+	/* uint[4] nameSig;  */
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
+	this->layout_field (build_zero_cst (d_uint_type));
       }
 
     /* Put out array of Interfaces.  */
@@ -1064,17 +1080,6 @@ public:
       : null_pointer_node;
     this->layout_field (xhash);
 
-    if (sd->xhash)
-      {
-	TypeFunction *tf = sd->xhash->type->toTypeFunction ();
-	if (!tf->isnothrow () || tf->trust == TRUST::system)
-	  {
-	    warning (sd->xhash->loc, "toHash() must be declared as "
-		     "extern (D) size_t toHash() const nothrow @safe, "
-		     "not %s", tf->toChars ());
-	  }
-      }
-
     /* bool function(in void*, in void*) xopEquals;  */
     tree xeq = (sd->xeq) ? build_address (get_symbol_decl (sd->xeq))
       : null_pointer_node;
@@ -1086,7 +1091,7 @@ public:
     this->layout_field (xcmp);
 
     /* string function(const(void)*) xtoString;  */
-    FuncDeclaration *fdx = search_toString (sd);
+    FuncDeclaration *fdx = dmd::search_toString (sd);
     if (fdx)
       this->layout_field (build_address (get_symbol_decl (fdx)));
     else
@@ -1094,7 +1099,7 @@ public:
 
     /* StructFlags m_flags;  */
     int m_flags = StructFlags::none;
-    if (ti->hasPointers ())
+    if (dmd::hasPointers (ti))
       m_flags |= StructFlags::hasPointers;
     this->layout_field (build_integer_cst (m_flags, d_uint_type));
 
@@ -1132,7 +1137,7 @@ public:
     this->layout_base (Type::typeinfotypelist);
 
     /* TypeInfo[] elements;  */
-    Type *satype = Type::tvoidptr->sarrayOf (ti->arguments->length);
+    Type *satype = dmd::sarrayOf (Type::tvoidptr, ti->arguments->length);
     vec<constructor_elt, va_gc> *elms = NULL;
     for (size_t i = 0; i < ti->arguments->length; i++)
       {
@@ -1410,7 +1415,7 @@ check_typeinfo_type (const Loc &loc, Scope *sc, Expression *expr)
     {
       /* Even when compiling without RTTI we should still be able to evaluate
 	 TypeInfo at compile-time, just not at run-time.  */
-      if (!sc || !(sc->flags & SCOPEctfe))
+      if (!sc || !(sc->flags & unsigned(SCOPE::ctfe)))
 	{
 	  static int warned = 0;
 
@@ -1432,7 +1437,7 @@ check_typeinfo_type (const Loc &loc, Scope *sc, Expression *expr)
       /* If TypeInfo has not been declared, warn about each location once.  */
       static Loc warnloc;
 
-      if (loc.filename && !warnloc.equals (loc))
+      if (loc.filename () && !warnloc.equals (loc))
 	{
 	  error_at (make_location_t (loc),
 		    "%<object.TypeInfo%> could not be found, "
@@ -1535,16 +1540,18 @@ get_cpp_typeinfo_decl (ClassDeclaration *decl)
   return decl->cpp_type_info_ptr_sym;
 }
 
-/* Get the exact TypeInfo for TYPE, if it doesn't exist, create it.  */
+/* Get the exact TypeInfo for TYPE, if it doesn't exist, create it.
+   When GENERATE is true, push the TypeInfo as a member of MOD so that it will
+   get code generation. */
 
 void
-create_typeinfo (Type *type, Module *mod)
+create_typeinfo (Type *type, Module *mod, bool generate)
 {
   if (!Type::dtypeinfo)
     create_frontend_tinfo_types ();
 
   /* Do this since not all Type's are merged.  */
-  Type *t = type->merge2 ();
+  Type *t = dmd::merge2 (type);
   Identifier *ident;
 
   if (!t->vtinfo)
@@ -1696,7 +1703,7 @@ create_typeinfo (Type *type, Module *mod)
 
       /* If this has a custom implementation in rt/typeinfo, then
 	 do not generate a COMDAT for it.  */
-      if (!builtin_typeinfo_p (t))
+      if (generate && !builtin_typeinfo_p (t))
 	{
 	  /* Find module that will go all the way to an object file.  */
 	  if (mod)

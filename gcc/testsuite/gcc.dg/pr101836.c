@@ -4,16 +4,16 @@
 /* { dg-do run } */
 /* { dg-options "-O2 -fstrict-flex-arrays" } */
 
-#include <stdio.h>
+#include "builtin-object-size-common.h"
 
 #define expect(p, _v) do { \
     size_t v = _v; \
     if (p == v) \
-        printf("ok:  %s == %zd\n", #p, p); \
+	__builtin_printf("ok:  %s == %zd\n", #p, p); \
     else \
 	{  \
-          printf("WAT: %s == %zd (expected %zd)\n", #p, p, v); \
-	  __builtin_abort (); \
+	  __builtin_printf("WAT: %s == %zd (expected %zd)\n", #p, p, v); \
+	  FAIL (); \
 	} \
 } while (0);
 
@@ -46,8 +46,8 @@ void __attribute__((__noinline__)) stuff(
     struct trailing_array_3 *trailing_0,
     struct trailing_array_4 *trailing_flex)
 {
-    expect(__builtin_object_size(normal->c, 1), 16);
-    expect(__builtin_object_size(trailing_1->c, 1), 4);
+    expect(__builtin_object_size(normal->c, 1), 4 * __SIZEOF_INT__);
+    expect(__builtin_object_size(trailing_1->c, 1), __SIZEOF_INT__);
     expect(__builtin_object_size(trailing_0->c, 1), 0);
     expect(__builtin_object_size(trailing_flex->c, 1), -1);
 }
@@ -56,5 +56,5 @@ int main(int argc, char *argv[])
 {
     stuff((void *)argv[0], (void *)argv[0], (void *)argv[0], (void *)argv[0]);
 
-    return 0;
+    DONE ();
 }

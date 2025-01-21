@@ -1,5 +1,5 @@
 /* Output routines for GCC for ARM.
-   Copyright (C) 1991-2022 Free Software Foundation, Inc.
+   Copyright (C) 1991-2024 Free Software Foundation, Inc.
    Contributed by Pieter `Tiggr' Schoenmakers (rcpieter@win.tue.nl)
    and Martin Simmons (@harleqn.co.uk).
    More major hacks by Richard Earnshaw (rearnsha@arm.com).
@@ -69,9 +69,12 @@
 #include "optabs-libfuncs.h"
 #include "gimplify.h"
 #include "gimple.h"
+#include "gimple-iterator.h"
 #include "selftest.h"
 #include "tree-vectorizer.h"
 #include "opts.h"
+#include "aarch-common.h"
+#include "aarch-common-protos.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -325,11 +328,11 @@ static HOST_WIDE_INT arm_constant_alignment (const_tree, HOST_WIDE_INT);
 static rtx_insn *thumb1_md_asm_adjust (vec<rtx> &, vec<rtx> &,
 				       vec<machine_mode> &,
 				       vec<const char *> &, vec<rtx> &,
-				       HARD_REG_SET &, location_t);
+				       vec<rtx> &, HARD_REG_SET &, location_t);
 static const char *arm_identify_fpu_from_isa (sbitmap);
 
 /* Table of machine attributes.  */
-static const struct attribute_spec arm_attribute_table[] =
+static const attribute_spec arm_gnu_attributes[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
        affects_type_identity, handler, exclude } */
@@ -375,10 +378,19 @@ static const struct attribute_spec arm_attribute_table[] =
   /* ARMv8-M Security Extensions support.  */
   { "cmse_nonsecure_entry", 0, 0, true, false, false, false,
     arm_handle_cmse_nonsecure_entry, NULL },
-  { "cmse_nonsecure_call", 0, 0, true, false, false, true,
+  { "cmse_nonsecure_call", 0, 0, false, false, false, true,
     arm_handle_cmse_nonsecure_call, NULL },
-  { "Advanced SIMD type", 1, 1, false, true, false, true, NULL, NULL },
-  { NULL, 0, 0, false, false, false, false, NULL, NULL }
+  { "Advanced SIMD type", 1, 1, false, true, false, true, NULL, NULL }
+};
+
+static const scoped_attribute_specs arm_gnu_attribute_table =
+{
+  "gnu", { arm_gnu_attributes }
+};
+
+static const scoped_attribute_specs *const arm_attribute_table[] =
+{
+  &arm_gnu_attribute_table
 };
 
 /* Initialize the GCC target structure.  */
@@ -503,6 +515,9 @@ static const struct attribute_spec arm_attribute_table[] =
 
 #undef TARGET_FUNCTION_VALUE_REGNO_P
 #define TARGET_FUNCTION_VALUE_REGNO_P arm_function_value_regno_p
+
+#undef TARGET_GIMPLE_FOLD_BUILTIN
+#define TARGET_GIMPLE_FOLD_BUILTIN arm_gimple_fold_builtin
 
 #undef  TARGET_ASM_OUTPUT_MI_THUNK
 #define TARGET_ASM_OUTPUT_MI_THUNK arm_output_mi_thunk
@@ -921,6 +936,11 @@ int arm_arch8_3 = 0;
 
 /* Nonzero if this chip supports the ARM Architecture 8.4 extensions.  */
 int arm_arch8_4 = 0;
+
+/* Nonzero if this chip supports the ARM Architecture 8-M Mainline
+   extensions.  */
+int arm_arch8m_main = 0;
+
 /* Nonzero if this chip supports the ARM Architecture 8.1-M Mainline
    extensions.  */
 int arm_arch8_1m_main = 0;
@@ -2835,6 +2855,29 @@ arm_init_libfuncs (void)
   speculation_barrier_libfunc = init_one_libfunc ("__speculation_barrier");
 }
 
+/* Implement TARGET_GIMPLE_FOLD_BUILTIN.  */
+static bool
+arm_gimple_fold_builtin (gimple_stmt_iterator *gsi)
+{
+  gcall *stmt = as_a <gcall *> (gsi_stmt (*gsi));
+  tree fndecl = gimple_call_fndecl (stmt);
+  unsigned int code = DECL_MD_FUNCTION_CODE (fndecl);
+  unsigned int subcode = code >> ARM_BUILTIN_SHIFT;
+  gimple *new_stmt = NULL;
+  switch (code & ARM_BUILTIN_CLASS)
+    {
+    case ARM_BUILTIN_GENERAL:
+      break;
+    case ARM_BUILTIN_MVE:
+      new_stmt = arm_mve::gimple_fold_builtin (subcode, stmt);
+    }
+  if (!new_stmt)
+    return false;
+
+  gsi_replace (gsi, new_stmt, true);
+  return true;
+}
+
 /* On AAPCS systems, this is the "struct __va_list".  */
 static GTY(()) tree va_list_type;
 
@@ -3198,6 +3241,15 @@ arm_option_override_internal (struct gcc_options *opts,
       arm_stack_protector_guard_offset = offs;
     }
 
+  if (arm_current_function_pac_enabled_p ())
+    {
+      if (!arm_arch8m_main)
+        error ("This architecture does not support branch protection "
+               "instructions");
+      if (TARGET_TPCS_FRAME)
+        sorry ("Return address signing is not supported with %<-mtpcs-frame%>.");
+    }
+
 #ifdef SUBTARGET_OVERRIDE_INTERNAL_OPTIONS
   SUBTARGET_OVERRIDE_INTERNAL_OPTIONS;
 #endif
@@ -3250,6 +3302,18 @@ arm_configure_build_target (struct arm_build_target *target,
       arm_selected_tune = arm_parse_cpu_option_name (all_cores, "-mtune",
 						     opts->x_arm_tune_string);
       tune_opts = strchr (opts->x_arm_tune_string, '+');
+    }
+
+  if (opts->x_arm_branch_protection_string)
+    {
+      aarch_validate_mbranch_protection (opts->x_arm_branch_protection_string,
+					 "-mbranch-protection=");
+
+      if (aarch_ra_sign_key != AARCH_KEY_A)
+	{
+	  warning (0, "invalid key type for %<-mbranch-protection=%>");
+	  aarch_ra_sign_key = AARCH_KEY_A;
+	}
     }
 
   if (arm_selected_arch)
@@ -3833,6 +3897,7 @@ arm_option_reconfigure_globals (void)
   arm_arch_arm_hwdiv = bitmap_bit_p (arm_active_target.isa, isa_bit_adiv);
   arm_arch_crc = bitmap_bit_p (arm_active_target.isa, isa_bit_crc32);
   arm_arch_cmse = bitmap_bit_p (arm_active_target.isa, isa_bit_cmse);
+  arm_arch8m_main = arm_arch7 && arm_arch_cmse;
   arm_arch_lpae = bitmap_bit_p (arm_active_target.isa, isa_bit_lpae);
   arm_arch_i8mm = bitmap_bit_p (arm_active_target.isa, isa_bit_i8mm);
   arm_arch_bf16 = bitmap_bit_p (arm_active_target.isa, isa_bit_bf16);
@@ -3870,7 +3935,7 @@ arm_option_reconfigure_globals (void)
   if (target_thread_pointer == TP_AUTO)
     {
       if (arm_arch6k && !TARGET_THUMB1)
-	target_thread_pointer = TP_CP15;
+	target_thread_pointer = TP_TPIDRURO;
       else
 	target_thread_pointer = TP_SOFT;
     }
@@ -4330,6 +4395,12 @@ use_return_insn (int iscond, rtx sibling)
 
   /* Never use a return instruction before reload has run.  */
   if (!reload_completed)
+    return 0;
+
+  /* Never use a return instruction when return address signing
+     mechanism is enabled as it requires more than one
+     instruction.  */
+  if (arm_current_function_pac_enabled_p ())
     return 0;
 
   func_type = arm_current_func_type ();
@@ -7400,8 +7471,7 @@ arm_handle_isr_attribute (tree *node, tree name, tree args, int flags,
     }
   else
     {
-      if (TREE_CODE (*node) == FUNCTION_TYPE
-	  || TREE_CODE (*node) == METHOD_TYPE)
+      if (FUNC_OR_METHOD_TYPE_P (*node))
 	{
 	  if (arm_isr_value (args) == ARM_FT_UNKNOWN)
 	    {
@@ -7411,8 +7481,7 @@ arm_handle_isr_attribute (tree *node, tree name, tree args, int flags,
 	    }
 	}
       else if (TREE_CODE (*node) == POINTER_TYPE
-	       && (TREE_CODE (TREE_TYPE (*node)) == FUNCTION_TYPE
-		   || TREE_CODE (TREE_TYPE (*node)) == METHOD_TYPE)
+	       && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (*node))
 	       && arm_isr_value (args) != ARM_FT_UNKNOWN)
 	{
 	  *node = build_variant_type_copy (*node);
@@ -7605,8 +7674,8 @@ arm_handle_cmse_nonsecure_call (tree *node, tree name,
 				 int /* flags */,
 				 bool *no_add_attrs)
 {
-  tree decl = NULL_TREE, fntype = NULL_TREE;
-  tree type;
+  tree decl = NULL_TREE;
+  tree fntype, type;
 
   if (!use_cmse)
     {
@@ -7616,16 +7685,20 @@ arm_handle_cmse_nonsecure_call (tree *node, tree name,
       return NULL_TREE;
     }
 
-  if (TREE_CODE (*node) == VAR_DECL || TREE_CODE (*node) == TYPE_DECL)
+  if (DECL_P (*node))
     {
-      decl = *node;
-      fntype = TREE_TYPE (decl);
-    }
+      fntype = TREE_TYPE (*node);
 
-  while (fntype != NULL_TREE && TREE_CODE (fntype) == POINTER_TYPE)
+      if (VAR_P (*node) || TREE_CODE (*node) == TYPE_DECL)
+	decl = *node;
+    }
+  else
+    fntype = *node;
+
+  while (fntype && TREE_CODE (fntype) == POINTER_TYPE)
     fntype = TREE_TYPE (fntype);
 
-  if (!decl || TREE_CODE (fntype) != FUNCTION_TYPE)
+  if ((DECL_P (*node) && !decl) || TREE_CODE (fntype) != FUNCTION_TYPE)
     {
 	warning (OPT_Wattributes, "%qE attribute only applies to base type of a "
 		 "function pointer", name);
@@ -7640,10 +7713,17 @@ arm_handle_cmse_nonsecure_call (tree *node, tree name,
 
   /* Prevent trees being shared among function types with and without
      cmse_nonsecure_call attribute.  */
-  type = TREE_TYPE (decl);
+  if (decl)
+    {
+      type = build_distinct_type_copy (TREE_TYPE (decl));
+      TREE_TYPE (decl) = type;
+    }
+  else
+    {
+      type = build_distinct_type_copy (*node);
+      *node = type;
+    }
 
-  type = build_distinct_type_copy (type);
-  TREE_TYPE (decl) = type;
   fntype = type;
 
   while (TREE_CODE (fntype) != FUNCTION_TYPE)
@@ -7730,7 +7810,7 @@ arm_set_default_type_attributes (tree type)
   /* Add __attribute__ ((long_call)) to all functions, when
      inside #pragma long_calls or __attribute__ ((short_call)),
      when inside #pragma no_long_calls.  */
-  if (TREE_CODE (type) == FUNCTION_TYPE || TREE_CODE (type) == METHOD_TYPE)
+  if (FUNC_OR_METHOD_TYPE_P (type))
     {
       tree type_attr_list, attr_name;
       type_attr_list = TYPE_ATTRIBUTES (type);
@@ -7900,10 +7980,13 @@ arm_function_ok_for_sibcall (tree decl, tree exp)
       && DECL_WEAK (decl))
     return false;
 
-  /* We cannot do a tailcall for an indirect call by descriptor if all the
-     argument registers are used because the only register left to load the
-     address is IP and it will already contain the static chain.  */
-  if (!decl && CALL_EXPR_BY_DESCRIPTOR (exp) && !flag_trampolines)
+  /* We cannot tailcall an indirect call by descriptor if all the call-clobbered
+     general registers are live (r0-r3 and ip).  This can happen when:
+      - IP contains the static chain, or
+      - IP is needed for validating the PAC signature.  */
+  if (!decl
+      && ((CALL_EXPR_BY_DESCRIPTOR (exp) && !flag_trampolines)
+	  || arm_current_function_pac_enabled_p()))
     {
       tree fntype = TREE_TYPE (TREE_TYPE (CALL_EXPR_FN (exp)));
       CUMULATIVE_ARGS cum;
@@ -8378,7 +8461,7 @@ arm_is_segment_info_known (rtx orig, bool *is_readonly)
 	      || !DECL_COMMON (SYMBOL_REF_DECL (orig))))
 	{
 	  tree decl = SYMBOL_REF_DECL (orig);
-	  tree init = (TREE_CODE (decl) == VAR_DECL)
+	  tree init = VAR_P (decl)
 	    ? DECL_INITIAL (decl) : (TREE_CODE (decl) == CONSTRUCTOR)
 	    ? decl : 0;
 	  int reloc = 0;
@@ -8387,7 +8470,7 @@ arm_is_segment_info_known (rtx orig, bool *is_readonly)
 	  if (init && init != error_mark_node)
 	    reloc = compute_reloc_for_constant (init);
 
-	  named_section = TREE_CODE (decl) == VAR_DECL
+	  named_section = VAR_P (decl)
 	    && lookup_attribute ("section", DECL_ATTRIBUTES (decl));
 	  readonly = decl_readonly_section (decl, reloc);
 
@@ -8631,6 +8714,11 @@ thumb2_legitimate_address_p (machine_mode mode, rtx x, int strict_p)
 {
   bool use_ldrd;
   enum rtx_code code = GET_CODE (x);
+
+  /* If we are dealing with a MVE predicate mode, then treat it as a HImode as
+     can store and load it like any other 16-bit value.  */
+  if (TARGET_HAVE_MVE && VALID_MVE_PRED_MODE (mode))
+    mode = HImode;
 
   if (TARGET_HAVE_MVE && VALID_MVE_MODE (mode))
     return mve_vector_mem_operand (mode, x, strict_p);
@@ -9053,9 +9141,7 @@ thumb1_legitimate_address_p (machine_mode mode, rtx x, int strict_p)
       else if (REG_P (XEXP (x, 0))
 	       && (REGNO (XEXP (x, 0)) == FRAME_POINTER_REGNUM
 		   || REGNO (XEXP (x, 0)) == ARG_POINTER_REGNUM
-		   || (REGNO (XEXP (x, 0)) >= FIRST_VIRTUAL_REGISTER
-		       && REGNO (XEXP (x, 0))
-			  <= LAST_VIRTUAL_POINTER_REGISTER))
+		   || VIRTUAL_REGISTER_P (XEXP (x, 0)))
 	       && GET_MODE_SIZE (mode) >= 4
 	       && CONST_INT_P (XEXP (x, 1))
 	       && (INTVAL (XEXP (x, 1)) & 3) == 0)
@@ -9096,7 +9182,7 @@ thumb_legitimate_offset_p (machine_mode mode, HOST_WIDE_INT val)
 }
 
 bool
-arm_legitimate_address_p (machine_mode mode, rtx x, bool strict_p)
+arm_legitimate_address_p (machine_mode mode, rtx x, bool strict_p, code_helper)
 {
   if (TARGET_ARM)
     return arm_legitimate_address_outer_p (mode, x, SET, strict_p);
@@ -12910,7 +12996,7 @@ simd_valid_immediate (rtx op, machine_mode mode, int inverse,
   /* Only support 128-bit vectors for MVE.  */
   if (TARGET_HAVE_MVE
       && (!vector
-	  || (GET_MODE_CLASS (mode) == MODE_VECTOR_BOOL)
+	  || VALID_MVE_PRED_MODE (mode)
 	  || n_elts * innersize != 16))
     return -1;
 
@@ -13283,9 +13369,15 @@ neon_vdup_constant (rtx vals, bool generate)
 rtx
 mve_bool_vec_to_const (rtx const_vec)
 {
-  int n_elts = GET_MODE_NUNITS ( GET_MODE (const_vec));
-  int repeat = 16 / n_elts;
-  int i;
+  machine_mode mode = GET_MODE (const_vec);
+
+  if (!VECTOR_MODE_P (mode))
+    return const_vec;
+
+  unsigned n_elts = GET_MODE_NUNITS (mode);
+  unsigned el_prec = GET_MODE_PRECISION (GET_MODE_INNER (mode));
+  unsigned shift_c = 16 / n_elts;
+  unsigned i;
   int hi_val = 0;
 
   for (i = 0; i < n_elts; i++)
@@ -13294,12 +13386,16 @@ mve_bool_vec_to_const (rtx const_vec)
       unsigned HOST_WIDE_INT elpart;
 
       gcc_assert (CONST_INT_P (el));
-      elpart = INTVAL (el);
+      elpart = INTVAL (el) & ((1U << el_prec) - 1);
 
-      for (int j = 0; j < repeat; j++)
-	hi_val |= elpart << (i * repeat + j);
+      unsigned index = BYTES_BIG_ENDIAN ? n_elts - i - 1 : i;
+
+      hi_val |= elpart << (index * shift_c);
     }
-  return gen_int_mode (hi_val, HImode);
+  /* We are using mov immediate to encode this constant which writes 32-bits
+     so we need to make sure the top 16-bits are all 0, otherwise we can't
+     guarantee we can actually write this immediate.  */
+  return gen_int_mode (hi_val, SImode);
 }
 
 /* Return a non-NULL RTX iff VALS, which is a PARALLEL containing only
@@ -13342,7 +13438,7 @@ neon_make_constant (rtx vals, bool generate)
       && simd_immediate_valid_for_move (const_vec, mode, NULL, NULL))
     /* Load using VMOV.  On Cortex-A8 this takes one cycle.  */
     return const_vec;
-  else if (TARGET_HAVE_MVE && (GET_MODE_CLASS (mode) == MODE_VECTOR_BOOL))
+  else if (TARGET_HAVE_MVE && VALID_MVE_PRED_MODE(mode))
     return mve_bool_vec_to_const (const_vec);
   else if ((target = neon_vdup_constant (vals, generate)) != NULL_RTX)
     /* Loaded using VDUP.  On Cortex-A8 the VDUP takes one NEON
@@ -13577,6 +13673,19 @@ arm_coproc_mem_operand_no_writeback (rtx op)
   return arm_coproc_mem_operand_wb (op, 0);
 }
 
+/* In non-STRICT mode, return the register number; in STRICT mode return
+   the hard regno or the replacement if it won't be a mem.  Otherwise, return
+   the original pseudo number.  */
+static int
+arm_effective_regno (rtx op, bool strict)
+{
+  gcc_assert (REG_P (op));
+  if (!strict || REGNO (op) < FIRST_PSEUDO_REGISTER
+      || !reg_renumber || reg_renumber[REGNO (op)] < 0)
+    return REGNO (op);
+  return reg_renumber[REGNO (op)];
+}
+
 /* This function returns TRUE on matching mode and op.
 1. For given modes, check for [Rn], return TRUE for Rn <= LO_REGS.
 2. For other modes, check for [Rn], return TRUE for Rn < R15 (expect R13).  */
@@ -13589,7 +13698,7 @@ mve_vector_mem_operand (machine_mode mode, rtx op, bool strict)
   /* Match: (mem (reg)).  */
   if (REG_P (op))
     {
-      int reg_no = REGNO (op);
+      reg_no = arm_effective_regno (op, strict);
       return (((mode == E_V8QImode || mode == E_V4QImode || mode == E_V4HImode)
 	       ? reg_no <= LAST_LO_REGNUM
 	       : reg_no < LAST_ARM_REGNUM)
@@ -13597,10 +13706,13 @@ mve_vector_mem_operand (machine_mode mode, rtx op, bool strict)
     }
   code = GET_CODE (op);
 
-  if (code == POST_INC || code == PRE_DEC
-      || code == PRE_INC || code == POST_DEC)
+  if ((code == POST_INC
+       || code == PRE_DEC
+       || code == PRE_INC
+       || code == POST_DEC)
+      && REG_P (XEXP (op, 0)))
     {
-      reg_no = REGNO (XEXP (op, 0));
+      reg_no = arm_effective_regno (XEXP (op, 0), strict);
       return (((mode == E_V8QImode || mode == E_V4QImode || mode == E_V4HImode)
 	       ? reg_no <= LAST_LO_REGNUM
 	       :(reg_no < LAST_ARM_REGNUM && reg_no != SP_REGNUM))
@@ -13616,7 +13728,7 @@ mve_vector_mem_operand (machine_mode mode, rtx op, bool strict)
 	   || (reload_completed && code == PLUS && REG_P (XEXP (op, 0))
 	       && GET_CODE (XEXP (op, 1)) == CONST_INT))
     {
-      reg_no = REGNO (XEXP (op, 0));
+      reg_no = arm_effective_regno (XEXP (op, 0), strict);
       if (code == PLUS)
 	val = INTVAL (XEXP (op, 1));
       else
@@ -13726,6 +13838,24 @@ neon_vector_mem_operand (rtx op, int type, bool strict)
   return FALSE;
 }
 
+/* Return TRUE if OP is a mem suitable for loading/storing an MVE struct
+   type.  */
+int
+mve_struct_mem_operand (rtx op)
+{
+  rtx ind = XEXP (op, 0);
+
+  /* Match: (mem (reg)).  */
+  if (REG_P (ind))
+    return arm_address_register_rtx_p (ind, 0);
+
+  /* Allow only post-increment by the mode size.  */
+  if (GET_CODE (ind) == POST_INC)
+    return arm_address_register_rtx_p (XEXP (ind, 0), 0);
+
+  return FALSE;
+}
+
 /* Return TRUE if OP is a mem suitable for loading/storing a Neon struct
    type.  */
 int
@@ -13812,8 +13942,7 @@ arm_eliminable_register (rtx x)
 {
   return REG_P (x) && (REGNO (x) == FRAME_POINTER_REGNUM
 		       || REGNO (x) == ARG_POINTER_REGNUM
-		       || (REGNO (x) >= FIRST_VIRTUAL_REGISTER
-			   && REGNO (x) <= LAST_VIRTUAL_REGISTER));
+		       || VIRTUAL_REGISTER_P (x));
 }
 
 /* Return GENERAL_REGS if a scratch register required to reload x to/from
@@ -21198,6 +21327,9 @@ arm_compute_save_core_reg_mask (void)
 
   save_reg_mask |= arm_compute_save_reg0_reg12_mask ();
 
+  if (arm_current_function_pac_enabled_p ())
+    save_reg_mask |= 1 << IP_REGNUM;
+
   /* Decide if we need to save the link register.
      Interrupt routines have their own banked link register,
      so they never need to save it.
@@ -21671,7 +21803,7 @@ arm_asm_declare_function_name (FILE *file, const char *name, tree decl)
   ARM_DECLARE_FUNCTION_NAME (file, name, decl);
   ASM_OUTPUT_TYPE_DIRECTIVE (file, name, "function");
   ASM_DECLARE_RESULT (file, DECL_RESULT (decl));
-  ASM_OUTPUT_LABEL (file, name);
+  ASM_OUTPUT_FUNCTION_LABEL (file, name, decl);
 
   if (cmse_name)
     ASM_OUTPUT_LABEL (file, cmse_name);
@@ -22201,7 +22333,33 @@ emit_multi_reg_push (unsigned long mask, unsigned long dwarf_regs_mask)
     {
       if (mask & (1 << i))
 	{
-	  reg = gen_rtx_REG (SImode, i);
+	  /* NOTE: Dwarf code emitter handle reg-reg copies correctly and in the
+	     following example reg-reg copy of SP to IP register is handled
+	     through .cfi_def_cfa_register directive and the .cfi_offset
+	     directive for IP register is skipped by dwarf code emitter.
+	     Example:
+		mov     ip, sp
+		.cfi_def_cfa_register 12
+		push    {fp, ip, lr, pc}
+		.cfi_offset 11, -16
+		.cfi_offset 13, -12
+		.cfi_offset 14, -8
+
+	     Where as Arm-specific .save directive handling is different to that
+	     of dwarf code emitter and it doesn't consider reg-reg copies while
+	     updating the register list.  When PACBTI is enabled we manually
+	     updated the .save directive register list to use "ra_auth_code"
+	     (pseduo register 143) instead of IP register as shown in following
+	     pseduo code.
+	     Example:
+		pacbti  ip, lr, sp
+		.cfi_register 143, 12
+		push    {r3, r7, ip, lr}
+		.save {r3, r7, ra_auth_code, lr}
+	  */
+	  rtx dwarf_reg = reg = gen_rtx_REG (SImode, i);
+	  if (arm_current_function_pac_enabled_p () && i == IP_REGNUM)
+	    dwarf_reg = gen_rtx_REG (SImode, RA_AUTH_CODE);
 
 	  XVECEXP (par, 0, 0)
 	    = gen_rtx_SET (gen_frame_mem
@@ -22219,7 +22377,7 @@ emit_multi_reg_push (unsigned long mask, unsigned long dwarf_regs_mask)
 	  if (dwarf_regs_mask & (1 << i))
 	    {
 	      tmp = gen_rtx_SET (gen_frame_mem (SImode, stack_pointer_rtx),
-				 reg);
+				 dwarf_reg);
 	      RTX_FRAME_RELATED_P (tmp) = 1;
 	      XVECEXP (dwarf, 0, dwarf_par_index++) = tmp;
 	    }
@@ -22232,7 +22390,9 @@ emit_multi_reg_push (unsigned long mask, unsigned long dwarf_regs_mask)
     {
       if (mask & (1 << i))
 	{
-	  reg = gen_rtx_REG (SImode, i);
+	  rtx dwarf_reg = reg = gen_rtx_REG (SImode, i);
+	  if (arm_current_function_pac_enabled_p () && i == IP_REGNUM)
+	    dwarf_reg = gen_rtx_REG (SImode, RA_AUTH_CODE);
 
 	  XVECEXP (par, 0, j) = gen_rtx_USE (VOIDmode, reg);
 
@@ -22243,7 +22403,7 @@ emit_multi_reg_push (unsigned long mask, unsigned long dwarf_regs_mask)
 			       (SImode,
 				plus_constant (Pmode, stack_pointer_rtx,
 					       4 * j)),
-			       reg);
+			       dwarf_reg);
 	      RTX_FRAME_RELATED_P (tmp) = 1;
 	      XVECEXP (dwarf, 0, dwarf_par_index++) = tmp;
 	    }
@@ -22328,7 +22488,9 @@ arm_emit_multi_reg_pop (unsigned long saved_regs_mask)
   for (j = 0, i = 0; j < num_regs; i++)
     if (saved_regs_mask & (1 << i))
       {
-        reg = gen_rtx_REG (SImode, i);
+	rtx dwarf_reg = reg = gen_rtx_REG (SImode, i);
+	if (arm_current_function_pac_enabled_p () && i == IP_REGNUM)
+	  dwarf_reg = gen_rtx_REG (SImode, RA_AUTH_CODE);
         if ((num_regs == 1) && emit_update && !return_in_pc)
           {
             /* Emit single load with writeback.  */
@@ -22336,7 +22498,8 @@ arm_emit_multi_reg_pop (unsigned long saved_regs_mask)
                                  gen_rtx_POST_INC (Pmode,
                                                    stack_pointer_rtx));
             tmp = emit_insn (gen_rtx_SET (reg, tmp));
-            REG_NOTES (tmp) = alloc_reg_note (REG_CFA_RESTORE, reg, dwarf);
+	    REG_NOTES (tmp) = alloc_reg_note (REG_CFA_RESTORE, dwarf_reg,
+					      dwarf);
             return;
           }
 
@@ -22350,7 +22513,7 @@ arm_emit_multi_reg_pop (unsigned long saved_regs_mask)
         /* We need to maintain a sequence for DWARF info too.  As dwarf info
            should not have PC, skip PC.  */
         if (i != PC_REGNUM)
-          dwarf = alloc_reg_note (REG_CFA_RESTORE, reg, dwarf);
+	  dwarf = alloc_reg_note (REG_CFA_RESTORE, dwarf_reg, dwarf);
 
         j++;
       }
@@ -23489,12 +23652,13 @@ arm_expand_prologue (void)
 
   /* The static chain register is the same as the IP register.  If it is
      clobbered when creating the frame, we need to save and restore it.  */
-  clobber_ip = IS_NESTED (func_type)
-	       && ((TARGET_APCS_FRAME && frame_pointer_needed && TARGET_ARM)
-		   || ((flag_stack_check == STATIC_BUILTIN_STACK_CHECK
-			|| flag_stack_clash_protection)
-		       && !df_regs_ever_live_p (LR_REGNUM)
-		       && arm_r3_live_at_start_p ()));
+  clobber_ip = (IS_NESTED (func_type)
+                && (((TARGET_APCS_FRAME && frame_pointer_needed && TARGET_ARM)
+                     || ((flag_stack_check == STATIC_BUILTIN_STACK_CHECK
+                          || flag_stack_clash_protection)
+                         && !df_regs_ever_live_p (LR_REGNUM)
+                         && arm_r3_live_at_start_p ()))
+                    || arm_current_function_pac_enabled_p ()));
 
   /* Find somewhere to store IP whilst the frame is being created.
      We try the following places in order:
@@ -23519,7 +23683,6 @@ arm_expand_prologue (void)
 	{
 	  rtx addr, dwarf;
 
-	  gcc_assert(arm_compute_static_chain_stack_bytes() == 4);
 	  saved_regs += 4;
 
 	  addr = gen_rtx_PRE_DEC (Pmode, stack_pointer_rtx);
@@ -23532,6 +23695,8 @@ arm_expand_prologue (void)
 					      -fp_offset));
 	  RTX_FRAME_RELATED_P (insn) = 1;
 	  add_reg_note (insn, REG_FRAME_RELATED_EXPR, dwarf);
+	  if (arm_current_function_pac_enabled_p ())
+	    cfun->machine->pacspval_needed = 1;
 	}
       else
 	{
@@ -23567,7 +23732,24 @@ arm_expand_prologue (void)
 	  RTX_FRAME_RELATED_P (insn) = 1;
 	  fp_offset = args_to_push;
 	  args_to_push = 0;
+	  if (arm_current_function_pac_enabled_p ())
+	    cfun->machine->pacspval_needed = 1;
 	}
+    }
+
+  if (arm_current_function_pac_enabled_p ())
+    {
+      /* If IP was clobbered we only emit a PAC instruction as the BTI
+         one will be added before the push of the clobbered IP (if
+         necessary) by the bti pass.  */
+      if (aarch_bti_enabled () && !clobber_ip)
+	insn = emit_insn (gen_pacbti_nop ());
+      else
+	insn = emit_insn (gen_pac_nop ());
+
+      rtx dwarf = gen_rtx_SET (ip_rtx, gen_rtx_REG (SImode, RA_AUTH_CODE));
+      RTX_FRAME_RELATED_P (insn) = 1;
+      add_reg_note (insn, REG_CFA_REGISTER, dwarf);
     }
 
   if (TARGET_APCS_FRAME && frame_pointer_needed && TARGET_ARM)
@@ -25431,11 +25613,12 @@ arm_final_prescan_insn (rtx_insn *insn)
 	      break;
 
 	    case INSN:
-	      /* Instructions using or affecting the condition codes make it
-		 fail.  */
+	      /* Check the instruction is explicitly marked as predicable.
+		 Instructions using or affecting the condition codes are not.  */
 	      scanbody = PATTERN (this_insn);
 	      if (!(GET_CODE (scanbody) == SET
 		    || GET_CODE (scanbody) == PARALLEL)
+		  || get_attr_predicable (this_insn) != PREDICABLE_YES
 		  || get_attr_conds (this_insn) != CONDS_NOCOND)
 		fail = TRUE;
 	      break;
@@ -25535,10 +25718,7 @@ arm_hard_regno_mode_ok (unsigned int regno, machine_mode mode)
     return false;
 
   if (IS_VPR_REGNUM (regno))
-    return mode == HImode
-      || mode == V16BImode
-      || mode == V8BImode
-      || mode == V4BImode;
+    return VALID_MVE_PRED_MODE (mode);
 
   if (TARGET_THUMB1)
     /* For the Thumb we only allow values bigger than SImode in
@@ -25617,6 +25797,10 @@ arm_modes_tieable_p (machine_mode mode1, machine_mode mode2)
   if (GET_MODE_CLASS (mode1) == GET_MODE_CLASS (mode2))
     return true;
 
+  if (TARGET_HAVE_MVE
+      && (VALID_MVE_PRED_MODE (mode1) && VALID_MVE_PRED_MODE (mode2)))
+    return true;
+
   /* We specifically want to allow elements of "structure" modes to
      be tieable to the structure.  This more general condition allows
      other rarer situations too.  */
@@ -25648,6 +25832,9 @@ arm_regno_class (int regno)
 
   if (IS_VPR_REGNUM (regno))
     return VPR_REG;
+
+  if (IS_PAC_REGNUM (regno))
+    return PAC_REG;
 
   if (TARGET_THUMB1)
     {
@@ -26809,6 +26996,7 @@ arm_init_machine_status (void)
   machine->func_type = ARM_FT_UNKNOWN;
 #endif
   machine->static_chain_stack_bytes = -1;
+  machine->pacspval_needed = 0;
   return machine;
 }
 
@@ -27381,7 +27569,14 @@ thumb2_expand_return (bool simple_return)
 	 to assert it for now to ensure that future code changes do not silently
 	 change this behavior.  */
       gcc_assert (!IS_CMSE_ENTRY (arm_current_func_type ()));
-      if (num_regs == 1)
+      if (arm_current_function_pac_enabled_p ())
+        {
+          gcc_assert (!(saved_regs_mask & (1 << PC_REGNUM)));
+          arm_emit_multi_reg_pop (saved_regs_mask);
+          emit_insn (gen_aut_nop ());
+          emit_jump_insn (simple_return_rtx);
+        }
+      else if (num_regs == 1)
         {
           rtx par = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (2));
           rtx reg = gen_rtx_REG (SImode, PC_REGNUM);
@@ -27805,7 +28000,8 @@ arm_expand_epilogue (bool really_return)
           && really_return
           && crtl->args.pretend_args_size == 0
           && saved_regs_mask & (1 << LR_REGNUM)
-          && !crtl->calls_eh_return)
+          && !crtl->calls_eh_return
+	  && !arm_current_function_pac_enabled_p ())
         {
           saved_regs_mask &= ~(1 << LR_REGNUM);
           saved_regs_mask |= (1 << PC_REGNUM);
@@ -27918,6 +28114,9 @@ arm_expand_epilogue (bool really_return)
 	  RTX_FRAME_RELATED_P (insn) = 1;
 	}
     }
+
+  if (arm_current_function_pac_enabled_p ())
+    emit_insn (gen_aut_nop ());
 
   if (!really_return)
     return;
@@ -28431,6 +28630,8 @@ static void
 arm_file_start (void)
 {
   int val;
+  bool pac = (aarch_ra_sign_scope != AARCH_FUNCTION_NONE);
+  bool bti = (aarch_enable_bti == 1);
 
   arm_print_asm_arch_directives
     (asm_out_file, TREE_TARGET_OPTION (target_option_default_node));
@@ -28500,6 +28701,22 @@ arm_file_start (void)
       if (arm_fp16_format)
 	arm_emit_eabi_attribute ("Tag_ABI_FP_16bit_format", 38,
 			     (int) arm_fp16_format);
+
+      if (TARGET_HAVE_PACBTI)
+	{
+	  arm_emit_eabi_attribute ("Tag_PAC_extension", 50, 2);
+	  arm_emit_eabi_attribute ("Tag_BTI_extension", 52, 2);
+	}
+      else if (pac || bti)
+	{
+	  arm_emit_eabi_attribute ("Tag_PAC_extension", 50, 1);
+	  arm_emit_eabi_attribute ("Tag_BTI_extension", 52, 1);
+	}
+
+      if (bti)
+        arm_emit_eabi_attribute ("TAG_BTI_use", 74, 1);
+      if (pac)
+	arm_emit_eabi_attribute ("TAG_PACRET_use", 76, 1);
 
       if (arm_lang_output_object_attributes_hook)
 	arm_lang_output_object_attributes_hook();
@@ -29044,6 +29261,8 @@ arm_output_mi_thunk (FILE *file, tree thunk, HOST_WIDE_INT delta,
   const char *fnname = IDENTIFIER_POINTER (DECL_ASSEMBLER_NAME (thunk));
 
   assemble_start_function (thunk, fnname);
+  if (aarch_bti_enabled ())
+    emit_insn (aarch_gen_bti_c ());
   if (TARGET_32BIT)
     arm32_output_mi_thunk (file, thunk, delta, vcall_offset, function);
   else
@@ -29428,14 +29647,12 @@ arm_vector_mode_supported_p (machine_mode mode)
     return true;
 
   if (TARGET_HAVE_MVE
-      && (mode == V2DImode || mode == V4SImode || mode == V8HImode
-	  || mode == V16QImode
-	  || mode == V16BImode || mode == V8BImode || mode == V4BImode))
-      return true;
+      && (VALID_MVE_SI_MODE (mode) || VALID_MVE_PRED_MODE (mode)))
+    return true;
 
   if (TARGET_HAVE_MVE_FLOAT
       && (mode == V2DFmode || mode == V4SFmode || mode == V8HFmode))
-      return true;
+    return true;
 
   return false;
 }
@@ -29589,6 +29806,9 @@ arm_debugger_regno (unsigned int regno)
   if (IS_IWMMXT_REGNUM (regno))
     return 112 + regno - FIRST_IWMMXT_REGNUM;
 
+  if (IS_PAC_REGNUM (regno))
+    return DWARF_PAC_REGNUM;
+
   return DWARF_FRAME_REGISTERS;
 }
 
@@ -29682,7 +29902,7 @@ arm_unwind_emit_sequence (FILE * out_file, rtx p)
   gcc_assert (nregs);
 
   reg = REGNO (SET_SRC (XVECEXP (p, 0, 1)));
-  if (reg < 16)
+  if (reg < 16 || IS_PAC_REGNUM (reg))
     {
       /* For -Os dummy registers can be pushed at the beginning to
 	 avoid separate stack pointer adjustment.  */
@@ -29739,6 +29959,8 @@ arm_unwind_emit_sequence (FILE * out_file, rtx p)
 	 double precision register names.  */
       if (IS_VFP_REGNUM (reg))
 	asm_fprintf (out_file, "d%d", (reg - FIRST_VFP_REGNUM) / 2);
+      else if (IS_PAC_REGNUM (reg))
+	asm_fprintf (asm_out_file, "ra_auth_code");
       else
 	asm_fprintf (out_file, "%r", reg);
 
@@ -29833,7 +30055,7 @@ arm_unwind_emit_set (FILE * out_file, rtx p)
 	  /* Move from sp to reg.  */
 	  asm_fprintf (out_file, "\t.movsp %r\n", REGNO (e0));
 	}
-     else if (GET_CODE (e1) == PLUS
+      else if (GET_CODE (e1) == PLUS
 	      && REG_P (XEXP (e1, 0))
 	      && REGNO (XEXP (e1, 0)) == SP_REGNUM
 	      && CONST_INT_P (XEXP (e1, 1)))
@@ -29841,6 +30063,11 @@ arm_unwind_emit_set (FILE * out_file, rtx p)
 	  /* Set reg to offset from sp.  */
 	  asm_fprintf (out_file, "\t.movsp %r, #%d\n",
 		       REGNO (e0), (int)INTVAL(XEXP (e1, 1)));
+	}
+      else if (REGNO (e0) == IP_REGNUM && arm_current_function_pac_enabled_p ())
+	{
+	  if (cfun->machine->pacspval_needed)
+	    asm_fprintf (out_file, "\t.pacspval\n");
 	}
       else
 	abort ();
@@ -29896,10 +30123,15 @@ arm_unwind_emit (FILE * out_file, rtx_insn *insn)
 	    src = SET_SRC (pat);
 	    dest = SET_DEST (pat);
 
-	    gcc_assert (src == stack_pointer_rtx);
+	    gcc_assert (src == stack_pointer_rtx
+			|| IS_PAC_REGNUM (REGNO (src)));
 	    reg = REGNO (dest);
-	    asm_fprintf (out_file, "\t.unwind_raw 0, 0x%x @ vsp = r%d\n",
-			 reg + 0x90, reg);
+
+	    if (IS_PAC_REGNUM (REGNO (src)))
+	      arm_unwind_emit_set (out_file, PATTERN (insn));
+	    else
+	      asm_fprintf (out_file, "\t.unwind_raw 0, 0x%x @ vsp = r%d\n",
+			   reg + 0x90, reg);
 	  }
 	  handled_one = true;
 	  break;
@@ -30249,6 +30481,62 @@ arm_output_iwmmxt_tinsr (rtx *operands)
   return "";
 }
 
+/* Output an arm casesi dispatch sequence.  Used by arm_casesi_internal insn.
+   Responsible for the handling of switch statements in arm.  */
+const char *
+arm_output_casesi (rtx *operands)
+{
+  char label[100];
+  rtx diff_vec = PATTERN (NEXT_INSN (as_a <rtx_insn *> (operands[2])));
+  gcc_assert (GET_CODE (diff_vec) == ADDR_DIFF_VEC);
+  output_asm_insn ("cmp\t%0, %1", operands);
+  output_asm_insn ("bhi\t%l3", operands);
+  ASM_GENERATE_INTERNAL_LABEL (label, "Lrtx", CODE_LABEL_NUMBER (operands[2]));
+  switch (GET_MODE (diff_vec))
+    {
+    case E_QImode:
+      if (ADDR_DIFF_VEC_FLAGS (diff_vec).offset_unsigned)
+	output_asm_insn ("ldrb\t%4, [%5, %0]", operands);
+      else
+	output_asm_insn ("ldrsb\t%4, [%5, %0]", operands);
+      output_asm_insn ("add\t%|pc, %|pc, %4, lsl #2", operands);
+      break;
+    case E_HImode:
+      if (REGNO (operands[4]) != REGNO (operands[5]))
+	{
+	  output_asm_insn ("add\t%4, %0, %0", operands);
+	  if (ADDR_DIFF_VEC_FLAGS (diff_vec).offset_unsigned)
+	    output_asm_insn ("ldrh\t%4, [%5, %4]", operands);
+	  else
+	    output_asm_insn ("ldrsh\t%4, [%5, %4]", operands);
+	}
+      else
+	{
+	  output_asm_insn ("add\t%4, %5, %0", operands);
+	  if (ADDR_DIFF_VEC_FLAGS (diff_vec).offset_unsigned)
+	    output_asm_insn ("ldrh\t%4, [%4, %0]", operands);
+	  else
+	    output_asm_insn ("ldrsh\t%4, [%4, %0]", operands);
+	}
+      output_asm_insn ("add\t%|pc, %|pc, %4, lsl #2", operands);
+      break;
+    case E_SImode:
+      if (flag_pic)
+	{
+	  output_asm_insn ("ldr\t%4, [%5, %0, lsl #2]", operands);
+	  output_asm_insn ("add\t%|pc, %|pc, %4", operands);
+	}
+      else
+	output_asm_insn ("ldr\t%|pc, [%5, %0, lsl #2]", operands);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+    assemble_label (asm_out_file, label);
+    output_asm_insn ("nop", operands);
+  return "";
+}
+
 /* Output a Thumb-1 casesi dispatch sequence.  */
 const char *
 thumb1_output_casesi (rtx *operands)
@@ -30358,7 +30646,7 @@ arm_mangle_type (const_tree type)
     return "St9__va_list";
 
   /* Half-precision floating point types.  */
-  if (TREE_CODE (type) == REAL_TYPE && TYPE_PRECISION (type) == 16)
+  if (SCALAR_FLOAT_TYPE_P (type) && TYPE_PRECISION (type) == 16)
     {
       if (TYPE_MAIN_VARIANT (type) == float16_type_node)
 	return NULL;
@@ -31239,6 +31527,7 @@ arm_mode_to_pred_mode (machine_mode mode)
     case 16: return V16BImode;
     case 8: return V8BImode;
     case 4: return V4BImode;
+    case 2: return V2QImode;
     }
   return opt_machine_mode ();
 }
@@ -31415,13 +31704,13 @@ arm_expand_vcond (rtx *operands, machine_mode cmp_result_mode)
       switch (GET_MODE_CLASS (cmp_mode))
 	{
 	case MODE_VECTOR_INT:
-	  emit_insn (gen_mve_vpselq (VPSELQ_S, cmp_mode, operands[0],
-				     operands[1], operands[2], mask));
+	  emit_insn (gen_mve_q (VPSELQ_S, VPSELQ_S, cmp_mode, operands[0],
+				operands[1], operands[2], mask));
 	  break;
 	case MODE_VECTOR_FLOAT:
 	  if (TARGET_HAVE_MVE_FLOAT)
-	    emit_insn (gen_mve_vpselq_f (cmp_mode, operands[0],
-					 operands[1], operands[2], mask));
+	    emit_insn (gen_mve_q_f (VPSELQ_F, cmp_mode, operands[0],
+				    operands[1], operands[2], mask));
 	  else
 	    gcc_unreachable ();
 	  break;
@@ -33002,6 +33291,78 @@ arm_fusion_enabled_p (tune_params::fuse_ops op)
   return current_tune->fusible_ops & op;
 }
 
+/* Return TRUE if return address signing mechanism is enabled.  */
+bool
+arm_current_function_pac_enabled_p (void)
+{
+  return (aarch_ra_sign_scope == AARCH_FUNCTION_ALL
+          || (aarch_ra_sign_scope == AARCH_FUNCTION_NON_LEAF
+              && !crtl->is_leaf));
+}
+
+/* Raise an error if the current target arch is not bti compatible.  */
+void aarch_bti_arch_check (void)
+{
+  if (!arm_arch8m_main)
+    error ("This architecture does not support branch protection instructions");
+}
+
+/* Return TRUE if Branch Target Identification Mechanism is enabled.  */
+bool
+aarch_bti_enabled (void)
+{
+  return aarch_enable_bti != 0;
+}
+
+/* Check if INSN is a BTI J insn.  */
+bool
+aarch_bti_j_insn_p (rtx_insn *insn)
+{
+  if (!insn || !INSN_P (insn))
+    return false;
+
+  rtx pat = PATTERN (insn);
+  return GET_CODE (pat) == UNSPEC_VOLATILE && XINT (pat, 1) == VUNSPEC_BTI_NOP;
+}
+
+/* Check if X (or any sub-rtx of X) is a PACIASP/PACIBSP instruction.  */
+bool
+aarch_pac_insn_p (rtx x)
+{
+  if (!x || !INSN_P (x))
+    return false;
+
+  rtx pat = PATTERN (x);
+
+  if (GET_CODE (pat) == SET)
+    {
+      rtx tmp = XEXP (pat, 1);
+      if (tmp
+	  && ((GET_CODE (tmp) == UNSPEC
+               && XINT (tmp, 1) == UNSPEC_PAC_NOP)
+              || (GET_CODE (tmp) == UNSPEC_VOLATILE
+                  && XINT (tmp, 1) == VUNSPEC_PACBTI_NOP)))
+	return true;
+    }
+
+  return false;
+}
+
+ /* Target specific mapping for aarch_gen_bti_c and aarch_gen_bti_j.
+    For Arm, both of these map to a simple BTI instruction.  */
+
+rtx
+aarch_gen_bti_c (void)
+{
+  return gen_bti_nop ();
+}
+
+rtx
+aarch_gen_bti_j (void)
+{
+  return gen_bti_nop ();
+}
+
 /* Implement TARGET_SCHED_CAN_SPECULATE_INSN.  Return true if INSN can be
    scheduled for speculative execution.  Reject the long-running division
    and square-root instructions.  */
@@ -34290,7 +34651,8 @@ arm_stack_protect_guard (void)
 rtx_insn *
 thumb1_md_asm_adjust (vec<rtx> &outputs, vec<rtx> & /*inputs*/,
 		      vec<machine_mode> & /*input_modes*/,
-		      vec<const char *> &constraints, vec<rtx> & /*clobbers*/,
+		      vec<const char *> &constraints,
+		      vec<rtx> &, vec<rtx> & /*clobbers*/,
 		      HARD_REG_SET & /*clobbered_regs*/, location_t /*loc*/)
 {
   for (unsigned i = 0, n = outputs.length (); i < n; ++i)
@@ -34358,6 +34720,36 @@ arm_get_mask_mode (machine_mode mode)
     return arm_mode_to_pred_mode (mode);
 
   return default_get_mask_mode (mode);
+}
+
+/* Output assembly to read the thread pointer from the appropriate TPIDR
+   register into DEST.  If PRED_P also emit the %? that can be used to
+   output the predication code.  */
+
+const char *
+arm_output_load_tpidr (rtx dst, bool pred_p)
+{
+  char buf[64];
+  int tpidr_coproc_num = -1;
+  switch (target_thread_pointer)
+    {
+    case TP_TPIDRURW:
+      tpidr_coproc_num = 2;
+      break;
+    case TP_TPIDRURO:
+      tpidr_coproc_num = 3;
+      break;
+    case TP_TPIDRPRW:
+      tpidr_coproc_num = 4;
+      break;
+    default:
+      gcc_unreachable ();
+    }
+  snprintf (buf, sizeof (buf),
+	    "mrc%s\tp15, 0, %%0, c13, c0, %d\t@ load_tp_hard",
+	    pred_p ? "%?" : "", tpidr_coproc_num);
+  output_asm_insn (buf, &dst);
+  return "";
 }
 
 #include "gt-arm.h"

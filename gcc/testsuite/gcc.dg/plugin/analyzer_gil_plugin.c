@@ -4,10 +4,12 @@
 */
 /* { dg-options "-g" } */
 
+#define INCLUDE_MEMORY
 #include "gcc-plugin.h"
 #include "config.h"
 #include "system.h"
 #include "coretypes.h"
+#include "make-unique.h"
 #include "diagnostic.h"
 #include "tree.h"
 #include "gimple.h"
@@ -87,7 +89,8 @@ public:
     return 0;
   }
 
-  location_t fixup_location (location_t loc) const final override
+  location_t fixup_location (location_t loc,
+			     bool) const final override
   {
     /* Ideally we'd check for specific macros here, and only
        resolve certain macros.  */
@@ -152,10 +155,9 @@ class double_save_thread : public gil_diagnostic
     return m_call == sub_other.m_call;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
-    return warning_at (rich_loc, get_controlling_option (),
-		       "nested usage of %qs", "Py_BEGIN_ALLOW_THREADS");
+    return ctxt.warn ("nested usage of %qs", "Py_BEGIN_ALLOW_THREADS");
   }
 
   label_text describe_final_event (const evdesc::final_event &ev) final override
@@ -191,19 +193,16 @@ class fncall_without_gil : public gil_diagnostic
 	    && m_arg_idx == sub_other.m_arg_idx);
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
-    auto_diagnostic_group d;
     if (m_callee_fndecl)
-      return warning_at (rich_loc, get_controlling_option (),
-			 "use of PyObject as argument %i of %qE"
-			 " without the GIL",
-			 m_arg_idx + 1, m_callee_fndecl);
+      return ctxt.warn ("use of PyObject as argument %i of %qE"
+			" without the GIL",
+			m_arg_idx + 1, m_callee_fndecl);
     else
-      return warning_at (rich_loc, get_controlling_option (),
-			 "use of PyObject as argument %i of call"
-			 " without the GIL",
-			 m_arg_idx + 1, m_callee_fndecl);
+      return ctxt.warn ("use of PyObject as argument %i of call"
+			" without the GIL",
+			m_arg_idx + 1, m_callee_fndecl);
   }
 
   label_text describe_final_event (const evdesc::final_event &ev) final override
@@ -242,11 +241,9 @@ class pyobject_usage_without_gil : public gil_diagnostic
 			((const pyobject_usage_without_gil&)base_other).m_expr);
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
-    auto_diagnostic_group d;
-    return warning_at (rich_loc, get_controlling_option (),
-		       "use of PyObject %qE without the GIL", m_expr);
+    return ctxt.warn ("use of PyObject %qE without the GIL", m_expr);
   }
 
   label_text describe_final_event (const evdesc::final_event &ev) final override
@@ -309,9 +306,9 @@ gil_state_machine::check_for_pyobject_in_call (sm_context *sm_ctxt,
       if (type_based_on_pyobject_p (type))
 	{
 	  sm_ctxt->warn (node, call, NULL_TREE,
-			 new fncall_without_gil (*this, call,
-						 callee_fndecl,
-						 i));
+			 make_unique<fncall_without_gil> (*this, call,
+							  callee_fndecl,
+							  i));
 	  sm_ctxt->set_global_state (m_stop);
 	}
     }
@@ -337,7 +334,7 @@ gil_state_machine::on_stmt (sm_context *sm_ctxt,
 	      if (global_state == m_released_gil)
 		{
 		  sm_ctxt->warn (node, stmt, NULL_TREE,
-				 new double_save_thread (*this, call));
+				 make_unique<double_save_thread> (*this, call));
 		  sm_ctxt->set_global_state (m_stop);
 		}
 	      else
@@ -393,7 +390,7 @@ gil_state_machine::check_for_pyobject_usage_without_gil (sm_context *sm_ctxt,
   if (type_based_on_pyobject_p (type))
     {
       sm_ctxt->warn (node, stmt, NULL_TREE,
-		     new pyobject_usage_without_gil (*this, op));
+		     make_unique<pyobject_usage_without_gil> (*this, op));
       sm_ctxt->set_global_state (m_stop);
     }
 }
@@ -408,7 +405,8 @@ gil_analyzer_init_cb (void *gcc_data, void */*user_data*/)
   LOG_SCOPE (iface->get_logger ());
   if (0)
     inform (input_location, "got here: gil_analyzer_init_cb");
-  iface->register_state_machine (new gil_state_machine (iface->get_logger ()));
+  iface->register_state_machine
+    (make_unique<gil_state_machine> (iface->get_logger ()));
 }
 
 } // namespace ana

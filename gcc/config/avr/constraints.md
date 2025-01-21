@@ -1,5 +1,5 @@
 ;; Constraint definitions for ATMEL AVR micro controllers.
-;; Copyright (C) 2006-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2006-2024 Free Software Foundation, Inc.
 ;;
 ;; This file is part of GCC.
 ;;
@@ -133,6 +133,21 @@
   (and (match_code "const_int")
        (match_test "ival == 7")))
 
+(define_constraint "C15"
+  "Constant integer 15."
+  (and (match_code "const_int")
+       (match_test "ival == 15")))
+
+(define_constraint "C23"
+  "Constant integer 23."
+  (and (match_code "const_int")
+       (match_test "ival == 23")))
+
+(define_constraint "C31"
+  "Constant integer 31."
+  (and (match_code "const_int")
+       (match_test "ival == 31")))
+
 (define_constraint "Ca1"
   "Constant 1-byte integer that allows AND by means of CLT + BLD."
   (and (match_code "const_int")
@@ -172,6 +187,21 @@
   "Constant 4-byte integer that allows OR without clobber register."
   (and (match_code "const_int")
        (match_test "avr_popcount_each_byte (op, 4, (1<<0) | (1<<1) | (1<<8))")))
+
+(define_constraint "Cb2"
+  "Constant 2-byte integer that has exactly 1 bit set."
+  (and (match_code "const_int")
+       (match_test "single_one_operand (op, HImode)")))
+
+(define_constraint "Cb3"
+  "Constant 3-byte integer that has exactly 1 bit set."
+  (and (match_code "const_int")
+       (match_test "single_one_operand (op, PSImode)")))
+
+(define_constraint "Cb4"
+  "Constant 4-byte integer that has exactly 1 bit set."
+  (and (match_code "const_int")
+       (match_test "single_one_operand (op, SImode)")))
 
 (define_constraint "Cx2"
   "Constant 2-byte integer that allows XOR without clobber register."
@@ -224,26 +254,31 @@
 (define_constraint "Y01"
   "Fixed-point or integer constant with bit representation 0x1"
   (ior (and (match_code "const_fixed")
-	    (match_test "INTVAL (avr_to_int_mode (op)) == 1"))
+            (match_test "INTVAL (avr_to_int_mode (op)) == 1"))
        (match_test "satisfies_constraint_P (op)")))
 
 (define_constraint "Ym1"
   "Fixed-point or integer constant with bit representation -0x1"
   (ior (and (match_code "const_fixed")
-	    (match_test "INTVAL (avr_to_int_mode (op)) == -1"))
+            (match_test "INTVAL (avr_to_int_mode (op)) == -1"))
        (match_test "satisfies_constraint_N (op)")))
 
 (define_constraint "Y02"
   "Fixed-point or integer constant with bit representation 0x2"
   (ior (and (match_code "const_fixed")
-	    (match_test "INTVAL (avr_to_int_mode (op)) == 2"))
+            (match_test "INTVAL (avr_to_int_mode (op)) == 2"))
        (match_test "satisfies_constraint_K (op)")))
 
 (define_constraint "Ym2"
   "Fixed-point or integer constant with bit representation -0x2"
   (ior (and (match_code "const_fixed")
-	    (match_test "INTVAL (avr_to_int_mode (op)) == -2"))
+            (match_test "INTVAL (avr_to_int_mode (op)) == -2"))
        (match_test "satisfies_constraint_Cm2 (op)")))
+
+;; Constraint that's the empty set.  Useful with mode and code iterators.
+(define_constraint "Yxx"
+  "A constraints that is always false"
+  (match_test "false"))
 
 (define_constraint "Yx2"
   "Fixed-point or integer constant not in the range @minus{}2 @dots{} 2"
@@ -257,3 +292,8 @@
   "Fixed-point constant from @minus{}0x003f to 0x003f."
   (and (match_code "const_fixed")
        (match_test "IN_RANGE (INTVAL (avr_to_int_mode (op)), -63, 63)")))
+
+(define_constraint "Yil"
+  "Memory in the lower half of the I/O space."
+  (and (match_code "mem")
+       (match_test "low_io_address_operand (XEXP (op, 0), Pmode)")))

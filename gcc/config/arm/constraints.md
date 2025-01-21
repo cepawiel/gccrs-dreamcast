@@ -1,5 +1,5 @@
 ;; Constraint definitions for ARM and Thumb
-;; Copyright (C) 2006-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2006-2024 Free Software Foundation, Inc.
 ;; Contributed by ARM Ltd.
 
 ;; This file is part of GCC.
@@ -36,7 +36,7 @@
 ;; in Thumb-1 state: Pa, Pb, Pc, Pd, Pe
 ;; in Thumb-2 state: Ha, Pj, PJ, Ps, Pt, Pu, Pv, Pw, Px, Py, Pz, Rd, Rf, Rb, Ra,
 ;;		     Rg, Ri
-;; in all states: Pf, Pg
+;; in all states: Pg
 
 ;; The following memory constraints have been used:
 ;; in ARM/Thumb-2 state: Uh, Ut, Uv, Uy, Un, Um, Us, Up, Uf, Ux, Ul
@@ -101,10 +101,6 @@
   (and (match_code "const_int")
        (match_test "TARGET_HAVE_MVE && ((ival == 1) || (ival == 2)
 				       || (ival == 4) || (ival == 8))")))
-
-;; True if the immediate is multiple of 8 and in range of -/+ 1016 for MVE.
-(define_predicate "mve_vldrd_immediate"
-  (match_test "satisfies_constraint_Ri (op)"))
 
 (define_register_constraint "t" "TARGET_32BIT ? VFP_LO_REGS : NO_REGS"
  "The VFP registers @code{s0}-@code{s31}.")
@@ -243,13 +239,6 @@
   (and (match_code "const_int")
        (match_test "TARGET_THUMB1 && ival >= 256 && ival <= 510")))
 
-(define_constraint "Pf"
-  "Memory models except relaxed, consume or release ones."
-  (and (match_code "const_int")
-       (match_test "!is_mm_relaxed (memmodel_from_int (ival))
-		    && !is_mm_consume (memmodel_from_int (ival))
-		    && !is_mm_release (memmodel_from_int (ival))")))
-
 (define_constraint "Pg"
   "@internal In Thumb-2 state a constant in range 1 to 32"
   (and (match_code "const_int")
@@ -316,7 +305,7 @@
  "@internal
   In ARM/Thumb-2 state with MVE a constant vector of booleans."
  (and (match_code "const_vector")
-      (match_test "TARGET_HAVE_MVE && GET_MODE_CLASS (mode) == MODE_VECTOR_BOOL")))
+      (match_test "TARGET_HAVE_MVE && VALID_MVE_PRED_MODE (mode)")))
 
 (define_constraint "Da"
  "@internal
@@ -474,6 +463,11 @@
  (and (match_code "mem")
       (match_test "TARGET_32BIT && arm_coproc_mem_operand (op, FALSE)")))
 
+(define_memory_constraint "Ug"
+ "@internal
+  In Thumb-2 state a valid MVE struct load/store address."
+ (match_operand 0 "mve_struct_operand"))
+
 (define_memory_constraint "Uj"
  "@internal
   In ARM/Thumb-2 state a VFP load/store address that supports writeback
@@ -568,6 +562,22 @@
   US is a symbol reference."
  (match_code "symbol_ref")
 )
+
+;; True if the immediate is the range +/- 1016 and multiple of 8 for MVE.
+(define_constraint "Ri"
+  "@internal In Thumb-2 state a constant is multiple of 8 and in range
+   of -/+ 1016 for MVE"
+  (and (match_code "const_int")
+       (match_test "TARGET_HAVE_MVE && (-1016 <= ival) && (ival <= 1016)
+		    && ((ival % 8) == 0)")))
+
+;; True if the immediate is multiple of 2 and in range of -/+ 252 for MVE.
+(define_constraint "Rl"
+  "@internal In Thumb-2 state a constant is multiple of 2 and in range
+   of -/+ 252 for MVE"
+  (and (match_code "const_int")
+       (match_test "TARGET_HAVE_MVE && (-252 <= ival) && (ival <= 252)
+		    && ((ival % 2) == 0)")))
 
 (define_memory_constraint "Uz"
  "@internal

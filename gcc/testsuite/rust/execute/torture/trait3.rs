@@ -1,7 +1,10 @@
-/* { dg-output "123, 777" } */
+/* { dg-output "123, 777\r*" } */
 extern "C" {
     fn printf(s: *const i8, ...);
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 trait A {
     fn a() -> i32 {

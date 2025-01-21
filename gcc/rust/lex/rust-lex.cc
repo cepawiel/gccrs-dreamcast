@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -16,12 +16,15 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "rust-codepoint.h"
 #include "rust-system.h"
 #include "rust-lex.h"
 #include "rust-diagnostics.h"
 #include "rust-linemap.h"
 #include "rust-session-manager.h"
 #include "safe-ctype.h"
+#include "cpplib.h"
+#include "rust-keyword-values.h"
 
 namespace Rust {
 // TODO: move to separate compilation unit?
@@ -72,7 +75,7 @@ Codepoint::as_string ()
 /* Includes all allowable float digits EXCEPT _ and . as that needs lookahead
  * for handling. */
 bool
-is_float_digit (char number)
+is_float_digit (uint32_t number)
 {
   return ISDIGIT (number) || number == 'E' || number == 'e';
 }
@@ -80,51 +83,72 @@ is_float_digit (char number)
 /* Basically ISXDIGIT from safe-ctype but may change if Rust's encoding or
  * whatever is different */
 bool
-is_x_digit (char number)
+is_x_digit (uint32_t number)
 {
   return ISXDIGIT (number);
 }
 
 bool
-is_octal_digit (char number)
+is_octal_digit (uint32_t number)
 {
   return number >= '0' && number <= '7';
 }
 
 bool
-is_bin_digit (char number)
+is_bin_digit (uint32_t number)
 {
   return number == '0' || number == '1';
 }
 
 bool
-check_valid_float_dot_end (char character)
+check_valid_float_dot_end (uint32_t character)
 {
   return character != '.' && character != '_' && !ISALPHA (character);
 }
 
-// ISSPACE from safe-ctype but may change in future
 bool
-is_whitespace (char character)
+is_whitespace (uint32_t character)
 {
-  return ISSPACE (character);
+  // https://doc.rust-lang.org/reference/whitespace.html
+  return character == '\t' || character == '\n' || character == '\v'
+	 || character == '\f' || character == '\r' || character == ' '
+	 || character == 0x0085	 // next line
+	 || character == 0x200e	 // left-to-right mark
+	 || character == 0x200f	 // right-to-left mark
+	 || character == 0x2028	 // line separator
+	 || character == 0x2029; // pragraph separator
 }
 
 bool
-is_non_decimal_int_literal_separator (char character)
+is_non_decimal_int_literal_separator (uint32_t character)
 {
   return character == 'x' || character == 'o' || character == 'b';
 }
 
-Lexer::Lexer (const std::string &input)
+bool
+is_identifier_start (uint32_t codepoint)
+{
+  return (cpp_check_xid_property (codepoint) & CPP_XID_START)
+	 || codepoint == '_';
+}
+
+bool
+is_identifier_continue (uint32_t codepoint)
+{
+  return cpp_check_xid_property (codepoint) & CPP_XID_CONTINUE;
+}
+
+Lexer::Lexer (const std::string &input, Linemap *linemap)
   : input (RAIIFile::create_error ()), current_line (1), current_column (1),
-    line_map (nullptr), raw_input_source (new BufferInputSource (input, 0)),
+    line_map (linemap), dump_lex_out ({}),
+    raw_input_source (new BufferInputSource (input, 0)),
     input_queue{*raw_input_source}, token_queue (TokenSource (this))
 {}
 
-Lexer::Lexer (const char *filename, RAIIFile file_input, Linemap *linemap)
+Lexer::Lexer (const char *filename, RAIIFile file_input, Linemap *linemap,
+	      tl::optional<std::ofstream &> dump_lex_opt)
   : input (std::move (file_input)), current_line (1), current_column (1),
-    line_map (linemap),
+    line_map (linemap), dump_lex_out (dump_lex_opt),
     raw_input_source (new FileInputSource (input.get_raw ())),
     input_queue{*raw_input_source}, token_queue (TokenSource (this))
 {
@@ -145,30 +169,29 @@ Lexer::~Lexer ()
   // line_map->stop();
 }
 
-/* TODO: need to optimise somehow to avoid the virtual function call in the
- * tight loop. Best idea at the moment is CRTP, but that might make lexer
- * implementation annoying when storing the "base class" (i.e. would need
- * template parameter everywhere), although in practice it would mostly just
- * look ugly and make enclosing classes like Parser also require a type
- * parameter. At this point a macro might be better. OK I guess macros can be
- * replaced by constexpr if or something if possible. */
-Location
+bool
+Lexer::input_source_is_valid_utf8 ()
+{
+  return raw_input_source->is_valid ();
+}
+
+location_t
 Lexer::get_current_location ()
 {
   if (line_map)
-    return line_map->get_location (current_column);
+    return linemap_position_for_column (line_table, current_column);
   else
     // If we have no linemap, we're lexing something without proper locations
-    return Location ();
+    return UNDEF_LOCATION;
 }
 
-int
+Codepoint
 Lexer::peek_input (int n)
 {
   return input_queue.peek (n);
 }
 
-int
+Codepoint
 Lexer::peek_input ()
 {
   return peek_input (0);
@@ -187,6 +210,45 @@ Lexer::skip_input ()
 }
 
 void
+Lexer::skip_token (int n)
+{
+  // dump tokens if dump-lex option is enabled
+  if (dump_lex_out.has_value ())
+    dump_and_skip (n);
+  else
+    token_queue.skip (n);
+}
+
+void
+Lexer::dump_and_skip (int n)
+{
+  std::ofstream &out = dump_lex_out.value ();
+  bool found_eof = false;
+  const_TokenPtr tok;
+  for (int i = 0; i < n + 1; i++)
+    {
+      if (!found_eof)
+	{
+	  tok = peek_token ();
+	  found_eof |= tok->get_id () == Rust::END_OF_FILE;
+
+	  location_t loc = tok->get_locus ();
+
+	  out << "<id=";
+	  out << tok->token_id_to_str ();
+	  out << (tok->has_str () ? (std::string (", text=") + tok->get_str ()
+				     + std::string (", typehint=")
+				     + std::string (tok->get_type_hint_str ()))
+				  : "")
+	      << " ";
+	  out << Linemap::location_to_string (loc) << '\n';
+	}
+
+      token_queue.skip (0);
+    }
+}
+
+void
 Lexer::replace_current_token (TokenPtr replacement)
 {
   token_queue.replace_current_value (replacement);
@@ -194,42 +256,18 @@ Lexer::replace_current_token (TokenPtr replacement)
   rust_debug ("called 'replace_current_token' - this is deprecated");
 }
 
-/* shitty anonymous namespace that can only be accessed inside the compilation
- * unit - used for classify_keyword binary search in sorted array of keywords
- * created with x-macros. */
-namespace {
-// TODO: make constexpr when update to c++20
-const std::string keyword_index[] = {
-#define RS_TOKEN(x, y)
-#define RS_TOKEN_KEYWORD(name, keyword) keyword,
-  RS_TOKEN_LIST
-#undef RS_TOKEN_KEYWORD
-#undef RS_TOKEN
-};
-
-constexpr TokenId keyword_keys[] = {
-#define RS_TOKEN(x, y)
-#define RS_TOKEN_KEYWORD(name, keyword) name,
-  RS_TOKEN_LIST
-#undef RS_TOKEN_KEYWORD
-#undef RS_TOKEN
-};
-
-constexpr int num_keywords = sizeof (keyword_index) / sizeof (*keyword_index);
-} // namespace
-
 /* Determines whether the string passed in is a keyword or not. If it is, it
  * returns the keyword name.  */
 TokenId
 Lexer::classify_keyword (const std::string &str)
 {
-  const std::string *last = keyword_index + num_keywords;
-  const std::string *idx = std::lower_bound (keyword_index, last, str);
+  auto &keywords = Rust::Values::Keywords::keywords_tokens;
+  auto keyword = keywords.find (str);
 
-  if (idx == last || str != *idx)
+  if (keyword == keywords.end ())
     return IDENTIFIER;
 
-  // TODO: possibly replace this x-macro system with something like hash map?
+  auto id = keyword->second;
 
   // We now have the expected token ID of the reserved keyword. However, some
   // keywords are reserved starting in certain editions. For example, `try` is
@@ -237,7 +275,6 @@ Lexer::classify_keyword (const std::string &str)
   // reserved keywords in the future.
   //
   // https://doc.rust-lang.org/reference/keywords.html#reserved-keywords
-  auto id = keyword_keys[idx - keyword_index];
 
   // `try` is not a reserved keyword before 2018
   if (Session::get_instance ().options.get_edition ()
@@ -254,22 +291,10 @@ Lexer::build_token ()
   // loop to go through multiple characters to build a single token
   while (true)
     {
-      Location loc = get_current_location ();
+      location_t loc = get_current_location ();
+
       current_char = peek_input ();
       skip_input ();
-
-      // detect UTF8 bom
-      //
-      // Must be the first thing on the first line.
-      // There might be an optional BOM (Byte Order Mark), which for UTF-8 is
-      // the three bytes 0xEF, 0xBB and 0xBF. These can simply be skipped.
-      if (current_line == 1 && current_column == 1 && current_char == 0xef
-	  && peek_input () == 0xbb && peek_input (1) == 0xbf)
-	{
-	  skip_input (1);
-	  current_char = peek_input ();
-	  skip_input ();
-	}
 
       // detect shebang
       // Must be the first thing on the first line, starting with #!
@@ -283,8 +308,8 @@ Lexer::build_token ()
 	  int n = 1;
 	  while (true)
 	    {
-	      int next_char = peek_input (n);
-	      if (is_whitespace (next_char))
+	      Codepoint next_char = peek_input (n);
+	      if (is_whitespace (next_char.value))
 		n++;
 	      else if ((next_char == '/' && peek_input (n + 1) == '/'
 			&& peek_input (n + 2) != '!'
@@ -298,7 +323,7 @@ Lexer::build_token ()
 		  // (but not an inner or outer doc comment)
 		  n += 2;
 		  next_char = peek_input (n);
-		  while (next_char != '\n' && next_char != EOF)
+		  while (next_char != '\n' && !next_char.is_eof ())
 		    {
 		      n++;
 		      next_char = peek_input (n);
@@ -334,7 +359,7 @@ Lexer::build_token ()
 		  int level = 1;
 		  while (level > 0)
 		    {
-		      if (peek_input (n) == EOF)
+		      if (peek_input (n).is_eof ())
 			break;
 		      else if (peek_input (n) == '/'
 			       && peek_input (n + 1) == '*')
@@ -355,7 +380,7 @@ Lexer::build_token ()
 	      else if (next_char != '[')
 		{
 		  // definitely shebang, ignore the first line
-		  while (current_char != '\n' && current_char != EOF)
+		  while (current_char != '\n' && !current_char.is_eof ())
 		    {
 		      current_char = peek_input ();
 		      skip_input ();
@@ -374,15 +399,18 @@ Lexer::build_token ()
 	}
 
       // return end of file token if end of file
-      if (current_char == EOF)
+      if (current_char.is_eof ())
 	return Token::make (END_OF_FILE, loc);
 
       // if not end of file, start tokenising
-      switch (current_char)
+      switch (current_char.value)
 	{
 	/* ignore whitespace characters for tokens but continue updating
 	 * location */
-	case '\n': // newline
+	case '\n':   // newline
+	case 0x0085: // next line
+	case 0x2028: // line separator
+	case 0x2029: // paragraph separator
 	  current_line++;
 	  current_column = 1;
 	  // tell line_table that new line starts
@@ -394,9 +422,15 @@ Lexer::build_token ()
 	case ' ': // space
 	  current_column++;
 	  continue;
-	case '\t': // tab
+	case '\t': // horizontal tab
 	  // width of a tab is not well-defined, assume 8 spaces
 	  current_column += 8;
+	  continue;
+	case '\v':   // vertical tab
+	case 0x000c: // form feed
+	case 0x200e: // left-to-right mark
+	case 0x200f: // right-to-left mark
+	  // Ignored.
 	  continue;
 
 	// punctuation - actual tokens
@@ -406,6 +440,7 @@ Lexer::build_token ()
 	      // match arm arrow
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (MATCH_ARROW, loc);
 	    }
@@ -414,6 +449,7 @@ Lexer::build_token ()
 	      // equality operator
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (EQUAL_EQUAL, loc);
 	    }
@@ -432,6 +468,7 @@ Lexer::build_token ()
 	      // return type specifier
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (RETURN_TYPE, loc);
 	    }
@@ -440,6 +477,7 @@ Lexer::build_token ()
 	      // minus-assign
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (MINUS_EQ, loc);
 	    }
@@ -455,6 +493,7 @@ Lexer::build_token ()
 	      // add-assign
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (PLUS_EQ, loc);
 	    }
@@ -476,6 +515,7 @@ Lexer::build_token ()
 	      // multiplication-assign
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (ASTERISK_EQ, loc);
 	    }
@@ -494,6 +534,7 @@ Lexer::build_token ()
 	      // division-assign
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (DIV_EQ, loc);
 	    }
@@ -510,7 +551,7 @@ Lexer::build_token ()
 	      current_char = peek_input ();
 
 	      // basically ignore until line finishes
-	      while (current_char != '\n' && current_char != EOF)
+	      while (current_char != '\n' && !current_char.is_eof ())
 		{
 		  skip_input ();
 		  current_column++; // not used
@@ -534,7 +575,7 @@ Lexer::build_token ()
 		  skip_input ();
 		  if (current_char == '\r')
 		    {
-		      char next_char = peek_input ();
+		      Codepoint next_char = peek_input ();
 		      if (next_char == '\n')
 			{
 			  current_char = '\n';
@@ -545,10 +586,11 @@ Lexer::build_token ()
 		      current_char = next_char;
 		      continue;
 		    }
-		  if (current_char == EOF)
+		  if (current_char.is_eof ())
 		    {
 		      rust_error_at (
-			loc, "unexpected EOF while looking for end of comment");
+			loc, ErrorCode::E0758,
+			"unexpected EOF while looking for end of comment");
 		      break;
 		    }
 		  str += current_char;
@@ -561,6 +603,8 @@ Lexer::build_token ()
 	      start_line (current_line, max_column_hint);
 
 	      str.shrink_to_fit ();
+
+	      loc += str.size () - 1;
 	      if (is_inner)
 		return Token::make_inner_doc_comment (loc, std::move (str));
 	      else
@@ -598,10 +642,11 @@ Lexer::build_token ()
 		{
 		  current_char = peek_input ();
 
-		  if (current_char == EOF)
+		  if (current_char.is_eof ())
 		    {
 		      rust_error_at (
-			loc, "unexpected EOF while looking for end of comment");
+			loc, ErrorCode::E0758,
+			"unexpected EOF while looking for end of comment");
 		      break;
 		    }
 
@@ -662,10 +707,11 @@ Lexer::build_token ()
 		{
 		  current_char = peek_input ();
 
-		  if (current_char == EOF)
+		  if (current_char.is_eof ())
 		    {
 		      rust_error_at (
-			loc, "unexpected EOF while looking for end of comment");
+			loc, ErrorCode::E0758,
+			"unexpected EOF while looking for end of comment");
 		      break;
 		    }
 
@@ -715,6 +761,8 @@ Lexer::build_token ()
 		}
 
 	      str.shrink_to_fit ();
+
+	      loc += str.size () - 1;
 	      if (is_inner)
 		return Token::make_inner_doc_comment (loc, std::move (str));
 	      else
@@ -732,6 +780,7 @@ Lexer::build_token ()
 	      // modulo-assign
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (PERCENT_EQ, loc);
 	    }
@@ -747,6 +796,7 @@ Lexer::build_token ()
 	      // xor-assign?
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (CARET_EQ, loc);
 	    }
@@ -764,6 +814,7 @@ Lexer::build_token ()
 		  // left-shift assign
 		  skip_input (1);
 		  current_column += 3;
+		  loc += 2;
 
 		  return Token::make (LEFT_SHIFT_EQ, loc);
 		}
@@ -772,6 +823,7 @@ Lexer::build_token ()
 		  // left-shift
 		  skip_input ();
 		  current_column += 2;
+		  loc += 1;
 
 		  return Token::make (LEFT_SHIFT, loc);
 		}
@@ -781,6 +833,7 @@ Lexer::build_token ()
 	      // smaller than or equal to
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (LESS_OR_EQUAL, loc);
 	    }
@@ -799,6 +852,7 @@ Lexer::build_token ()
 		  // right-shift-assign
 		  skip_input (1);
 		  current_column += 3;
+		  loc += 2;
 
 		  return Token::make (RIGHT_SHIFT_EQ, loc);
 		}
@@ -807,6 +861,7 @@ Lexer::build_token ()
 		  // right-shift
 		  skip_input ();
 		  current_column += 2;
+		  loc += 1;
 
 		  return Token::make (RIGHT_SHIFT, loc);
 		}
@@ -816,6 +871,7 @@ Lexer::build_token ()
 	      // larger than or equal to
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (GREATER_OR_EQUAL, loc);
 	    }
@@ -831,6 +887,7 @@ Lexer::build_token ()
 	      // scope resolution ::
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (SCOPE_RESOLUTION, loc);
 	    }
@@ -847,6 +904,7 @@ Lexer::build_token ()
 	      // not equal boolean operator
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (NOT_EQUAL, loc);
 	    }
@@ -896,6 +954,7 @@ Lexer::build_token ()
 	      // bitwise or-assign?
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (PIPE_EQ, loc);
 	    }
@@ -904,6 +963,7 @@ Lexer::build_token ()
 	      // logical or
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (OR, loc);
 	    }
@@ -920,6 +980,7 @@ Lexer::build_token ()
 	      // bitwise and-assign?
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (AMP_EQ, loc);
 	    }
@@ -928,6 +989,7 @@ Lexer::build_token ()
 	      // logical and
 	      skip_input ();
 	      current_column += 2;
+	      loc += 1;
 
 	      return Token::make (LOGICAL_AND, loc);
 	    }
@@ -946,6 +1008,7 @@ Lexer::build_token ()
 		  // ellipsis
 		  skip_input (1);
 		  current_column += 3;
+		  loc += 2;
 
 		  return Token::make (ELLIPSIS, loc);
 		}
@@ -954,6 +1017,7 @@ Lexer::build_token ()
 		  // ..=
 		  skip_input (1);
 		  current_column += 3;
+		  loc += 2;
 
 		  return Token::make (DOT_DOT_EQ, loc);
 		}
@@ -962,6 +1026,7 @@ Lexer::build_token ()
 		  // ..
 		  skip_input ();
 		  current_column += 2;
+		  loc += 1;
 
 		  return Token::make (DOT_DOT, loc);
 		}
@@ -992,10 +1057,11 @@ Lexer::build_token ()
       // raw identifiers and raw strings
       if (current_char == 'r')
 	{
-	  int peek = peek_input ();
-	  int peek1 = peek_input (1);
+	  Codepoint peek = peek_input ();
+	  Codepoint peek1 = peek_input (1);
 
-	  if (peek == '#' && (ISALPHA (peek1) || peek1 == '_'))
+	  // TODO (tamaron) parse Unicode ident
+	  if (peek == '#' && is_identifier_start (peek1.value))
 	    {
 	      TokenPtr raw_ident_ptr = parse_raw_identifier (loc);
 	      if (raw_ident_ptr != nullptr)
@@ -1012,15 +1078,15 @@ Lexer::build_token ()
 	    }
 	}
 
-      // find identifiers and keywords
-      if (ISALPHA (current_char) || current_char == '_')
+      // find identifiers and keywords.
+      if (is_identifier_start (current_char.value))
 	return parse_identifier_or_keyword (loc);
 
       // int and float literals
-      if (ISDIGIT (current_char))
+      if (ISDIGIT (current_char.value))
 	{ //  _ not allowed as first char
 	  if (current_char == '0'
-	      && is_non_decimal_int_literal_separator (peek_input ()))
+	      && is_non_decimal_int_literal_separator (peek_input ().value))
 	    {
 	      // handle binary, octal, hex literals
 	      TokenPtr non_dec_int_lit_ptr
@@ -1059,7 +1125,7 @@ Lexer::build_token ()
 		    "unexpected character");
 
       // didn't match anything so error
-      rust_error_at (loc, "unexpected character %<%x%>", current_char);
+      rust_error_at (loc, "unexpected character %<%x%>", current_char.value);
       current_column++;
     }
 }
@@ -1074,7 +1140,7 @@ Lexer::parse_in_type_suffix ()
   int additional_length_offset = 0;
 
   // get suffix
-  while (ISALPHA (current_char) || ISDIGIT (current_char)
+  while (ISALPHA (current_char.value) || ISDIGIT (current_char.value)
 	 || current_char == '_')
     {
       if (current_char == '_')
@@ -1215,7 +1281,7 @@ Lexer::parse_in_decimal ()
   bool pure_decimal = true;
   int additional_length_offset = 0;
   std::string str;
-  while (ISDIGIT (current_char) || current_char == '_')
+  while (ISDIGIT (current_char.value) || current_char.value == '_')
     {
       if (current_char == '_')
 	{
@@ -1251,7 +1317,7 @@ Lexer::parse_escape (char opening_char)
   current_char = peek_input ();
   additional_length_offset++;
 
-  switch (current_char)
+  switch (current_char.value)
     {
       case 'x': {
 	auto hex_escape_pair = parse_partial_hex_escape ();
@@ -1304,7 +1370,8 @@ Lexer::parse_escape (char opening_char)
       return std::make_tuple (0, parse_partial_string_continue (), true);
     default:
       rust_error_at (get_current_location (),
-		     "unknown escape sequence %<\\%c%>", current_char);
+		     "unknown escape sequence %<\\%s%>",
+		     current_char.as_string ().c_str ());
       // returns false if no parsing could be done
       // return false;
       return std::make_tuple (output_char, additional_length_offset, false);
@@ -1323,7 +1390,7 @@ Lexer::parse_escape (char opening_char)
 /* Parses an escape (or string continue) in a string or character. Supports
  * unicode escapes. */
 std::tuple<Codepoint, int, bool>
-Lexer::parse_utf8_escape (char opening_char)
+Lexer::parse_utf8_escape ()
 {
   Codepoint output_char;
   int additional_length_offset = 0;
@@ -1333,7 +1400,7 @@ Lexer::parse_utf8_escape (char opening_char)
   current_char = peek_input ();
   additional_length_offset++;
 
-  switch (current_char)
+  switch (current_char.value)
     {
       case 'x': {
 	auto hex_escape_pair = parse_partial_hex_escape ();
@@ -1387,7 +1454,8 @@ Lexer::parse_utf8_escape (char opening_char)
       return std::make_tuple (0, parse_partial_string_continue (), true);
     default:
       rust_error_at (get_current_location (),
-		     "unknown escape sequence %<\\%c%>", current_char);
+		     "unknown escape sequence %<\\%s%>",
+		     current_char.as_string ().c_str ());
       // returns false if no parsing could be done
       // return false;
       return std::make_tuple (output_char, additional_length_offset, false);
@@ -1411,7 +1479,8 @@ Lexer::parse_partial_string_continue ()
   int additional_length_offset = 1;
 
   // string continue
-  while (is_whitespace (current_char))
+  // TODO use utf-8 codepoint to skip whitespaces
+  while (is_whitespace (current_char.value))
     {
       if (current_char == '\n')
 	{
@@ -1450,29 +1519,29 @@ Lexer::parse_partial_hex_escape ()
   current_char = peek_input (1);
   int additional_length_offset = 1;
 
-  if (!is_x_digit (current_char))
+  if (!is_x_digit (current_char.value))
     {
       rust_error_at (get_current_location (),
-		     "invalid character %<\\x%c%> in \\x sequence",
-		     current_char);
+		     "invalid character %<\\x%s%> in \\x sequence",
+		     current_char.as_string ().c_str ());
       return std::make_pair (0, 0);
     }
-  hexNum[0] = current_char;
+  hexNum[0] = current_char.value;
 
   // second hex char
   skip_input ();
   current_char = peek_input (1);
   additional_length_offset++;
 
-  if (!is_x_digit (current_char))
+  if (!is_x_digit (current_char.value))
     {
       rust_error_at (get_current_location (),
-		     "invalid character %<\\x%c%c%> in \\x sequence", hexNum[0],
-		     current_char);
+		     "invalid character %<\\x%c%s%> in \\x sequence", hexNum[0],
+		     current_char.as_string ().c_str ());
       return std::make_pair (0, 1);
     }
   skip_input ();
-  hexNum[1] = current_char;
+  hexNum[1] = current_char.value;
 
   long hexLong = std::strtol (hexNum, nullptr, 16);
 
@@ -1492,7 +1561,7 @@ Lexer::parse_partial_unicode_escape ()
       rust_error_at (get_current_location (),
 		     "unicode escape should start with %<{%>");
       /* Skip what should probaby have been between brackets.  */
-      while (is_x_digit (current_char) || current_char == '_')
+      while (is_x_digit (current_char.value) || current_char == '_')
 	{
 	  skip_input ();
 	  current_char = peek_input ();
@@ -1520,7 +1589,7 @@ Lexer::parse_partial_unicode_escape ()
   num_str.reserve (6);
 
   // loop through to add entire hex number to string
-  while (is_x_digit (current_char) || current_char == '_')
+  while (is_x_digit (current_char.value) || current_char.value == '_')
     {
       if (current_char == '_')
 	{
@@ -1554,7 +1623,8 @@ Lexer::parse_partial_unicode_escape ()
       // wrong bracketm whitespace or single/double quotes are wrong
       // termination, otherwise it is a wrong character, then skip to the actual
       // terminator.
-      if (current_char == '{' || is_whitespace (current_char)
+      // TODO use utf-8 codepoint to skip whitespaces
+      if (current_char == '{' || is_whitespace (current_char.value)
 	  || current_char == '\'' || current_char == '"')
 	{
 	  rust_error_at (get_current_location (),
@@ -1564,10 +1634,11 @@ Lexer::parse_partial_unicode_escape ()
       else
 	{
 	  rust_error_at (get_current_location (),
-			 "invalid character %<%c%> in unicode escape",
-			 current_char);
+			 "invalid character %<%s%> in unicode escape",
+			 current_char.as_string ().c_str ());
+	  // TODO use utf-8 codepoint to skip whitespaces
 	  while (current_char != '}' && current_char != '{'
-		 && !is_whitespace (current_char) && current_char != '\''
+		 && !is_whitespace (current_char.value) && current_char != '\''
 		 && current_char != '"')
 	    {
 	      skip_input ();
@@ -1620,7 +1691,7 @@ Lexer::parse_partial_unicode_escape ()
 
 // Parses a byte character.
 TokenPtr
-Lexer::parse_byte_char (Location loc)
+Lexer::parse_byte_char (location_t loc)
 {
   skip_input ();
   current_column++;
@@ -1630,7 +1701,7 @@ Lexer::parse_byte_char (Location loc)
   int length = 1;
 
   // char to save
-  char byte_char = 0;
+  Codepoint byte_char = 0;
 
   // detect escapes
   if (current_char == '\\')
@@ -1655,6 +1726,12 @@ Lexer::parse_byte_char (Location loc)
       // otherwise, get character from direct input character
       byte_char = current_char;
 
+      if (!byte_char.is_ascii ())
+	{
+	  rust_error_at (get_current_location (),
+			 "non-ASCII character in %<byte char%>");
+	}
+
       skip_input ();
       current_char = peek_input ();
       length++;
@@ -1676,12 +1753,13 @@ Lexer::parse_byte_char (Location loc)
 
   current_column += length;
 
-  return Token::make_byte_char (loc, byte_char);
+  loc += length - 1;
+  return Token::make_byte_char (loc, byte_char.value);
 }
 
 // Parses a byte string.
 TokenPtr
-Lexer::parse_byte_string (Location loc)
+Lexer::parse_byte_string (location_t loc)
 {
   // byte string
 
@@ -1692,13 +1770,15 @@ Lexer::parse_byte_string (Location loc)
   std::string str;
   str.reserve (16); // some sensible default
 
-  int length = 1;
   current_char = peek_input ();
 
-  while (current_char != '"' && current_char != EOF)
+  const location_t string_begin_locus = get_current_location ();
+
+  while (current_char != '"' && !current_char.is_eof ())
     {
       if (current_char == '\\')
 	{
+	  int length = 1;
 	  auto escape_length_pair = parse_escape ('"');
 	  char output_char = std::get<0> (escape_length_pair);
 
@@ -1710,17 +1790,24 @@ Lexer::parse_byte_string (Location loc)
 	  if (output_char != 0 || !std::get<2> (escape_length_pair))
 	    str += output_char;
 
+	  current_column += length;
+
 	  continue;
 	}
 
-      length++;
+      current_column++;
+      if (current_char.value == '\n')
+	{
+	  current_line++;
+	  current_column = 1;
+	  // tell line_table that new line starts
+	  start_line (current_line, max_column_hint);
+	}
 
       str += current_char;
       skip_input ();
       current_char = peek_input ();
     }
-
-  current_column += length;
 
   if (current_char == '"')
     {
@@ -1729,24 +1816,25 @@ Lexer::parse_byte_string (Location loc)
       skip_input ();
       current_char = peek_input ();
     }
-  else if (current_char == EOF)
+  else if (current_char.is_eof ())
     {
-      rust_error_at (get_current_location (), "unended byte string literal");
+      rust_error_at (string_begin_locus, "unended byte string literal");
       return Token::make (END_OF_FILE, get_current_location ());
     }
   else
     {
-      gcc_unreachable ();
+      rust_unreachable ();
     }
 
   str.shrink_to_fit ();
+  loc += str.size () - 1;
 
   return Token::make_byte_string (loc, std::move (str));
 }
 
 // Parses a raw byte string.
 TokenPtr
-Lexer::parse_raw_byte_string (Location loc)
+Lexer::parse_raw_byte_string (location_t loc)
 {
   // raw byte string literals
   std::string str;
@@ -1755,14 +1843,18 @@ Lexer::parse_raw_byte_string (Location loc)
   int length = 1;
   int hash_count = 0;
 
+  const location_t string_begin_locus = get_current_location ();
+
   // get hash count at beginnning
   skip_input ();
   current_char = peek_input ();
   length++;
+  current_column++;
   while (current_char == '#')
     {
       hash_count++;
       length++;
+      current_column++;
 
       skip_input ();
       current_char = peek_input ();
@@ -1777,6 +1869,7 @@ Lexer::parse_raw_byte_string (Location loc)
   skip_input ();
   current_char = peek_input ();
   length++;
+  current_column++;
 
   while (true)
     {
@@ -1799,26 +1892,38 @@ Lexer::parse_raw_byte_string (Location loc)
 	      skip_input (hash_count);
 	      current_char = peek_input ();
 	      length += hash_count + 1;
+	      current_column += hash_count + 1;
 	      break;
 	    }
 	}
-
-      if ((unsigned char) current_char > 127)
+      else if (current_char.value > 127)
 	{
 	  rust_error_at (get_current_location (),
-			 "character %<%c%> in raw byte string out of range",
-			 current_char);
+			 "character %<%s%> in raw byte string out of range",
+			 current_char.as_string ().c_str ());
 	  current_char = 0;
+	}
+      else if (current_char.is_eof ())
+	{
+	  rust_error_at (string_begin_locus, "unended raw byte string literal");
+	  return Token::make (END_OF_FILE, get_current_location ());
 	}
 
       length++;
+      current_column++;
+      if (current_char == '\n')
+	{
+	  current_line++;
+	  current_column = 1;
+	  start_line (current_line, max_column_hint);
+	}
 
       str += current_char;
       skip_input ();
       current_char = peek_input ();
     }
 
-  current_column += length;
+  loc += length - 1;
 
   str.shrink_to_fit ();
 
@@ -1827,7 +1932,7 @@ Lexer::parse_raw_byte_string (Location loc)
 
 // Parses a raw identifier.
 TokenPtr
-Lexer::parse_raw_identifier (Location loc)
+Lexer::parse_raw_identifier (location_t loc)
 {
   // raw identifier
   std::string str;
@@ -1843,8 +1948,7 @@ Lexer::parse_raw_identifier (Location loc)
   int length = 0;
   current_char = peek_input ();
   // loop through entire name
-  while (ISALPHA (current_char) || ISDIGIT (current_char)
-	 || current_char == '_')
+  while (is_identifier_continue (current_char.value))
     {
       length++;
 
@@ -1855,13 +1959,20 @@ Lexer::parse_raw_identifier (Location loc)
 
   current_column += length;
 
+  rust_debug ("raw ident: %s", str.c_str ());
+
   // if just a single underscore, not an identifier
   if (first_is_underscore && length == 1)
     rust_error_at (get_current_location (),
 		   "%<_%> is not a valid raw identifier");
 
-  if (str == "crate" || str == "extern" || str == "self" || str == "super"
-      || str == "Self")
+  using namespace Rust::Values;
+  std::set<std::string> invalid{
+    Keywords::CRATE, Keywords::EXTERN_KW,  Keywords::SELF,
+    Keywords::SUPER, Keywords::SELF_ALIAS,
+  };
+
+  if (invalid.find (str) != invalid.end ())
     {
       rust_error_at (get_current_location (),
 		     "%qs is a forbidden raw identifier", str.c_str ());
@@ -1871,6 +1982,7 @@ Lexer::parse_raw_identifier (Location loc)
   else
     {
       str.shrink_to_fit ();
+      loc += length - 1;
 
       return Token::make_identifier (loc, std::move (str));
     }
@@ -1878,9 +1990,9 @@ Lexer::parse_raw_identifier (Location loc)
 
 // skip broken string input (unterminated strings)
 void
-Lexer::skip_broken_string_input (int current_char)
+Lexer::skip_broken_string_input (Codepoint current_char)
 {
-  while (current_char != '"' && current_char != EOF)
+  while (current_char != '"' && !current_char.is_eof ())
     {
       if (current_char == '\n')
 	{
@@ -1905,91 +2017,100 @@ Lexer::skip_broken_string_input (int current_char)
 	      current_column);
 }
 
-// Parses a unicode string.
+// Parses a string.
 TokenPtr
-Lexer::parse_string (Location loc)
+Lexer::parse_string (location_t loc)
 {
-  Codepoint current_char32;
-
   std::string str;
   str.reserve (16); // some sensible default
 
-  int length = 1;
-  current_char32 = peek_codepoint_input ();
+  current_char = peek_input ();
+
+  const location_t string_begin_locus = get_current_location ();
 
   // FIXME: This fails if the input ends. How do we check for EOF?
-  while (current_char32.value != '"' && !current_char32.is_eof ())
+  while (current_char.value != '"' && !current_char.is_eof ())
     {
-      if (current_char32.value == '\\')
+      if (current_char.value == '\\')
 	{
-	  // parse escape
-	  auto utf8_escape_pair = parse_utf8_escape ('\'');
-	  current_char32 = std::get<0> (utf8_escape_pair);
+	  int length = 1;
 
-	  if (current_char32 == Codepoint (0) && std::get<2> (utf8_escape_pair))
+	  // parse escape
+	  auto utf8_escape_pair = parse_utf8_escape ();
+	  current_char = std::get<0> (utf8_escape_pair);
+
+	  if (current_char == Codepoint (0) && std::get<2> (utf8_escape_pair))
 	    length = std::get<1> (utf8_escape_pair) - 1;
 	  else
 	    length += std::get<1> (utf8_escape_pair);
 
-	  if (current_char32 != Codepoint (0)
-	      || !std::get<2> (utf8_escape_pair))
-	    str += current_char32;
+	  if (current_char != Codepoint (0) || !std::get<2> (utf8_escape_pair))
+	    str += current_char.as_string ();
 
-	  // required as parsing utf8 escape only changes current_char
-	  current_char32 = peek_codepoint_input ();
+	  current_column += length;
 
+	  // FIXME: should remove this but can't.
+	  // `parse_utf8_escape` does not update `current_char` correctly.
+	  current_char = peek_input ();
 	  continue;
 	}
 
-      length += get_input_codepoint_length ();
+      current_column++;
+      if (current_char.value == '\n')
+	{
+	  current_line++;
+	  current_column = 1;
+	  // tell line_table that new line starts
+	  start_line (current_line, max_column_hint);
+	}
 
-      str += current_char32;
-      skip_codepoint_input ();
-      current_char32 = peek_codepoint_input ();
+      str += current_char;
+      skip_input ();
+      current_char = peek_input ();
     }
 
-  current_column += length;
-
-  if (current_char32.value == '"')
+  if (current_char.value == '"')
     {
       current_column++;
 
       skip_input ();
       current_char = peek_input ();
     }
-  else if (current_char32.is_eof ())
+  else if (current_char.is_eof ())
     {
-      rust_error_at (get_current_location (), "unended string literal");
+      rust_error_at (string_begin_locus, "unended string literal");
       return Token::make (END_OF_FILE, get_current_location ());
     }
   else
     {
-      gcc_unreachable ();
+      rust_unreachable ();
     }
 
   str.shrink_to_fit ();
+
   return Token::make_string (loc, std::move (str));
 }
 
 // Parses an identifier or keyword.
 TokenPtr
-Lexer::parse_identifier_or_keyword (Location loc)
+Lexer::parse_identifier_or_keyword (location_t loc)
 {
   std::string str;
   str.reserve (16); // default
-  str += current_char;
+  str += current_char.as_string ();
 
   bool first_is_underscore = current_char == '_';
 
   int length = 1;
   current_char = peek_input ();
+
   // loop through entire name
-  while (ISALPHA (current_char) || ISDIGIT (current_char)
-	 || current_char == '_')
+  while (is_identifier_continue (current_char.value))
     {
+      auto s = current_char.as_string ();
       length++;
 
-      str += current_char;
+      str += current_char.as_string ();
       skip_input ();
       current_char = peek_input ();
     }
@@ -2002,6 +2123,8 @@ Lexer::parse_identifier_or_keyword (Location loc)
 
   str.shrink_to_fit ();
 
+  loc += length - 1;
+
   TokenId keyword = classify_keyword (str);
   if (keyword == IDENTIFIER)
     return Token::make_identifier (loc, std::move (str));
@@ -2011,7 +2134,7 @@ Lexer::parse_identifier_or_keyword (Location loc)
 
 // Possibly returns a raw string token if it exists - otherwise returns null.
 TokenPtr
-Lexer::maybe_parse_raw_string (Location loc)
+Lexer::maybe_parse_raw_string (location_t loc)
 {
   int peek_index = 0;
   while (peek_input (peek_index) == '#')
@@ -2025,13 +2148,16 @@ Lexer::maybe_parse_raw_string (Location loc)
 
 // Returns a raw string token.
 TokenPtr
-Lexer::parse_raw_string (Location loc, int initial_hash_count)
+Lexer::parse_raw_string (location_t loc, int initial_hash_count)
 {
   // raw string literals
   std::string str;
   str.reserve (16); // some sensible default
 
   int length = 1 + initial_hash_count;
+  current_column += length;
+
+  const location_t string_begin_locus = get_current_location ();
 
   if (initial_hash_count > 0)
     skip_input (initial_hash_count - 1);
@@ -2042,12 +2168,13 @@ Lexer::parse_raw_string (Location loc, int initial_hash_count)
     rust_error_at (get_current_location (), "raw string has no opening %<\"%>");
 
   length++;
+  current_column++;
   skip_input ();
-  Codepoint current_char32 = peek_codepoint_input ();
+  current_char = peek_input ();
 
-  while (!current_char32.is_eof ())
+  while (true)
     {
-      if (current_char32.value == '"')
+      if (current_char.value == '"')
 	{
 	  bool enough_hashes = true;
 
@@ -2066,27 +2193,40 @@ Lexer::parse_raw_string (Location loc, int initial_hash_count)
 	      skip_input (initial_hash_count);
 	      current_char = peek_input ();
 	      length += initial_hash_count + 1;
+	      current_column += initial_hash_count + 1;
 	      break;
 	    }
 	}
+      else if (current_char.is_eof ())
+	{
+	  rust_error_at (string_begin_locus, "unended raw string literal");
+	  return Token::make (END_OF_FILE, get_current_location ());
+	}
 
       length++;
+      current_column++;
+      if (current_char == '\n')
+	{
+	  current_line++;
+	  current_column = 1;
+	  start_line (current_line, max_column_hint);
+	}
 
-      str += current_char32;
-      skip_codepoint_input ();
-      current_char32 = peek_codepoint_input ();
+      str += current_char.as_string ();
+      skip_input ();
+      current_char = peek_input ();
     }
 
-  current_column += length;
+  loc += length - 1;
 
   str.shrink_to_fit ();
 
-  return Token::make_string (loc, std::move (str));
+  return Token::make_raw_string (loc, std::move (str));
 }
 
 template <typename IsDigitFunc>
 TokenPtr
-Lexer::parse_non_decimal_int_literal (Location loc, IsDigitFunc is_digit_func,
+Lexer::parse_non_decimal_int_literal (location_t loc, IsDigitFunc is_digit_func,
 				      std::string existent_str, int base)
 {
   int length = 1;
@@ -2097,7 +2237,7 @@ Lexer::parse_non_decimal_int_literal (Location loc, IsDigitFunc is_digit_func,
   length++;
 
   // loop through to add entire number to string
-  while (is_digit_func (current_char) || current_char == '_')
+  while (is_digit_func (current_char.value) || current_char == '_')
     {
       if (current_char == '_')
 	{
@@ -2142,12 +2282,15 @@ Lexer::parse_non_decimal_int_literal (Location loc, IsDigitFunc is_digit_func,
 						 : "<insert unknown base>")));
       return nullptr;
     }
+
+  loc += length - 1;
+
   return Token::make_int (loc, std::move (existent_str), type_hint);
 }
 
 // Parses a hex, binary or octal int literal.
 TokenPtr
-Lexer::parse_non_decimal_int_literals (Location loc)
+Lexer::parse_non_decimal_int_literals (location_t loc)
 {
   std::string str;
   str.reserve (16); // some sensible default
@@ -2180,7 +2323,7 @@ Lexer::parse_non_decimal_int_literals (Location loc)
 
 // Parses a decimal-based int literal or float literal.
 TokenPtr
-Lexer::parse_decimal_int_or_float (Location loc)
+Lexer::parse_decimal_int_or_float (location_t loc)
 {
   std::string str;
   str.reserve (16); // some sensible default
@@ -2197,7 +2340,17 @@ Lexer::parse_decimal_int_or_float (Location loc)
   length += std::get<1> (initial_decimal);
 
   // detect float literal
-  if (current_char == '.' && is_float_digit (peek_input (1)))
+  //
+  // Note:
+  //
+  // We should not use is_float_digit () for this verification but instead
+  // directly ISDIGIT because rust does not support non digit values right after
+  // a dot.
+  // The following value is not legal in rust:
+  // let a = 3.e1;
+  // A `0` should be put between the dot and the exponent to be valid
+  // (eg. 3.0e1).
+  if (current_char == '.' && ISDIGIT (peek_input (1).value))
     {
       // float with a '.', parse another decimal into it
 
@@ -2234,10 +2387,13 @@ Lexer::parse_decimal_int_or_float (Location loc)
 
       current_column += length;
 
+      loc += length - 1;
+
       str.shrink_to_fit ();
       return Token::make_float (loc, std::move (str), type_hint);
     }
-  else if (current_char == '.' && check_valid_float_dot_end (peek_input (1)))
+  else if (current_char == '.'
+	   && check_valid_float_dot_end (peek_input (1).value))
     {
       // float that is just an integer with a terminating '.' character
 
@@ -2247,12 +2403,11 @@ Lexer::parse_decimal_int_or_float (Location loc)
       current_char = peek_input ();
       length++;
 
-      // add a '0' after the . to prevent ambiguity
-      str += '0';
-
       // type hint not allowed
 
       current_column += length;
+
+      loc += length - 1;
 
       str.shrink_to_fit ();
       return Token::make_float (loc, std::move (str), CORETYPE_UNKNOWN);
@@ -2283,6 +2438,8 @@ Lexer::parse_decimal_int_or_float (Location loc)
 
       current_column += length;
 
+      loc += length - 1;
+
       str.shrink_to_fit ();
       return Token::make_float (loc, std::move (str), type_hint);
     }
@@ -2304,52 +2461,55 @@ Lexer::parse_decimal_int_or_float (Location loc)
 
       current_column += length;
 
+      loc += length - 1;
+
       str.shrink_to_fit ();
       return Token::make_int (loc, std::move (str), type_hint);
     }
 }
 
 TokenPtr
-Lexer::parse_char_or_lifetime (Location loc)
+Lexer::parse_char_or_lifetime (location_t loc)
 {
-  Codepoint current_char32;
-
   int length = 1;
 
-  current_char32 = peek_codepoint_input ();
-  if (current_char32.is_eof ())
+  current_char = peek_input ();
+  if (current_char.is_eof ())
     return nullptr;
 
   // parse escaped char literal
-  if (current_char32.value == '\\')
+  if (current_char.value == '\\')
     {
       // parse escape
-      auto utf8_escape_pair = parse_utf8_escape ('\'');
-      current_char32 = std::get<0> (utf8_escape_pair);
+      auto utf8_escape_pair = parse_utf8_escape ();
+      Codepoint escaped_char = std::get<0> (utf8_escape_pair);
       length += std::get<1> (utf8_escape_pair);
 
-      if (peek_codepoint_input ().value != '\'')
+      if (peek_input ().value != '\'')
 	{
 	  rust_error_at (get_current_location (), "unended character literal");
 	}
       else
 	{
-	  skip_codepoint_input ();
+	  skip_input ();
 	  current_char = peek_input ();
 	  length++;
 	}
 
       current_column += length;
 
-      return Token::make_char (loc, current_char32);
+      loc += length - 1;
+
+      return Token::make_char (loc, escaped_char);
     }
   else
     {
-      skip_codepoint_input ();
+      skip_input ();
 
-      if (peek_codepoint_input ().value == '\'')
+      if (peek_input ().value == '\'')
 	{
 	  // parse non-escaped char literal
+	  Codepoint non_escaped_char = current_char;
 
 	  // skip the ' character
 	  skip_input ();
@@ -2358,27 +2518,32 @@ Lexer::parse_char_or_lifetime (Location loc)
 	  // TODO fix due to different widths of utf-8 chars?
 	  current_column += 3;
 
-	  return Token::make_char (loc, current_char32);
+	  loc += 2;
+
+	  return Token::make_char (loc, non_escaped_char);
 	}
-      else if (ISDIGIT (current_char32.value) || ISALPHA (current_char32.value)
-	       || current_char32.value == '_')
+      else if (is_identifier_start (current_char.value))
 	{
 	  // parse lifetime name
 	  std::string str;
-	  str += current_char32;
+	  str += current_char.as_string ();
 	  length++;
 
 	  current_char = peek_input ();
-	  while (ISDIGIT (current_char) || ISALPHA (current_char)
-		 || current_char == '_')
+	  while (is_identifier_continue (current_char.value))
 	    {
-	      str += current_char;
+	      str += current_char.as_string ();
 	      skip_input ();
 	      current_char = peek_input ();
 	      length++;
 	    }
 
 	  current_column += length;
+
+	  loc += length - 1;
+
+	  // TODO some keywords cannot be used for a lifetime label #2306
+	  // https://doc.rust-lang.org/reference/tokens.html
 
 	  str.shrink_to_fit ();
 	  return Token::make_lifetime (loc, std::move (str));
@@ -2393,324 +2558,12 @@ Lexer::parse_char_or_lifetime (Location loc)
     }
 }
 
-// Returns the length of the codepoint at the current position.
-int
-Lexer::get_input_codepoint_length ()
-{
-  uint8_t input = peek_input ();
-
-  if ((int8_t) input == EOF)
-    return 0;
-
-  if (input < 128)
-    {
-      // ascii -- 1 byte
-      // return input;
-
-      return 1;
-    }
-  else if ((input & 0xC0) == 0x80)
-    {
-      // invalid (continuation; can't be first char)
-      // return 0xFFFE;
-
-      return 0;
-    }
-  else if ((input & 0xE0) == 0xC0)
-    {
-      // 2 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      // uint32_t output = ((input & 0x1F) << 6) | ((input2 & 0x3F) << 0);
-      // return output;
-      return 2;
-    }
-  else if ((input & 0xF0) == 0xE0)
-    {
-      // 3 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      uint8_t input3 = peek_input (2);
-      if ((input3 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      /*uint32_t output
-	= ((input & 0x0F) << 12) | ((input2 & 0x3F) << 6) | ((input3 & 0x3F) <<
-      0); return output;*/
-      return 3;
-    }
-  else if ((input & 0xF8) == 0xF0)
-    {
-      // 4 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      uint8_t input3 = peek_input (2);
-      if ((input3 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      uint8_t input4 = peek_input (3);
-      if ((input4 & 0xC0) != 0x80)
-	return 0;
-      // return 0xFFFE;
-
-      /*uint32_t output = ((input & 0x07) << 18) | ((input2 & 0x3F) << 12)
-			| ((input3 & 0x3F) << 6) | ((input4 & 0x3F) << 0);
-      return output;*/
-      return 4;
-    }
-  else
-    {
-      rust_error_at (get_current_location (),
-		     "invalid UTF-8 [FIRST] (too long)");
-      return 0;
-    }
-}
-
-// Returns the codepoint at the current position.
-Codepoint
-Lexer::peek_codepoint_input ()
-{
-  uint8_t input = peek_input ();
-
-  if ((int8_t) input == EOF)
-    return Codepoint::eof ();
-
-  if (input < 128)
-    {
-      // ascii -- 1 byte
-      return {input};
-    }
-  else if ((input & 0xC0) == 0x80)
-    {
-      // invalid (continuation; can't be first char)
-      return {0xFFFE};
-    }
-  else if ((input & 0xE0) == 0xC0)
-    {
-      // 2 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint32_t output = ((input & 0x1F) << 6) | ((input2 & 0x3F) << 0);
-      return {output};
-    }
-  else if ((input & 0xF0) == 0xE0)
-    {
-      // 3 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint8_t input3 = peek_input (2);
-      if ((input3 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint32_t output = ((input & 0x0F) << 12) | ((input2 & 0x3F) << 6)
-			| ((input3 & 0x3F) << 0);
-      return {output};
-    }
-  else if ((input & 0xF8) == 0xF0)
-    {
-      // 4 bytes
-      uint8_t input2 = peek_input (1);
-      if ((input2 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint8_t input3 = peek_input (2);
-      if ((input3 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint8_t input4 = peek_input (3);
-      if ((input4 & 0xC0) != 0x80)
-	return {0xFFFE};
-
-      uint32_t output = ((input & 0x07) << 18) | ((input2 & 0x3F) << 12)
-			| ((input3 & 0x3F) << 6) | ((input4 & 0x3F) << 0);
-      return {output};
-    }
-  else
-    {
-      rust_error_at (get_current_location (),
-		     "invalid UTF-8 [SECND] (too long)");
-      return {0xFFFE};
-    }
-}
-
-void
-Lexer::skip_codepoint_input ()
-{
-  int toSkip = get_input_codepoint_length ();
-  gcc_assert (toSkip >= 1);
-
-  skip_input (toSkip - 1);
-}
-
-int
-Lexer::test_get_input_codepoint_n_length (int n_start_offset)
-{
-  uint8_t input = peek_input (n_start_offset);
-
-  if (input < 128)
-    {
-      // ascii -- 1 byte
-      // return input;
-      return 1;
-    }
-  else if ((input & 0xC0) == 0x80)
-    {
-      // invalid (continuation; can't be first char)
-      // return 0xFFFE;
-      return 0;
-    }
-  else if ((input & 0xE0) == 0xC0)
-    {
-      // 2 bytes
-      uint8_t input2 = peek_input (n_start_offset + 1);
-      if ((input2 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      // uint32_t output = ((input & 0x1F) << 6) | ((input2 & 0x3F) << 0);
-      // return output;
-      return 2;
-    }
-  else if ((input & 0xF0) == 0xE0)
-    {
-      // 3 bytes
-      uint8_t input2 = peek_input (n_start_offset + 1);
-      if ((input2 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      uint8_t input3 = peek_input (n_start_offset + 2);
-      if ((input3 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      /*uint32_t output
-	= ((input & 0x0F) << 12) | ((input2 & 0x3F) << 6) | ((input3 & 0x3F) <<
-      0); return output;*/
-      return 3;
-    }
-  else if ((input & 0xF8) == 0xF0)
-    {
-      // 4 bytes
-      uint8_t input2 = peek_input (n_start_offset + 1);
-      if ((input2 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      uint8_t input3 = peek_input (n_start_offset + 2);
-      if ((input3 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      uint8_t input4 = peek_input (n_start_offset + 3);
-      if ((input4 & 0xC0) != 0x80)
-	// return 0xFFFE;
-	return 0;
-
-      /*uint32_t output = ((input & 0x07) << 18) | ((input2 & 0x3F) << 12)
-			| ((input3 & 0x3F) << 6) | ((input4 & 0x3F) << 0);
-      return output;*/
-      return 4;
-    }
-  else
-    {
-      rust_error_at (get_current_location (),
-		     "invalid UTF-8 [THIRD] (too long)");
-      return 0;
-    }
-}
-
-// peeks the codepoint input at n codepoints ahead of current codepoint - try
-// not to use
-Codepoint
-Lexer::test_peek_codepoint_input (int n)
-{
-  int totalOffset = 0;
-
-  // add up all offsets into total offset? does this do what I want?
-  for (int i = 0; i < n; i++)
-    {
-      totalOffset += test_get_input_codepoint_n_length (totalOffset);
-    }
-  // issues: this would have (at least) O(n) lookup time, not O(1) like the
-  // rest?
-
-  // TODO: implement if still needed
-
-  // error out of function as it is not implemented
-  gcc_assert (1 == 0);
-  return {0};
-  /*
-	  uint8_t input = peek_input();
-
-	  if (input < 128) {
-	      // ascii -- 1 byte
-	      return input;
-	  } else if ((input & 0xC0) == 0x80) {
-	      // invalid (continuation; can't be first char)
-	      return 0xFFFE;
-	  } else if ((input & 0xE0) == 0xC0) {
-	      // 2 bytes
-	      uint8_t input2 = peek_input(1);
-	      if ((input2 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint32_t output = ((input & 0x1F) << 6) | ((input2 & 0x3F) << 0);
-	      return output;
-	  } else if ((input & 0xF0) == 0xE0) {
-	      // 3 bytes
-	      uint8_t input2 = peek_input(1);
-	      if ((input2 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint8_t input3 = peek_input(2);
-	      if ((input3 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint32_t output
-		= ((input & 0x0F) << 12) | ((input2 & 0x3F) << 6) | ((input3 &
-     0x3F) << 0); return output; } else if ((input & 0xF8) == 0xF0) {
-	      // 4 bytes
-	      uint8_t input2 = peek_input(1);
-	      if ((input2 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint8_t input3 = peek_input(2);
-	      if ((input3 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint8_t input4 = peek_input(3);
-	      if ((input4 & 0xC0) != 0x80)
-		  return 0xFFFE;
-
-	      uint32_t output = ((input & 0x07) << 18) | ((input2 & 0x3F) << 12)
-				| ((input3 & 0x3F) << 6) | ((input4 & 0x3F) <<
-     0); return output; } else { rust_error_at(get_current_location(), "invalid
-     UTF-8 (too long)"); return 0xFFFE;
-	  }*/
-}
-
 void
 Lexer::split_current_token (TokenId new_left, TokenId new_right)
 {
   /* TODO: assert that this TokenId is a "simple token" like punctuation and not
    * like "IDENTIFIER"? */
-  Location current_loc = peek_token ()->get_locus ();
+  location_t current_loc = peek_token ()->get_locus ();
   TokenPtr new_left_tok = Token::make (new_left, current_loc);
   TokenPtr new_right_tok = Token::make (new_right, current_loc + 1);
 
@@ -2719,10 +2572,109 @@ Lexer::split_current_token (TokenId new_left, TokenId new_right)
 }
 
 void
+Lexer::split_current_token (std::vector<TokenPtr> new_tokens)
+{
+  rust_assert (new_tokens.size () > 0);
+  token_queue.replace_current_value (new_tokens[0]);
+
+  for (size_t i = 1; i < new_tokens.size (); i++)
+    {
+      token_queue.insert (i, new_tokens[i]);
+    }
+}
+
+void
 Lexer::start_line (int current_line, int current_column)
 {
   if (line_map)
-    line_map->start_line (current_line, current_column);
+    linemap_line_start (line_table, current_line, current_column);
 }
 
 } // namespace Rust
+
+#if CHECKING_P
+
+namespace selftest {
+
+// Checks if `src` has the same contents as the given characters
+static void
+assert_source_content (Rust::InputSource &src,
+		       const std::vector<uint32_t> &expected)
+{
+  Rust::Codepoint src_char = src.next ();
+  for (auto expected_char : expected)
+    {
+      // Make sure that `src` is not shorter than `expected`
+      ASSERT_FALSE (src_char.is_eof ());
+      // Checks skipped character is expeceted one.
+      ASSERT_EQ (src_char.value, expected_char);
+      src_char = src.next ();
+    }
+  // Checks if `src` and `chars` has the same length.
+  ASSERT_TRUE (src_char.is_eof ());
+}
+
+static void
+test_buffer_input_source (std::string str,
+			  const std::vector<uint32_t> &expected)
+{
+  Rust::BufferInputSource source (str, 0);
+  assert_source_content (source, expected);
+}
+
+static void
+test_file_input_source (std::string str, const std::vector<uint32_t> &expected)
+{
+  FILE *tmpf = tmpfile ();
+  // Moves to the first character
+  fputs (str.c_str (), tmpf);
+  std::rewind (tmpf);
+  Rust::FileInputSource source (tmpf);
+  assert_source_content (source, expected);
+}
+
+void
+rust_input_source_test ()
+{
+  // ASCII
+  std::string src = u8"_abcde\tXYZ\v\f";
+  std::vector<uint32_t> expected
+    = {'_', 'a', 'b', 'c', 'd', 'e', '\t', 'X', 'Y', 'Z', '\v', '\f'};
+  test_buffer_input_source (src, expected);
+
+  // BOM
+  src = u8"\xef\xbb\xbfOK";
+  expected = {'O', 'K'};
+  test_buffer_input_source (src, expected);
+
+  // Russian
+  src = u8"приве́т";
+  expected = {L'п',
+	      L'р',
+	      L'и',
+	      L'в',
+	      0x0435 /* CYRILLIC SMALL LETTER IE е */,
+	      0x301 /* COMBINING ACUTE ACCENT ́ */,
+	      L'т'};
+  test_buffer_input_source (src, expected);
+
+  src = u8"❤️🦀";
+  expected = {0x2764 /* HEAVY BLACK HEART */,
+	      0xfe0f /* VARIATION SELECTOR-16 */, L'🦀'};
+  test_buffer_input_source (src, expected);
+
+  src = u8"こんにちは";
+  expected = {L'こ', L'ん', L'に', L'ち', L'は'};
+  test_file_input_source (src, expected);
+
+  src = u8"👮‍♂👩‍⚕";
+  expected
+    = {0x1f46e /* POLICE OFFICER */,   0x200d /* ZERO WIDTH JOINER */,
+       0x2642 /* MALE SIGN */,	       0x1f469 /* WOMAN */,
+       0x200d /* ZERO WIDTH JOINER */, 0x2695 /* STAFF OF AESCULAPIUS */};
+  test_file_input_source (src, expected);
+}
+
+} // namespace selftest
+
+#endif // CHECKING_P
