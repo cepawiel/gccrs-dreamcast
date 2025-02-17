@@ -1,5 +1,5 @@
 /* C-family attributes handling.
-   Copyright (C) 1992-2022 Free Software Foundation, Inc.
+   Copyright (C) 1992-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -41,6 +41,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "common/common-target.h"
 #include "langhooks.h"
 #include "tree-inline.h"
+#include "ipa-strub.h"
 #include "toplev.h"
 #include "tree-iterator.h"
 #include "opts.h"
@@ -69,6 +70,7 @@ static tree handle_asan_odr_indicator_attribute (tree *, tree, tree, int,
 static tree handle_stack_protect_attribute (tree *, tree, tree, int, bool *);
 static tree handle_no_stack_protector_function_attribute (tree *, tree,
 							tree, int, bool *);
+static tree handle_strub_attribute (tree *, tree, tree, int, bool *);
 static tree handle_noinline_attribute (tree *, tree, tree, int, bool *);
 static tree handle_noclone_attribute (tree *, tree, tree, int, bool *);
 static tree handle_nocf_check_attribute (tree *, tree, tree, int, bool *);
@@ -136,6 +138,7 @@ static tree handle_vector_mask_attribute (tree *, tree, tree, int,
 static tree handle_nonnull_attribute (tree *, tree, tree, int, bool *);
 static tree handle_nonstring_attribute (tree *, tree, tree, int, bool *);
 static tree handle_nothrow_attribute (tree *, tree, tree, int, bool *);
+static tree handle_expected_throw_attribute (tree *, tree, tree, int, bool *);
 static tree handle_cleanup_attribute (tree *, tree, tree, int, bool *);
 static tree handle_warn_unused_result_attribute (tree *, tree, tree, int,
 						 bool *);
@@ -148,6 +151,7 @@ static tree handle_alloc_align_attribute (tree *, tree, tree, int, bool *);
 static tree handle_assume_aligned_attribute (tree *, tree, tree, int, bool *);
 static tree handle_assume_attribute (tree *, tree, tree, int, bool *);
 static tree handle_target_attribute (tree *, tree, tree, int, bool *);
+static tree handle_target_version_attribute (tree *, tree, tree, int, bool *);
 static tree handle_target_clones_attribute (tree *, tree, tree, int, bool *);
 static tree handle_optimize_attribute (tree *, tree, tree, int, bool *);
 static tree ignore_attribute (tree *, tree, tree, int, bool *);
@@ -175,8 +179,10 @@ static tree handle_objc_root_class_attribute (tree *, tree, tree, int, bool *);
 static tree handle_objc_nullability_attribute (tree *, tree, tree, int, bool *);
 static tree handle_signed_bool_precision_attribute (tree *, tree, tree, int,
 						    bool *);
+static tree handle_hardbool_attribute (tree *, tree, tree, int, bool *);
 static tree handle_retain_attribute (tree *, tree, tree, int, bool *);
 static tree handle_fd_arg_attribute (tree *, tree, tree, int, bool *);
+static tree handle_null_terminated_string_arg_attribute (tree *, tree, tree, int, bool *);
 
 /* Helper to define attribute exclusions.  */
 #define ATTR_EXCL(name, function, type, variable)	\
@@ -212,10 +218,39 @@ static const struct attribute_spec::exclusions attr_inline_exclusions[] =
   ATTR_EXCL (NULL, false, false, false),
 };
 
+static const struct attribute_spec::exclusions attr_always_inline_exclusions[] =
+{
+  ATTR_EXCL ("noinline", true, true, true),
+  ATTR_EXCL ("target_clones", true, true, true),
+  ATTR_EXCL (NULL, false, false, false),
+};
+
 static const struct attribute_spec::exclusions attr_noinline_exclusions[] =
 {
   ATTR_EXCL ("always_inline", true, true, true),
   ATTR_EXCL ("gnu_inline", true, true, true),
+  ATTR_EXCL (NULL, false, false, false),
+};
+
+static const struct attribute_spec::exclusions attr_target_exclusions[] =
+{
+  ATTR_EXCL ("target_clones", TARGET_HAS_FMV_TARGET_ATTRIBUTE,
+	     TARGET_HAS_FMV_TARGET_ATTRIBUTE, TARGET_HAS_FMV_TARGET_ATTRIBUTE),
+  ATTR_EXCL (NULL, false, false, false),
+};
+
+static const struct attribute_spec::exclusions attr_target_clones_exclusions[] =
+{
+  ATTR_EXCL ("always_inline", true, true, true),
+  ATTR_EXCL ("target", TARGET_HAS_FMV_TARGET_ATTRIBUTE,
+	     TARGET_HAS_FMV_TARGET_ATTRIBUTE, TARGET_HAS_FMV_TARGET_ATTRIBUTE),
+  ATTR_EXCL ("target_version", true, true, true),
+  ATTR_EXCL (NULL, false, false, false),
+};
+
+static const struct attribute_spec::exclusions attr_target_version_exclusions[] =
+{
+  ATTR_EXCL ("target_clones", true, true, true),
   ATTR_EXCL (NULL, false, false, false),
 };
 
@@ -286,12 +321,14 @@ static const struct attribute_spec::exclusions attr_stack_protect_exclusions[] =
 /* Table of machine-independent attributes common to all C-like languages.
 
    Current list of processed common attributes: nonnull.  */
-const struct attribute_spec c_common_attribute_table[] =
+const struct attribute_spec c_common_gnu_attributes[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
        affects_type_identity, handler, exclude } */
   { "signed_bool_precision",  1, 1, false, true, false, true,
 			      handle_signed_bool_precision_attribute, NULL },
+  { "hardbool",               0, 2, false, true, false, true,
+			      handle_hardbool_attribute, NULL },
   { "packed",                 0, 0, false, false, false, false,
 			      handle_packed_attribute,
 	                      attr_aligned_exclusions },
@@ -317,6 +354,8 @@ const struct attribute_spec c_common_attribute_table[] =
   { "no_stack_protector",     0, 0, true, false, false, false,
 			      handle_no_stack_protector_function_attribute,
 			      attr_stack_protect_exclusions },
+  { "strub",		      0, 1, false, true, false, true,
+			      handle_strub_attribute, NULL },
   { "noinline",               0, 0, true,  false, false, false,
 			      handle_noinline_attribute,
 	                      attr_noinline_exclusions },
@@ -330,7 +369,7 @@ const struct attribute_spec c_common_attribute_table[] =
 			      handle_leaf_attribute, NULL },
   { "always_inline",          0, 0, true,  false, false, false,
 			      handle_always_inline_attribute,
-	                      attr_inline_exclusions },
+			      attr_always_inline_exclusions },
   { "gnu_inline",             0, 0, true,  false, false, false,
 			      handle_gnu_inline_attribute,
 	                      attr_inline_exclusions },
@@ -437,6 +476,8 @@ const struct attribute_spec c_common_attribute_table[] =
 			      handle_nonstring_attribute, NULL },
   { "nothrow",                0, 0, true,  false, false, false,
 			      handle_nothrow_attribute, NULL },
+  { "expected_throw",         0, 0, true,  false, false, false,
+			      handle_expected_throw_attribute, NULL },
   { "may_alias",	      0, 0, false, true, false, false, NULL, NULL },
   { "cleanup",		      1, 1, true, false, false, false,
 			      handle_cleanup_attribute, NULL },
@@ -452,10 +493,10 @@ const struct attribute_spec c_common_attribute_table[] =
   { "alloc_size",	      1, 2, false, true, true, false,
 			      handle_alloc_size_attribute,
 	                      attr_alloc_exclusions },
-  { "cold",                   0, 0, true,  false, false, false,
+  { "cold",		      0, 0, false,  false, false, false,
 			      handle_cold_attribute,
 	                      attr_cold_hot_exclusions },
-  { "hot",                    0, 0, true,  false, false, false,
+  { "hot",		      0, 0, false,  false, false, false,
 			      handle_hot_attribute,
 	                      attr_cold_hot_exclusions },
   { "no_address_safety_analysis",
@@ -479,9 +520,14 @@ const struct attribute_spec c_common_attribute_table[] =
   { "error",		      1, 1, true,  false, false, false,
 			      handle_error_attribute, NULL },
   { "target",                 1, -1, true, false, false, false,
-			      handle_target_attribute, NULL },
+			      handle_target_attribute,
+			      attr_target_exclusions },
+  { "target_version",         1, 1, true, false, false, false,
+			      handle_target_version_attribute,
+			      attr_target_version_exclusions },
   { "target_clones",          1, -1, true, false, false, false,
-			      handle_target_clones_attribute, NULL },
+			      handle_target_clones_attribute,
+			      attr_target_clones_exclusions },
   { "optimize",               1, -1, true, false, false, false,
 			      handle_optimize_attribute, NULL },
   /* For internal use only.  The leading '*' both prevents its usage in
@@ -517,6 +563,8 @@ const struct attribute_spec c_common_attribute_table[] =
   { "omp declare target link", 0, 0, true, false, false, false,
 			      handle_omp_declare_target_attribute, NULL },
   { "omp declare target implicit", 0, 0, true, false, false, false,
+			      handle_omp_declare_target_attribute, NULL },
+  { "omp declare target indirect", 0, 0, true, false, false, false,
 			      handle_omp_declare_target_attribute, NULL },
   { "omp declare target host", 0, 0, true, false, false, false,
 			      handle_omp_declare_target_attribute, NULL },
@@ -569,22 +617,32 @@ const struct attribute_spec c_common_attribute_table[] =
             handle_fd_arg_attribute, NULL},
   { "fd_arg_write",       1, 1, false, true, true, false,
             handle_fd_arg_attribute, NULL},         
-  { NULL,                     0, 0, false, false, false, false, NULL, NULL }
+  { "null_terminated_string_arg", 1, 1, false, true, true, false,
+			      handle_null_terminated_string_arg_attribute, NULL}
+};
+
+const struct scoped_attribute_specs c_common_gnu_attribute_table =
+{
+  "gnu", { c_common_gnu_attributes }
 };
 
 /* Give the specifications for the format attributes, used by C and all
    descendants.
 
    Current list of processed format attributes: format, format_arg.  */
-const struct attribute_spec c_common_format_attribute_table[] =
+const struct attribute_spec c_common_format_attributes[] =
 {
   /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
        affects_type_identity, handler, exclude } */
   { "format",                 3, 3, false, true,  true, false,
 			      handle_format_attribute, NULL },
   { "format_arg",             1, 1, false, true,  true, false,
-			      handle_format_arg_attribute, NULL },
-  { NULL,                     0, 0, false, false, false, false, NULL, NULL }
+			      handle_format_arg_attribute, NULL }
+};
+
+const struct scoped_attribute_specs c_common_format_attribute_table =
+{
+  "gnu", { c_common_format_attributes }
 };
 
 /* Returns TRUE iff the attribute indicated by ATTR_ID takes a plain
@@ -989,6 +1047,96 @@ handle_signed_bool_precision_attribute (tree *node, tree name, tree args,
   return NULL_TREE;
 }
 
+/* Handle a "hardbool" attribute; arguments as in struct
+   attribute_spec.handler.  */
+
+static tree
+handle_hardbool_attribute (tree *node, tree name, tree args,
+			   int /* flags */, bool *no_add_attrs)
+{
+  if (c_language != clk_c)
+    {
+      error ("%qE attribute only supported in C", name);
+      *no_add_attrs = TRUE;
+      return NULL_TREE;
+    }
+
+  if (!TYPE_P (*node) || TREE_CODE (*node) != INTEGER_TYPE)
+    {
+      error ("%qE attribute only supported on "
+	     "integral types", name);
+      *no_add_attrs = TRUE;
+      return NULL_TREE;
+    }
+
+  tree orig = *node;
+  *node = build_duplicate_type (orig);
+
+  TREE_SET_CODE (*node, ENUMERAL_TYPE);
+  ENUM_UNDERLYING_TYPE (*node) = orig;
+
+  tree false_value;
+  if (args)
+    false_value = fold_convert (*node, TREE_VALUE (args));
+  else
+    false_value = fold_convert (*node, integer_zero_node);
+
+  if (TREE_OVERFLOW_P (false_value))
+    {
+      warning (OPT_Wattributes,
+	       "overflows in conversion from %qT to %qT "
+	       "changes value from %qE to %qE",
+	       TREE_TYPE (TREE_VALUE (args)), *node,
+	       TREE_VALUE (args), false_value);
+      TREE_OVERFLOW (false_value) = false;
+    }
+
+  tree true_value;
+  if (args && TREE_CHAIN (args))
+    true_value = fold_convert (*node, TREE_VALUE (TREE_CHAIN (args)));
+  else
+    true_value = fold_build1 (BIT_NOT_EXPR, *node, false_value);
+
+  if (TREE_OVERFLOW_P (true_value))
+    {
+      warning (OPT_Wattributes,
+	       "overflows in conversion from %qT to %qT "
+	       "changes value from %qE to %qE",
+	       TREE_TYPE (TREE_VALUE (TREE_CHAIN (args))), *node,
+	       TREE_VALUE (TREE_CHAIN (args)), true_value);
+      TREE_OVERFLOW (true_value) = false;
+    }
+
+  if (tree_int_cst_compare (false_value, true_value) == 0)
+    {
+      error ("%qE attribute requires different values for"
+	     " %<false%> and %<true%> for type %qT",
+	     name, *node);
+      *no_add_attrs = TRUE;
+      return NULL_TREE;
+    }
+
+  tree values = build_tree_list (get_identifier ("false"),
+				 false_value);
+  TREE_CHAIN (values) = build_tree_list (get_identifier ("true"),
+					 true_value);
+
+  /* Do *not* set TYPE_MIN_VALUE, TYPE_MAX_VALUE, nor TYPE_PRECISION according
+     to the false and true values.  That might cause the constants to be the
+     only acceptable values, which would drop the very hardening checks this
+     attribute is supposed to add.  */
+
+  TYPE_ATTRIBUTES (*node) = tree_cons (name, args,
+				       TYPE_ATTRIBUTES (*node));
+  *no_add_attrs = TRUE;
+
+  gcc_checking_assert (!TYPE_CACHED_VALUES_P (*node));
+  TYPE_VALUES (*node) = values;
+  TYPE_NAME (*node) = orig;
+
+  return NULL_TREE;
+}
+
 /* Handle a "packed" attribute; arguments as in
    struct attribute_spec.handler.  */
 
@@ -1110,6 +1258,29 @@ handle_hot_attribute (tree *node, tree name, tree ARG_UNUSED (args),
     {
       /* Attribute hot processing is done later with lookup_attribute.  */
     }
+  else if ((TREE_CODE (*node) == RECORD_TYPE
+	    || TREE_CODE (*node) == UNION_TYPE)
+	   && c_dialect_cxx ()
+	   && (flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+    {
+      /* Check conflict here as decl_attributes will otherwise only catch
+	 it late at the function when the attribute is used on a class.  */
+      tree cold_attr = lookup_attribute ("cold", TYPE_ATTRIBUTES (*node));
+      if (cold_attr)
+	{
+	  warning (OPT_Wattributes, "ignoring attribute %qE because it "
+		   "conflicts with attribute %qs", name, "cold");
+	  *no_add_attrs = true;
+	}
+    }
+  else if (flags & ((int) ATTR_FLAG_FUNCTION_NEXT
+		    | (int) ATTR_FLAG_DECL_NEXT))
+    {
+	/* Avoid applying the attribute to a function return type when
+	   used as:  void __attribute ((hot)) foo (void).  It will be
+	   passed to the function.  */
+	*no_add_attrs = true;
+    }
   else
     {
       warning (OPT_Wattributes, "%qE attribute ignored", name);
@@ -1130,6 +1301,29 @@ handle_cold_attribute (tree *node, tree name, tree ARG_UNUSED (args),
       || TREE_CODE (*node) == LABEL_DECL)
     {
       /* Attribute cold processing is done later with lookup_attribute.  */
+    }
+  else if ((TREE_CODE (*node) == RECORD_TYPE
+	    || TREE_CODE (*node) == UNION_TYPE)
+	   && c_dialect_cxx ()
+	   && (flags & (int) ATTR_FLAG_TYPE_IN_PLACE))
+    {
+      /* Check conflict here as decl_attributes will otherwise only catch
+	 it late at the function when the attribute is used on a class.  */
+      tree hot_attr = lookup_attribute ("hot", TYPE_ATTRIBUTES (*node));
+      if (hot_attr)
+	{
+	  warning (OPT_Wattributes, "ignoring attribute %qE because it "
+		   "conflicts with attribute %qs", name, "hot");
+	  *no_add_attrs = true;
+	}
+    }
+  else if (flags & ((int) ATTR_FLAG_FUNCTION_NEXT
+		    | (int) ATTR_FLAG_DECL_NEXT))
+    {
+	/* Avoid applying the attribute to a function return type when
+	   used as:  void __attribute ((cold)) foo (void).  It will be
+	   passed to the function.  */
+	*no_add_attrs = true;
     }
   else
     {
@@ -1334,6 +1528,84 @@ handle_noipa_attribute (tree *node, tree name, tree, int, bool *no_add_attrs)
   return NULL_TREE;
 }
 
+/* Handle a "strub" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_strub_attribute (tree *node, tree name,
+			tree args,
+			int ARG_UNUSED (flags), bool *no_add_attrs)
+{
+  bool enable = true;
+
+  if (args && FUNCTION_POINTER_TYPE_P (*node))
+    *node = TREE_TYPE (*node);
+
+  if (args && FUNC_OR_METHOD_TYPE_P (*node))
+    {
+      switch (strub_validate_fn_attr_parm (TREE_VALUE (args)))
+	{
+	case 1:
+	case 2:
+	  enable = true;
+	  break;
+
+	case 0:
+	  warning (OPT_Wattributes,
+		   "%qE attribute ignored because of argument %qE",
+		   name, TREE_VALUE (args));
+	  *no_add_attrs = true;
+	  enable = false;
+	  break;
+
+	case -1:
+	case -2:
+	  enable = false;
+	  break;
+
+	default:
+	  gcc_unreachable ();
+	}
+
+      args = TREE_CHAIN (args);
+    }
+
+  if (args)
+    {
+      warning (OPT_Wattributes,
+	       "ignoring attribute %qE because of excess arguments"
+	       " starting at %qE",
+	       name, TREE_VALUE (args));
+      *no_add_attrs = true;
+      enable = false;
+    }
+
+  /* Warn about unmet expectations that the strub attribute works like a
+     qualifier.  ??? Could/should we extend it to the element/field types
+     here?  */
+  if (TREE_CODE (*node) == ARRAY_TYPE
+      || VECTOR_TYPE_P (*node)
+      || TREE_CODE (*node) == COMPLEX_TYPE)
+    warning (OPT_Wattributes,
+	     "attribute %qE does not apply to elements"
+	     " of non-scalar type %qT",
+	     name, *node);
+  else if (RECORD_OR_UNION_TYPE_P (*node))
+    warning (OPT_Wattributes,
+	     "attribute %qE does not apply to fields"
+	     " of aggregate type %qT",
+	     name, *node);
+
+  /* If we see a strub-enabling attribute, and we're at the default setting,
+     implicitly or explicitly, note that the attribute was seen, so that we can
+     reduce the compile-time overhead to nearly zero when the strub feature is
+     not used.  */
+  if (enable && flag_strub < -2)
+    flag_strub += 2;
+
+  return NULL_TREE;
+}
+
 /* Handle a "noinline" attribute; arguments as in
    struct attribute_spec.handler.  */
 
@@ -1343,16 +1615,7 @@ handle_noinline_attribute (tree *node, tree name,
 			   int ARG_UNUSED (flags), bool *no_add_attrs)
 {
   if (TREE_CODE (*node) == FUNCTION_DECL)
-    {
-      if (lookup_attribute ("always_inline", DECL_ATTRIBUTES (*node)))
-	{
-	  warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with attribute %qs", name, "always_inline");
-	  *no_add_attrs = true;
-	}
-      else
-	DECL_UNINLINABLE (*node) = 1;
-    }
+    DECL_UNINLINABLE (*node) = 1;
   else
     {
       warning (OPT_Wattributes, "%qE attribute ignored", name);
@@ -1412,7 +1675,8 @@ handle_noicf_attribute (tree *node, tree name,
 			tree ARG_UNUSED (args),
 			int ARG_UNUSED (flags), bool *no_add_attrs)
 {
-  if (TREE_CODE (*node) != FUNCTION_DECL)
+  if (TREE_CODE (*node) != FUNCTION_DECL
+      && (TREE_CODE (*node) != VAR_DECL || !is_global_var (*node)))
     {
       warning (OPT_Wattributes, "%qE attribute ignored", name);
       *no_add_attrs = true;
@@ -1433,22 +1697,9 @@ handle_always_inline_attribute (tree *node, tree name,
 {
   if (TREE_CODE (*node) == FUNCTION_DECL)
     {
-      if (lookup_attribute ("noinline", DECL_ATTRIBUTES (*node)))
-	{
-	  warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with %qs attribute", name, "noinline");
-	  *no_add_attrs = true;
-	}
-      else if (lookup_attribute ("target_clones", DECL_ATTRIBUTES (*node)))
-	{
-	  warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with %qs attribute", name, "target_clones");
-	  *no_add_attrs = true;
-	}
-      else
-	/* Set the attribute and mark it for disregarding inline
-	   limits.  */
-	DECL_DISREGARD_INLINE_LIMITS (*node) = 1;
+      /* Set the attribute and mark it for disregarding inline
+	 limits.  */
+      DECL_DISREGARD_INLINE_LIMITS (*node) = 1;
     }
   else
     {
@@ -2892,13 +3143,14 @@ handle_copy_attribute (tree *node, tree name, tree args,
   if (ref == error_mark_node)
     return NULL_TREE;
 
+  location_t loc = input_location;
+  if (DECL_P (decl))
+    loc = DECL_SOURCE_LOCATION (decl);
   if (TREE_CODE (ref) == STRING_CST)
     {
       /* Explicitly handle this case since using a string literal
 	 as an argument is a likely mistake.  */
-      error_at (DECL_SOURCE_LOCATION (decl),
-		"%qE attribute argument cannot be a string",
-		name);
+      error_at (loc, "%qE attribute argument cannot be a string", name);
       return NULL_TREE;
     }
 
@@ -2909,10 +3161,8 @@ handle_copy_attribute (tree *node, tree name, tree args,
       /* Similar to the string case, since some function attributes
 	 accept literal numbers as arguments (e.g., alloc_size or
 	 nonnull) using one here is a likely mistake.  */
-      error_at (DECL_SOURCE_LOCATION (decl),
-		"%qE attribute argument cannot be a constant arithmetic "
-		"expression",
-		name);
+      error_at (loc, "%qE attribute argument cannot be a constant arithmetic "
+		"expression", name);
       return NULL_TREE;
     }
 
@@ -2920,12 +3170,11 @@ handle_copy_attribute (tree *node, tree name, tree args,
     {
       /* Another possible mistake (but indirect self-references aren't
 	 and diagnosed and shouldn't be).  */
-      if (warning_at (DECL_SOURCE_LOCATION (decl), OPT_Wattributes,
+      if (warning_at (loc, OPT_Wattributes,
 		      "%qE attribute ignored on a redeclaration "
-		      "of the referenced symbol",
-		      name))
-	inform (DECL_SOURCE_LOCATION (node[1]),
-		"previous declaration here");
+		      "of the referenced symbol", name)
+	  && DECL_P (node[1]))
+	inform (DECL_SOURCE_LOCATION (node[1]), "previous declaration here");
       return NULL_TREE;
     }
 
@@ -2945,7 +3194,8 @@ handle_copy_attribute (tree *node, tree name, tree args,
 	ref = TREE_OPERAND (ref, 1);
       else
 	break;
-    } while (!DECL_P (ref));
+    }
+  while (!DECL_P (ref));
 
   /* For object pointer expressions, consider those to be requests
      to copy from their type, such as in:
@@ -2977,8 +3227,7 @@ handle_copy_attribute (tree *node, tree name, tree args,
 	     to a variable, or variable attributes to a function.  */
 	  if (warning (OPT_Wattributes,
 		       "%qE attribute ignored on a declaration of "
-		       "a different kind than referenced symbol",
-		       name)
+		       "a different kind than referenced symbol", name)
 	      && DECL_P (ref))
 	    inform (DECL_SOURCE_LOCATION (ref),
 		    "symbol %qD referenced by %qD declared here", ref, decl);
@@ -3028,9 +3277,7 @@ handle_copy_attribute (tree *node, tree name, tree args,
     }
   else if (!TYPE_P (decl))
     {
-      error_at (DECL_SOURCE_LOCATION (decl),
-		"%qE attribute must apply to a declaration",
-		name);
+      error_at (loc, "%qE attribute must apply to a declaration", name);
       return NULL_TREE;
     }
 
@@ -4211,7 +4458,8 @@ handle_deprecated_attribute (tree *node, tree name,
 	  || VAR_OR_FUNCTION_DECL_P (decl)
 	  || TREE_CODE (decl) == FIELD_DECL
 	  || TREE_CODE (decl) == CONST_DECL
-	  || objc_method_decl (TREE_CODE (decl)))
+	  || objc_method_decl (TREE_CODE (decl))
+	  || TREE_CODE (decl) == CONCEPT_DECL)
 	TREE_DEPRECATED (decl) = 1;
       else if (TREE_CODE (decl) == LABEL_DECL)
 	{
@@ -4239,7 +4487,7 @@ handle_deprecated_attribute (tree *node, tree name,
       if (type && TYPE_NAME (type))
 	{
 	  if (TREE_CODE (TYPE_NAME (type)) == IDENTIFIER_NODE)
-	    what = TYPE_NAME (*node);
+	    what = TYPE_NAME (type);
 	  else if (TREE_CODE (TYPE_NAME (type)) == TYPE_DECL
 		   && DECL_NAME (TYPE_NAME (type)))
 	    what = DECL_NAME (TYPE_NAME (type));
@@ -4353,7 +4601,8 @@ static tree
 type_valid_for_vector_size (tree type, tree atname, tree args,
 			    unsigned HOST_WIDE_INT *ptrnunits)
 {
-  bool error_p = ptrnunits != NULL;
+  bool hardbool_p = c_hardbool_type_attr (type);
+  bool error_p = ptrnunits != NULL || hardbool_p;
 
   /* Get the mode of the type being modified.  */
   machine_mode orig_mode = TYPE_MODE (type);
@@ -4365,7 +4614,9 @@ type_valid_for_vector_size (tree type, tree atname, tree args,
 	  && GET_MODE_CLASS (orig_mode) != MODE_INT
 	  && !ALL_SCALAR_FIXED_POINT_MODE_P (orig_mode))
       || !tree_fits_uhwi_p (TYPE_SIZE_UNIT (type))
-      || TREE_CODE (type) == BOOLEAN_TYPE)
+      || TREE_CODE (type) == BOOLEAN_TYPE
+      || hardbool_p
+      || TREE_CODE (type) == BITINT_TYPE)
     {
       if (error_p)
 	error ("invalid vector type for attribute %qE", atname);
@@ -4609,6 +4860,20 @@ handle_fd_arg_attribute (tree *node, tree name, tree args,
   return NULL_TREE;
 }
 
+/* Handle the "null_terminated_string_arg" attribute.  */
+
+static tree
+handle_null_terminated_string_arg_attribute (tree *node, tree name, tree args,
+					     int ARG_UNUSED (flags),
+					     bool *no_add_attrs)
+{
+  if (positional_argument (*node, name, TREE_VALUE (args), POINTER_TYPE))
+    return NULL_TREE;
+
+  *no_add_attrs = true;
+  return NULL_TREE;
+}
+
 /* Handle the "nonstring" variable attribute.  */
 
 static tree
@@ -4727,22 +4992,27 @@ append_access_attr (tree node[3], tree attrs, const char *attrstr,
   rdwr_map cur_idxs;
   init_attr_rdwr_indices (&cur_idxs, attrs);
 
+  tree args = TYPE_ARG_TYPES (node[0]);
+  int argpos = 0;
   std::string spec;
-  for (auto it = new_idxs.begin (); it != new_idxs.end (); ++it)
+  for (tree arg = args; arg; arg = TREE_CHAIN (arg), argpos++)
     {
-      const auto &newaxsref = *it;
+      const attr_access* const newa = new_idxs.get (argpos);
+
+      if (!newa)
+	continue;
 
       /* The map has two equal entries for each pointer argument that
 	 has an associated size argument.  Process just the entry for
 	 the former.  */
-      if ((unsigned)newaxsref.first != newaxsref.second.ptrarg)
+      if ((unsigned)argpos != newa->ptrarg)
 	continue;
 
-      const attr_access* const cura = cur_idxs.get (newaxsref.first);
+      const attr_access* const cura = cur_idxs.get (argpos);
       if (!cura)
 	{
 	  /* The new attribute needs to be added.  */
-	  tree str = newaxsref.second.to_internal_string ();
+	  tree str = newa->to_internal_string ();
 	  spec += TREE_STRING_POINTER (str);
 	  continue;
 	}
@@ -4750,7 +5020,6 @@ append_access_attr (tree node[3], tree attrs, const char *attrstr,
       /* The new access spec refers to an array/pointer argument for
 	 which an access spec already exists.  Check and diagnose any
 	 conflicts.  If no conflicts are found, merge the two.  */
-      const attr_access* const newa = &newaxsref.second;
 
       if (!attrstr)
 	{
@@ -4885,7 +5154,7 @@ append_access_attr (tree node[3], tree attrs, const char *attrstr,
 	continue;
 
       /* Merge the CURA and NEWA.  */
-      attr_access merged = newaxsref.second;
+      attr_access merged = *newa;
 
       /* VLA seen in a declaration takes precedence.  */
       if (cura->minsize == HOST_WIDE_INT_M1U)
@@ -4911,9 +5180,9 @@ append_access_attr (tree node[3], tree attrs, const char *attrstr,
 
 /* Convenience wrapper for the above.  */
 
-tree
-append_access_attr (tree node[3], tree attrs, const char *attrstr,
-		    char code, HOST_WIDE_INT idxs[2])
+static tree
+append_access_attr_idxs (tree node[3], tree attrs, const char *attrstr,
+			 char code, HOST_WIDE_INT idxs[2])
 {
   char attrspec[80];
   int n = sprintf (attrspec, "%c%u", code, (unsigned) idxs[0] - 1);
@@ -5203,7 +5472,7 @@ handle_access_attribute (tree node[3], tree name, tree args, int flags,
      attributes specified on previous declarations of the same type
      and if not, concatenate the two.  */
   const char code = attr_access::mode_chars[mode];
-  tree new_attrs = append_access_attr (node, attrs, attrstr, code, idxs);
+  tree new_attrs = append_access_attr_idxs (node, attrs, attrstr, code, idxs);
   if (!new_attrs)
     return NULL_TREE;
 
@@ -5216,7 +5485,7 @@ handle_access_attribute (tree node[3], tree name, tree args, int flags,
     {
       /* Repeat for the previously declared type.  */
       attrs = TYPE_ATTRIBUTES (TREE_TYPE (node[1]));
-      new_attrs = append_access_attr (node, attrs, attrstr, code, idxs);
+      new_attrs = append_access_attr_idxs (node, attrs, attrstr, code, idxs);
       if (!new_attrs)
 	return NULL_TREE;
 
@@ -5273,6 +5542,16 @@ build_attr_access_from_parms (tree parms, bool skip_voidptr)
       tree argtype = TREE_TYPE (arg);
       if (DECL_NAME (arg) && INTEGRAL_TYPE_P (argtype))
 	arg2pos.put (arg, argpos);
+    }
+
+  tree nnlist = NULL_TREE;
+  argpos = 0;
+  for (tree arg = parms; arg; arg = TREE_CHAIN (arg), ++argpos)
+    {
+      if (!DECL_P (arg))
+	continue;
+
+      tree argtype = TREE_TYPE (arg);
 
       tree argspec = DECL_ATTRIBUTES (arg);
       if (!argspec)
@@ -5298,6 +5577,11 @@ build_attr_access_from_parms (tree parms, bool skip_voidptr)
       /* The attribute arg spec string.  */
       tree str = TREE_VALUE (argspec);
       const char *s = TREE_STRING_POINTER (str);
+
+      /* Collect the list of nonnull arguments which use "[static ..]".  */
+      if (s != NULL && s[0] == '[' && s[1] == 's')
+	nnlist = tree_cons (NULL_TREE, build_int_cst (integer_type_node,
+						      argpos + 1), nnlist);
 
       /* Create the attribute access string from the arg spec string,
 	 optionally followed by position of the VLA bound argument if
@@ -5366,6 +5650,10 @@ build_attr_access_from_parms (tree parms, bool skip_voidptr)
   if (!spec.length ())
     return NULL_TREE;
 
+  /* If we have nonnull arguments, synthesize an attribute.  */
+  if (nnlist != NULL_TREE)
+    nnlist = build_tree_list (get_identifier ("nonnull"), nnlist);
+
   /* Attribute access takes a two or three arguments.  Wrap VBLIST in
      another list in case it has more nodes than would otherwise fit.  */
   vblist = build_tree_list (NULL_TREE, vblist);
@@ -5376,7 +5664,7 @@ build_attr_access_from_parms (tree parms, bool skip_voidptr)
   tree str = build_string (spec.length (), spec.c_str ());
   tree attrargs = tree_cons (NULL_TREE, str, vblist);
   tree name = get_identifier ("access");
-  return build_tree_list (name, attrargs);
+  return tree_cons (name, attrargs, nnlist);
 }
 
 /* Handle a "nothrow" attribute; arguments as in
@@ -5388,6 +5676,25 @@ handle_nothrow_attribute (tree *node, tree name, tree ARG_UNUSED (args),
 {
   if (TREE_CODE (*node) == FUNCTION_DECL)
     TREE_NOTHROW (*node) = 1;
+  /* ??? TODO: Support types.  */
+  else
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a "nothrow" attribute; arguments as in
+   struct attribute_spec.handler.  */
+
+static tree
+handle_expected_throw_attribute (tree *node, tree name, tree ARG_UNUSED (args),
+				 int ARG_UNUSED (flags), bool *no_add_attrs)
+{
+  if (TREE_CODE (*node) == FUNCTION_DECL)
+    /* No flag to set here.  */;
   /* ??? TODO: Support types.  */
   else
     {
@@ -5532,16 +5839,10 @@ static tree
 handle_target_attribute (tree *node, tree name, tree args, int flags,
 			 bool *no_add_attrs)
 {
-  /* Ensure we have a function type.  */
+  /* Ensure we have a function declaration.  */
   if (TREE_CODE (*node) != FUNCTION_DECL)
     {
       warning (OPT_Wattributes, "%qE attribute ignored", name);
-      *no_add_attrs = true;
-    }
-  else if (lookup_attribute ("target_clones", DECL_ATTRIBUTES (*node)))
-    {
-      warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with %qs attribute", name, "target_clones");
       *no_add_attrs = true;
     }
   else if (! targetm.target_option.valid_attribute_p (*node, name, args,
@@ -5564,33 +5865,46 @@ handle_target_attribute (tree *node, tree name, tree args, int flags,
   return NULL_TREE;
 }
 
+/* Handle a "target_version" attribute.  */
+
+static tree
+handle_target_version_attribute (tree *node, tree name, tree args, int flags,
+				  bool *no_add_attrs)
+{
+  /* Ensure we have a function declaration.  */
+  if (TREE_CODE (*node) != FUNCTION_DECL)
+    {
+      warning (OPT_Wattributes, "%qE attribute ignored", name);
+      *no_add_attrs = true;
+    }
+  else if (!targetm.target_option.valid_version_attribute_p (*node, name, args,
+							     flags))
+    *no_add_attrs = true;
+
+  return NULL_TREE;
+}
+
 /* Handle a "target_clones" attribute.  */
 
 static tree
 handle_target_clones_attribute (tree *node, tree name, tree ARG_UNUSED (args),
 			  int ARG_UNUSED (flags), bool *no_add_attrs)
 {
-  /* Ensure we have a function type.  */
+  /* Ensure we have a function declaration.  */
   if (TREE_CODE (*node) == FUNCTION_DECL)
     {
-      if (TREE_CODE (TREE_VALUE (args)) != STRING_CST)
+      for (tree t = args; t != NULL_TREE; t = TREE_CHAIN (t))
 	{
-	  error ("%qE attribute argument not a string constant", name);
-	  *no_add_attrs = true;
+	  tree value = TREE_VALUE (t);
+	  if (TREE_CODE (value) != STRING_CST)
+	    {
+	      error ("%qE attribute argument not a string constant", name);
+	      *no_add_attrs = true;
+	      return NULL_TREE;
+	    }
 	}
-      else if (lookup_attribute ("always_inline", DECL_ATTRIBUTES (*node)))
-	{
-	  warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with %qs attribute", name, "always_inline");
-	  *no_add_attrs = true;
-	}
-      else if (lookup_attribute ("target", DECL_ATTRIBUTES (*node)))
-	{
-	  warning (OPT_Wattributes, "%qE attribute ignored due to conflict "
-		   "with %qs attribute", name, "target");
-	  *no_add_attrs = true;
-	}
-      else if (get_target_clone_attr_len (args) == -1)
+
+      if (get_target_clone_attr_len (args) == -1)
 	{
 	  warning (OPT_Wattributes,
 		   "single %<target_clones%> attribute is ignored");

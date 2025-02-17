@@ -3,7 +3,7 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/function.html#lazy-params, Lazy Parameters)
  *
- * Copyright:   Copyright (C) 1999-2022 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/delegatize.d, _delegatize.d)
@@ -14,7 +14,6 @@
 module dmd.delegatize;
 
 import core.stdc.stdio;
-import dmd.apply;
 import dmd.astenums;
 import dmd.declaration;
 import dmd.dscope;
@@ -22,10 +21,11 @@ import dmd.dsymbol;
 import dmd.expression;
 import dmd.expressionsem;
 import dmd.func;
-import dmd.globals;
 import dmd.init;
 import dmd.initsem;
+import dmd.location;
 import dmd.mtype;
+import dmd.postordervisitor;
 import dmd.statement;
 import dmd.tokens;
 import dmd.visitor;
@@ -96,7 +96,7 @@ private void lambdaSetParent(Expression e, FuncDeclaration fd)
             if (!vd || !pfd)
                 return;
             // move to fd's closure when applicable
-            foreach (i; 0 .. pfd.closureVars.dim)
+            foreach (i; 0 .. pfd.closureVars.length)
             {
                 if (vd == pfd.closureVars[i])
                 {
@@ -108,7 +108,7 @@ private void lambdaSetParent(Expression e, FuncDeclaration fd)
         }
 
     public:
-        extern (D) this(FuncDeclaration fd)
+        extern (D) this(FuncDeclaration fd) scope @safe
         {
             this.fd = fd;
         }
@@ -204,7 +204,7 @@ bool lambdaCheckForNestedRef(Expression e, Scope* sc)
         Scope* sc;
         bool result;
 
-        extern (D) this(Scope* sc)
+        extern (D) this(Scope* sc) scope @safe
         {
             this.sc = sc;
         }

@@ -1,5 +1,5 @@
 /* Callgraph handling code.
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -51,6 +51,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "ipa-utils.h"
 #include "symbol-summary.h"
 #include "tree-vrp.h"
+#include "sreal.h"
+#include "ipa-cp.h"
 #include "ipa-prop.h"
 #include "ipa-fnsummary.h"
 #include "cfgloop.h"
@@ -158,7 +160,7 @@ symtab_node::address_can_be_compared_p ()
      flag_merge_constants permits us to assume the same on readonly vars.  */
   if (is_a <varpool_node *> (this)
       && (DECL_IN_CONSTANT_POOL (decl)
-	  || (flag_merge_constants >= 2
+	  || ((flag_merge_constants >= 2 || DECL_MERGEABLE (decl))
 	      && TREE_READONLY (decl) && !TREE_THIS_VOLATILE (decl))))
     return false;
   return true;
@@ -1403,11 +1405,17 @@ cgraph_edge::redirect_callee (cgraph_node *n)
    speculative indirect call, remove "speculative" of the indirect call and
    also redirect stmt to it's final direct target.
 
+   When called from within tree-inline, KILLED_SSAs has to contain the pointer
+   to killed_new_ssa_names within the copy_body_data structure and SSAs
+   discovered to be useless (if LHS is removed) will be added to it, otherwise
+   it needs to be NULL.
+
    It is up to caller to iteratively transform each "speculative"
    direct call as appropriate.  */
 
 gimple *
-cgraph_edge::redirect_call_stmt_to_callee (cgraph_edge *e)
+cgraph_edge::redirect_call_stmt_to_callee (cgraph_edge *e,
+					   hash_set <tree> *killed_ssas)
 {
   tree decl = gimple_call_fndecl (e->call_stmt);
   gcall *new_stmt;
@@ -1527,7 +1535,7 @@ cgraph_edge::redirect_call_stmt_to_callee (cgraph_edge *e)
 	remove_stmt_from_eh_lp (e->call_stmt);
 
       tree old_fntype = gimple_call_fntype (e->call_stmt);
-      new_stmt = padjs->modify_call (e, false);
+      new_stmt = padjs->modify_call (e, false, killed_ssas);
       cgraph_node *origin = e->callee;
       while (origin->clone_of)
 	origin = origin->clone_of;
@@ -1548,7 +1556,8 @@ cgraph_edge::redirect_call_stmt_to_callee (cgraph_edge *e)
   else
     {
       if (flag_checking
-	  && !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE))
+	  && !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE,
+						  BUILT_IN_UNREACHABLE_TRAP))
 	ipa_verify_edge_has_no_modifications (e);
       new_stmt = e->call_stmt;
       gimple_call_set_fndecl (new_stmt, e->callee->decl);
@@ -1634,7 +1643,8 @@ cgraph_update_edges_for_call_stmt_node (cgraph_node *node,
 	{
 	  /* Keep calls marked as dead dead.  */
 	  if (new_stmt && is_gimple_call (new_stmt) && e->callee
-	      && fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE))
+	      && fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE,
+				    BUILT_IN_UNREACHABLE_TRAP))
 	    {
 	      cgraph_edge::set_call_stmt (node->get_edge (old_stmt),
 					  as_a <gcall *> (new_stmt));
@@ -1893,8 +1903,18 @@ cgraph_node::remove (void)
   else if (clone_of)
     {
       clone_of->clones = next_sibling_clone;
-      if (!clone_of->analyzed && !clone_of->clones && !clones)
-	clone_of->release_body ();
+      if (!clones)
+	{
+	  bool need_body = false;
+	  for (cgraph_node *n = clone_of; n; n = n->clone_of)
+	    if (n->analyzed || n->clones)
+	      {
+		need_body = true;
+		break;
+	      }
+	  if (!need_body)
+	    clone_of->release_body ();
+	}
     }
   if (next_sibling_clone)
     next_sibling_clone->prev_sibling_clone = prev_sibling_clone;
@@ -2490,7 +2510,6 @@ cgraph_node::make_local (cgraph_node *node, void *)
       node->externally_visible = false;
       node->forced_by_abi = false;
       node->local = true;
-      node->set_section (NULL);
       node->unique_name = ((node->resolution == LDPR_PREVAILING_DEF_IRONLY
 			   || node->resolution == LDPR_PREVAILING_DEF_IRONLY_EXP)
 			   && !flag_incremental_link);
@@ -2613,6 +2632,54 @@ cgraph_node::set_malloc_flag (bool malloc_p)
 	  cgraph_node *alias = dyn_cast<cgraph_node *> (ref->referring);
 	  if (!malloc_p || alias->get_availability () > AVAIL_INTERPOSABLE)
 	    set_malloc_flag_1 (alias, malloc_p, &changed);
+	}
+    }
+  return changed;
+}
+
+/* Worker to set malloc flag.  */
+static void
+add_detected_attribute_1 (cgraph_node *node, const char *attr, bool *changed)
+{
+  if (!lookup_attribute (attr, DECL_ATTRIBUTES (node->decl)))
+    {
+      DECL_ATTRIBUTES (node->decl) = tree_cons (get_identifier (attr),
+					 NULL_TREE, DECL_ATTRIBUTES (node->decl));
+      *changed = true;
+    }
+
+  ipa_ref *ref;
+  FOR_EACH_ALIAS (node, ref)
+    {
+      cgraph_node *alias = dyn_cast<cgraph_node *> (ref->referring);
+      if (alias->get_availability () > AVAIL_INTERPOSABLE)
+	add_detected_attribute_1 (alias, attr, changed);
+    }
+
+  for (cgraph_edge *e = node->callers; e; e = e->next_caller)
+    if (e->caller->thunk
+	&& (e->caller->get_availability () > AVAIL_INTERPOSABLE))
+      add_detected_attribute_1 (e->caller, attr, changed);
+}
+
+/* Add attribyte ATTR to function and its aliases.  */
+
+bool
+cgraph_node::add_detected_attribute (const char *attr)
+{
+  bool changed = false;
+
+  if (get_availability () > AVAIL_INTERPOSABLE)
+    add_detected_attribute_1 (this, attr, &changed);
+  else
+    {
+      ipa_ref *ref;
+
+      FOR_EACH_ALIAS (this, ref)
+	{
+	  cgraph_node *alias = dyn_cast<cgraph_node *> (ref->referring);
+	  if (alias->get_availability () > AVAIL_INTERPOSABLE)
+	    add_detected_attribute_1 (alias, attr, &changed);
 	}
     }
   return changed;
@@ -2755,6 +2822,9 @@ set_const_flag_1 (cgraph_node *node, bool set_const, bool looping,
       if (!set_const || alias->get_availability () > AVAIL_INTERPOSABLE)
 	set_const_flag_1 (alias, set_const, looping, changed);
     }
+  for (struct cgraph_node *n = node->simd_clones; n != NULL;
+       n = n->simdclone->next_clone)
+    set_const_flag_1 (n, set_const, looping, changed);
   for (cgraph_edge *e = node->callers; e; e = e->next_caller)
     if (e->caller->thunk
 	&& (!set_const || e->caller->get_availability () > AVAIL_INTERPOSABLE))
@@ -2867,6 +2937,9 @@ cgraph_node::set_pure_flag (bool pure, bool looping)
 {
   struct set_pure_flag_info info = {pure, looping, false};
   call_for_symbol_thunks_and_aliases (set_pure_flag_1, &info, !pure, true);
+  for (struct cgraph_node *n = simd_clones; n != NULL;
+       n = n->simdclone->next_clone)
+    set_pure_flag_1 (n, &info);
   return info.changed;
 }
 
@@ -3239,9 +3312,10 @@ cgraph_edge::verify_corresponds_to_fndecl (tree decl)
   node = node->ultimate_alias_target ();
 
   /* Optimizers can redirect unreachable calls or calls triggering undefined
-     behavior to builtin_unreachable.  */
+     behavior to __builtin_unreachable or __builtin_unreachable trap.  */
 
-  if (fndecl_built_in_p (callee->decl, BUILT_IN_UNREACHABLE))
+  if (fndecl_built_in_p (callee->decl, BUILT_IN_UNREACHABLE,
+				       BUILT_IN_UNREACHABLE_TRAP))
     return false;
 
   if (callee->former_clone_of != node->decl
@@ -3581,7 +3655,8 @@ cgraph_node::verify_node (void)
 	  /* Optimized out calls are redirected to __builtin_unreachable.  */
 	  && (e->count.nonzero_p ()
 	      || ! e->callee->decl
-	      || !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE))
+	      || !fndecl_built_in_p (e->callee->decl, BUILT_IN_UNREACHABLE,
+				     BUILT_IN_UNREACHABLE_TRAP))
 	  && count
 	      == ENTRY_BLOCK_PTR_FOR_FN (DECL_STRUCT_FUNCTION (decl))->count
 	  && (!e->count.ipa_p ()
@@ -4172,7 +4247,7 @@ cgraph_edge::possibly_call_in_translation_unit_p (void)
     node = node->previous_sharing_asm_name;
   if (node->previous_sharing_asm_name)
     node = symtab_node::get_for_asmname (DECL_ASSEMBLER_NAME (callee->decl));
-  gcc_assert (TREE_PUBLIC (node->decl));
+  gcc_assert (TREE_PUBLIC (node->decl) || DECL_EXTERNAL (node->decl));
   return node->get_availability () >= AVAIL_INTERPOSABLE;
 }
 

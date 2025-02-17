@@ -1,5 +1,5 @@
 /* Alias analysis for trees.
-   Copyright (C) 2004-2022 Free Software Foundation, Inc.
+   Copyright (C) 2004-2024 Free Software Foundation, Inc.
    Contributed by Diego Novillo <dnovillo@redhat.com>
 
 This file is part of GCC.
@@ -496,7 +496,8 @@ ref_may_alias_global_p_1 (tree base, bool escaped_local_p)
   if (DECL_P (base))
     return (is_global_var (base)
 	    || (escaped_local_p
-		&& pt_solution_includes (&cfun->gimple_df->escaped, base)));
+		&& pt_solution_includes (&cfun->gimple_df->escaped_return,
+					 base)));
   else if (TREE_CODE (base) == MEM_REF
 	   || TREE_CODE (base) == TARGET_MEM_REF)
     return ptr_deref_may_alias_global_p (TREE_OPERAND (base, 0),
@@ -578,6 +579,9 @@ dump_alias_info (FILE *file)
 
   fprintf (file, "\nESCAPED");
   dump_points_to_solution (file, &cfun->gimple_df->escaped);
+
+  fprintf (file, "\nESCAPED_RETURN");
+  dump_points_to_solution (file, &cfun->gimple_df->escaped_return);
 
   fprintf (file, "\n\nFlow-insensitive points-to information\n\n");
 
@@ -945,10 +949,10 @@ compare_type_sizes (tree type1, tree type2)
   /* Be conservative for arrays and vectors.  We want to support partial
      overlap on int[3] and int[3] as tested in gcc.dg/torture/alias-2.c.  */
   while (TREE_CODE (type1) == ARRAY_TYPE
-	 || TREE_CODE (type1) == VECTOR_TYPE)
+	 || VECTOR_TYPE_P (type1))
     type1 = TREE_TYPE (type1);
   while (TREE_CODE (type2) == ARRAY_TYPE
-	 || TREE_CODE (type2) == VECTOR_TYPE)
+	 || VECTOR_TYPE_P (type2))
     type2 = TREE_TYPE (type2);
   return compare_sizes (TYPE_SIZE (type1), TYPE_SIZE (type2));
 }
@@ -1073,7 +1077,7 @@ component_ref_to_zero_sized_trailing_array_p (tree ref)
 	  && TREE_CODE (TREE_TYPE (TREE_OPERAND (ref, 1))) == ARRAY_TYPE
 	  && (!TYPE_SIZE (TREE_TYPE (TREE_OPERAND (ref, 1)))
 	      || integer_zerop (TYPE_SIZE (TREE_TYPE (TREE_OPERAND (ref, 1)))))
-	  && array_at_struct_end_p (ref));
+	  && array_ref_flexible_size_p (ref));
 }
 
 /* Worker for aliasing_component_refs_p. Most parameters match parameters of
@@ -1330,7 +1334,7 @@ aliasing_component_refs_p (tree ref1,
   /* If we didn't find a common base, try the other way around.  */
   if (cmp_outer <= 0 
       || (end_struct_ref1
-	  && compare_type_sizes (TREE_TYPE (end_struct_ref1), type1) <= 0))
+	  && compare_type_sizes (TREE_TYPE (end_struct_ref1), type2) <= 0))
     {
       int res = aliasing_component_refs_walk (ref2, type2, base2,
 					      offset2, max_size2,
@@ -2726,9 +2730,21 @@ check_fnspec (gcall *call, ao_ref *ref, bool clobber)
 		      t = TREE_CHAIN (t);
 		    size = TYPE_SIZE_UNIT (TREE_TYPE (TREE_VALUE (t)));
 		  }
-		ao_ref_init_from_ptr_and_size (&dref,
-					       gimple_call_arg (call, i),
-					       size);
+		poly_int64 size_hwi;
+		if (size
+		    && poly_int_tree_p (size, &size_hwi)
+		    && coeffs_in_range_p (size_hwi, 0,
+					  HOST_WIDE_INT_MAX / BITS_PER_UNIT))
+		  {
+		    size_hwi = size_hwi * BITS_PER_UNIT;
+		    ao_ref_init_from_ptr_and_range (&dref,
+						    gimple_call_arg (call, i),
+						    true, 0, -1, size_hwi);
+		  }
+		else
+		  ao_ref_init_from_ptr_and_range (&dref,
+						  gimple_call_arg (call, i),
+						  false, 0, -1, -1);
 		if (refs_may_alias_p_1 (&dref, ref, false))
 		  return 1;
 	      }
@@ -2803,12 +2819,16 @@ ref_maybe_used_by_call_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
       case IFN_SCATTER_STORE:
       case IFN_MASK_SCATTER_STORE:
       case IFN_LEN_STORE:
+      case IFN_MASK_LEN_STORE:
 	return false;
       case IFN_MASK_STORE_LANES:
+      case IFN_MASK_LEN_STORE_LANES:
 	goto process_args;
       case IFN_MASK_LOAD:
       case IFN_LEN_LOAD:
+      case IFN_MASK_LEN_LOAD:
       case IFN_MASK_LOAD_LANES:
+      case IFN_MASK_LEN_LOAD_LANES:
 	{
 	  ao_ref rhs_ref;
 	  tree lhs = gimple_call_lhs (call);
@@ -2817,6 +2837,9 @@ ref_maybe_used_by_call_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
 	      ao_ref_init_from_ptr_and_size (&rhs_ref,
 					     gimple_call_arg (call, 0),
 					     TYPE_SIZE_UNIT (TREE_TYPE (lhs)));
+	      /* We cannot make this a known-size access since otherwise
+		 we disambiguate against refs to decls that are smaller.  */
+	      rhs_ref.size = -1;
 	      rhs_ref.ref_alias_set = rhs_ref.base_alias_set
 		= tbaa_p ? get_deref_alias_set (TREE_TYPE
 					(gimple_call_arg (call, 1))) : 0;
@@ -3053,13 +3076,18 @@ call_may_clobber_ref_p_1 (gcall *call, ao_ref *ref, bool tbaa_p)
 	return false;
       case IFN_MASK_STORE:
       case IFN_LEN_STORE:
+      case IFN_MASK_LEN_STORE:
       case IFN_MASK_STORE_LANES:
+      case IFN_MASK_LEN_STORE_LANES:
 	{
 	  tree rhs = gimple_call_arg (call,
 				      internal_fn_stored_value_index (fn));
 	  ao_ref lhs_ref;
 	  ao_ref_init_from_ptr_and_size (&lhs_ref, gimple_call_arg (call, 0),
 					 TYPE_SIZE_UNIT (TREE_TYPE (rhs)));
+	  /* We cannot make this a known-size access since otherwise
+	     we disambiguate against refs to decls that are smaller.  */
+	  lhs_ref.size = -1;
 	  lhs_ref.ref_alias_set = lhs_ref.base_alias_set
 	    = tbaa_p ? get_deref_alias_set
 				   (TREE_TYPE (gimple_call_arg (call, 1))) : 0;
@@ -3433,10 +3461,10 @@ stmt_kills_ref_p (gimple *stmt, ao_ref *ref)
 	    }
 	  /* Finally check if the lhs has the same address and size as the
 	     base candidate of the access.  Watch out if we have dropped
-	     an array-ref that was at struct end, this means ref->ref may
-	     be outside of the TYPE_SIZE of its base.  */
+	     an array-ref that might have flexible size, this means ref->ref
+	     may be outside of the TYPE_SIZE of its base.  */
 	  if ((! innermost_dropped_array_ref
-	       || ! array_at_struct_end_p (innermost_dropped_array_ref))
+	       || ! array_ref_flexible_size_p (innermost_dropped_array_ref))
 	      && (lhs == base
 		  || (((TYPE_SIZE (TREE_TYPE (lhs))
 			== TYPE_SIZE (TREE_TYPE (base)))
@@ -3522,6 +3550,7 @@ stmt_kills_ref_p (gimple *stmt, ao_ref *ref)
 			       "ipa-modref: call to %s kills ",
 			       node->dump_name ());
 		      print_generic_expr (dump_file, ref->base);
+		      fprintf (dump_file, "\n");
 		    }
 		    ++alias_stats.modref_kill_yes;
 		    return true;
@@ -3656,7 +3685,10 @@ maybe_skip_until (gimple *phi, tree &target, basic_block target_bb,
   basic_block bb = gimple_bb (phi);
 
   if (!*visited)
-    *visited = BITMAP_ALLOC (NULL);
+    {
+      *visited = BITMAP_ALLOC (NULL);
+      bitmap_tree_view (*visited);
+    }
 
   bitmap_set_bit (*visited, SSA_NAME_VERSION (PHI_RESULT (phi)));
 
@@ -3948,7 +3980,10 @@ walk_aliased_vdefs_1 (ao_ref *ref, tree vdef,
 	{
 	  unsigned i;
 	  if (!*visited)
-	    *visited = BITMAP_ALLOC (NULL);
+	    {
+	      *visited = BITMAP_ALLOC (NULL);
+	      bitmap_tree_view (*visited);
+	    }
 	  for (i = 0; i < gimple_phi_num_args (def_stmt); ++i)
 	    {
 	      int res = walk_aliased_vdefs_1 (ref,

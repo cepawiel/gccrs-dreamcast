@@ -14,13 +14,32 @@ nothrow:
 @safe:
 @nogc:
 
-alias I = long;
-alias U = ulong;
+private alias I = long;
+private alias U = ulong;
 enum Ubits = uint(U.sizeof * 8);
 
-version (X86_64) private enum Cent_alignment = 16;
-else             private enum Cent_alignment = (size_t.sizeof * 2);
+version (DigitalMars)
+{
+    /* The alignment should follow target.stackAlign(),
+     * which is `isXmmSupported() ? 16 : (is64bit ? 8 : 4)
+     */
+    version (D_SIMD)
+        private enum Cent_alignment = 16;
+    else version (X86_64)
+        private enum Cent_alignment = 8;
+    else
+        private enum Cent_alignment = 4;
+}
+else
+{
+    version (X86_64) private enum Cent_alignment = 16;
+    else             private enum Cent_alignment = (size_t.sizeof * 2);
+}
 
+/**
+ * 128 bit integer type.
+ * See_also: $(REF Int128, std,int128).
+ */
 align(Cent_alignment) struct Cent
 {
     version (LittleEndian)

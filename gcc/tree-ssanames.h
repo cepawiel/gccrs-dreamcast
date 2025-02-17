@@ -1,5 +1,5 @@
 /* SSA name expresssons routines
-   Copyright (C) 2013-2022 Free Software Foundation, Inc.
+   Copyright (C) 2013-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -58,7 +58,8 @@ struct GTY(()) ptr_info_def
 
 /* Sets the value range to SSA.  */
 extern bool set_range_info (tree, const vrange &);
-extern void set_nonzero_bits (tree, const wide_int_ref &);
+extern void set_nonzero_bits (tree, const wide_int &);
+extern void set_bitmask (tree, const wide_int &value, const wide_int &mask);
 extern wide_int get_nonzero_bits (const_tree);
 extern bool ssa_name_has_boolean_range (tree);
 extern void init_ssanames (struct function *, int);
@@ -91,7 +92,7 @@ extern void flush_ssaname_freelist (void);
 /* Return an SSA_NAME node for variable VAR defined in statement STMT
    in function cfun.  */
 
-static inline tree
+inline tree
 make_ssa_name (tree var, gimple *stmt = NULL)
 {
   return make_ssa_name_fn (cfun, var, stmt);
@@ -100,7 +101,7 @@ make_ssa_name (tree var, gimple *stmt = NULL)
 /* Return an SSA_NAME node using the template SSA name NAME defined in
    statement STMT in function cfun.  */
 
-static inline tree
+inline tree
 copy_ssa_name (tree var, gimple *stmt = NULL)
 {
   return copy_ssa_name_fn (cfun, var, stmt);
@@ -109,7 +110,7 @@ copy_ssa_name (tree var, gimple *stmt = NULL)
 /*  Creates a duplicate of a SSA name NAME tobe defined by statement STMT
     in function cfun.  */
 
-static inline tree
+inline tree
 duplicate_ssa_name (tree var, gimple *stmt)
 {
   return duplicate_ssa_name_fn (cfun, var, stmt);
@@ -117,7 +118,7 @@ duplicate_ssa_name (tree var, gimple *stmt)
 
 /* Release the SSA name NAME used in function cfun.  */
 
-static inline void
+inline void
 release_ssa_name (tree name)
 {
   release_ssa_name_fn (cfun, name);
@@ -126,7 +127,7 @@ release_ssa_name (tree name)
 /* Return an anonymous SSA_NAME node for type TYPE defined in statement STMT
    in function cfun.  Arrange so that it uses NAME in dumps.  */
 
-static inline tree
+inline tree
 make_temp_ssa_name (tree type, gimple *stmt, const char *name)
 {
   tree ssa_name;
@@ -136,5 +137,26 @@ make_temp_ssa_name (tree type, gimple *stmt, const char *name)
   return ssa_name;
 }
 
+/* A class which is used to save/restore the flow sensitive information.  */
+class flow_sensitive_info_storage
+{
+public:
+  void save (tree);
+  void save_and_clear (tree);
+  void restore (tree);
+  void clear_storage ();
+private:
+  /* 0 means there is nothing saved.
+     1 means non pointer is saved.
+     -1 means a pointer type is saved.
+     -2 means a pointer type is saved but no information was saved. */
+  int state = 0;
+  /* The range info for non pointers */
+  vrange_storage *range_info = nullptr;
+  /* Flow sensitive pointer information. */
+  unsigned int align = 0;
+  unsigned int misalign = 0;
+  bool null = true;
+};
 
 #endif /* GCC_TREE_SSANAMES_H */

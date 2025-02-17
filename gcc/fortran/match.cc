@@ -1,5 +1,5 @@
 /* Matching subroutines in all sizes, shapes and colors.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2024 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -193,7 +193,7 @@ gfc_match_member_sep(gfc_symbol *sym)
   if (gfc_match_name (name) != MATCH_YES)
     {
       gfc_error ("Expected structure component or operator name "
-                 "after '.' at %C");
+		 "after %<.%> at %C");
       goto error;
     }
 
@@ -1084,7 +1084,8 @@ gfc_match_char (char c, bool gobble_ws)
 
    %%  Literal percent sign
    %e  Expression, pointer to a pointer is set
-   %s  Symbol, pointer to the symbol is set
+   %s  Symbol, pointer to the symbol is set (host_assoc = 0)
+   %S  Symbol, pointer to the symbol is set (host_assoc = 1)
    %n  Name, character buffer is set to name
    %t  Matches end of statement.
    %o  Matches an intrinsic operator, returned as an INTRINSIC enum.
@@ -1151,8 +1152,9 @@ loop:
 	  goto loop;
 
 	case 's':
+	case 'S':
 	  vp = va_arg (argp, void **);
-	  n = gfc_match_symbol ((gfc_symbol **) vp, 0);
+	  n = gfc_match_symbol ((gfc_symbol **) vp, c == 'S');
 	  if (n != MATCH_YES)
 	    {
 	      m = n;
@@ -5062,6 +5064,7 @@ gfc_match_call (void)
      right association is made.  They are thrown out in resolution.)
      ...  */
   if (!sym->attr.generic
+	&& !sym->attr.proc_pointer
 	&& !sym->attr.subroutine
 	&& !sym->attr.function)
     {
@@ -5345,6 +5348,16 @@ gfc_match_common (void)
 		goto cleanup;
 	    }
 
+	  /* F2018:R874:  common-block-object is variable-name [ (array-spec) ]
+	     F2018:C8121: A variable-name shall not be a name made accessible
+	     by use association.  */
+	  if (sym->attr.use_assoc)
+	    {
+	      gfc_error ("Symbol %qs at %C is USE associated from module %qs "
+			 "and cannot occur in COMMON", sym->name, sym->module);
+	      goto cleanup;
+	    }
+
 	  /* Deal with an optional array specification after the
 	     symbol name.  */
 	  m = gfc_match_array_spec (&as, true, true);
@@ -5524,15 +5537,32 @@ gfc_free_namelist (gfc_namelist *name)
 /* Free an OpenMP namelist structure.  */
 
 void
-gfc_free_omp_namelist (gfc_omp_namelist *name, bool free_ns)
+gfc_free_omp_namelist (gfc_omp_namelist *name, bool free_ns,
+		       bool free_align_allocator,
+		       bool free_mem_traits_space)
 {
   gfc_omp_namelist *n;
+  gfc_expr *last_allocator = NULL;
 
   for (; name; name = n)
     {
       gfc_free_expr (name->expr);
+      if (free_align_allocator)
+	gfc_free_expr (name->u.align);
+      else if (free_mem_traits_space)
+	{ }  /* name->u.memspace_sym: shall not call gfc_free_symbol here. */
       if (free_ns)
 	gfc_free_namespace (name->u2.ns);
+      else if (free_align_allocator)
+	{
+	  if (last_allocator != name->u2.allocator)
+	    {
+	      last_allocator = name->u2.allocator;
+	      gfc_free_expr (name->u2.allocator);
+	    }
+	}
+      else if (free_mem_traits_space)
+	{ }  /* name->u2.traits_sym: shall not call gfc_free_symbol here. */
       else if (name->u2.udr)
 	{
 	  if (name->u2.udr->combiner)
@@ -5605,10 +5635,31 @@ gfc_match_namelist (void)
 		  gfc_error_check ();
 		}
 	      else
-		/* If the type is not set already, we set it here to the
-		   implicit default type.  It is not allowed to set it
-		   later to any other type.  */
-		gfc_set_default_type (sym, 0, gfc_current_ns);
+		{
+		  /* Before the symbol is given an implicit type, check to
+		     see if the symbol is already available in the namespace,
+		     possibly through host association.  Importantly, the
+		     symbol may be a user defined type.  */
+
+		  gfc_symbol *tmp;
+
+		  gfc_find_symbol (sym->name, NULL, 1, &tmp);
+		  if (tmp && tmp->attr.generic
+		      && (tmp = gfc_find_dt_in_generic (tmp)))
+		    {
+		      if (tmp->attr.flavor == FL_DERIVED)
+			{
+			  gfc_error ("Derived type %qs at %L conflicts with "
+				     "namelist object %qs at %C",
+				     tmp->name, &tmp->declared_at, sym->name);
+			  goto error;
+			}
+		    }
+
+		  /* Set type of the symbol to its implicit default type.  It is
+		     not allowed to set it later to any other type.  */
+		  gfc_set_default_type (sym, 0, gfc_current_ns);
+		}
 	    }
 	  if (sym->attr.in_namelist == 0
 	      && !gfc_add_in_namelist (&sym->attr, sym->name, NULL))
@@ -5724,7 +5775,7 @@ gfc_match_equivalence (void)
 
   /* EQUIVALENCE has been matched.  After gobbling any possible whitespace,
      the next character needs to be '('.  Check that here, and return
-     MATCH_NO for a variable of the form equivalencej.  */
+     MATCH_NO for a variable of the form equivalence.  */
   gfc_gobble_whitespace ();
   c = gfc_peek_ascii_char ();
   if (c != '(')
@@ -5745,7 +5796,7 @@ gfc_match_equivalence (void)
 	goto syntax;
 
       set = eq;
-      common_flag = FALSE;
+      common_flag = false;
       cnt = 0;
 
       for (;;)
@@ -5786,7 +5837,7 @@ gfc_match_equivalence (void)
 
 	  if (sym->attr.in_common)
 	    {
-	      common_flag = TRUE;
+	      common_flag = true;
 	      common_head = sym->common_head;
 	    }
 
@@ -5913,6 +5964,30 @@ recursive_stmt_fcn (gfc_expr *e, gfc_symbol *sym)
 }
 
 
+/* Check for invalid uses of statement function dummy arguments in body.  */
+
+static bool
+chk_stmt_fcn_body (gfc_expr *e, gfc_symbol *sym, int *f ATTRIBUTE_UNUSED)
+{
+  gfc_formal_arglist *formal;
+
+  if (e == NULL || e->symtree == NULL || e->expr_type != EXPR_FUNCTION)
+    return false;
+
+  for (formal = sym->formal; formal; formal = formal->next)
+    {
+      if (formal->sym == e->symtree->n.sym)
+	{
+	  gfc_error ("Invalid use of statement function argument at %L",
+		     &e->where);
+	  return true;
+	}
+    }
+
+  return false;
+}
+
+
 /* Match a statement function declaration.  It is so easy to match
    non-statement function statements with a MATCH_ERROR as opposed to
    MATCH_NO that we suppress error message in most cases.  */
@@ -5980,6 +6055,9 @@ gfc_match_st_function (void)
 		 sym->name, &expr->where);
       return MATCH_ERROR;
     }
+
+  if (gfc_traverse_expr (expr, sym, chk_stmt_fcn_body, 0))
+    return MATCH_ERROR;
 
   sym->value = expr;
 
@@ -6271,12 +6349,13 @@ copy_ts_from_selector_to_associate (gfc_expr *associate, gfc_expr *selector)
   else if (selector->ts.type == BT_CLASS
 	   && CLASS_DATA (selector)
 	   && CLASS_DATA (selector)->as
-	   && ref && ref->type == REF_ARRAY)
+	   && ((ref && ref->type == REF_ARRAY)
+	       || selector->expr_type == EXPR_OP))
     {
       /* Ensure that the array reference type is set.  We cannot use
 	 gfc_resolve_expr at this point, so the usable parts of
 	 resolve.cc(resolve_array_ref) are employed to do it.  */
-      if (ref->u.ar.type == AR_UNKNOWN)
+      if (ref && ref->u.ar.type == AR_UNKNOWN)
 	{
 	  ref->u.ar.type = AR_ELEMENT;
 	  for (int i = 0; i < ref->u.ar.dimen + ref->u.ar.codimen; i++)
@@ -6290,7 +6369,7 @@ copy_ts_from_selector_to_associate (gfc_expr *associate, gfc_expr *selector)
 	      }
 	}
 
-      if (ref->u.ar.type == AR_FULL)
+      if (!ref || ref->u.ar.type == AR_FULL)
 	selector->rank = CLASS_DATA (selector)->as->rank;
       else if (ref->u.ar.type == AR_SECTION)
 	selector->rank = ref->u.ar.dimen;
@@ -6302,12 +6381,15 @@ copy_ts_from_selector_to_associate (gfc_expr *associate, gfc_expr *selector)
 
   if (rank)
     {
-      for (int i = 0; i < ref->u.ar.dimen + ref->u.ar.codimen; i++)
-	if (ref->u.ar.dimen_type[i] == DIMEN_ELEMENT
-	    || (ref->u.ar.dimen_type[i] == DIMEN_UNKNOWN
-		&& ref->u.ar.end[i] == NULL
-		&& ref->u.ar.stride[i] == NULL))
-	  rank--;
+      if (ref)
+	{
+	  for (int i = 0; i < ref->u.ar.dimen + ref->u.ar.codimen; i++)
+	    if (ref->u.ar.dimen_type[i] == DIMEN_ELEMENT
+	      || (ref->u.ar.dimen_type[i] == DIMEN_UNKNOWN
+		  && ref->u.ar.end[i] == NULL
+		  && ref->u.ar.stride[i] == NULL))
+	      rank--;
+	}
 
       if (rank)
 	{
@@ -6332,6 +6414,39 @@ build_class_sym:
       assoc_sym->attr.pointer = 1;
       gfc_build_class_symbol (&assoc_sym->ts, &assoc_sym->attr, &assoc_sym->as);
     }
+}
+
+
+/* Build the associate name  */
+static int
+build_associate_name (const char *name, gfc_expr **e1, gfc_expr **e2)
+{
+  gfc_expr *expr1 = *e1;
+  gfc_expr *expr2 = *e2;
+  gfc_symbol *sym;
+
+  /* For the case where the associate name is already an associate name.  */
+  if (!expr2)
+    expr2 = expr1;
+  expr1 = gfc_get_expr ();
+  expr1->expr_type = EXPR_VARIABLE;
+  expr1->where = expr2->where;
+  if (gfc_get_sym_tree (name, NULL, &expr1->symtree, false))
+    return 1;
+
+  sym = expr1->symtree->n.sym;
+  if (expr2->ts.type == BT_UNKNOWN)
+    sym->attr.untyped = 1;
+  else
+    copy_ts_from_selector_to_associate (expr1, expr2);
+
+  sym->attr.flavor = FL_VARIABLE;
+  sym->attr.referenced = 1;
+  sym->attr.class_ok = 1;
+
+  *e1 = expr1;
+  *e2 = expr2;
+  return 0;
 }
 
 
@@ -6412,6 +6527,7 @@ select_type_set_tmp (gfc_typespec *ts)
   gfc_symtree *tmp = NULL;
   gfc_symbol *selector = select_type_stack->selector;
   gfc_symbol *sym;
+  gfc_expr *expr2;
 
   if (!ts)
     {
@@ -6435,7 +6551,20 @@ select_type_set_tmp (gfc_typespec *ts)
       sym = tmp->n.sym;
       gfc_add_type (sym, ts, NULL);
 
-      if (selector->ts.type == BT_CLASS && selector->attr.class_ok
+      /* If the SELECT TYPE selector is a function we might be able to obtain
+	 a typespec from the result. Since the function might not have been
+	 parsed yet we have to check that there is indeed a result symbol.  */
+      if (selector->ts.type == BT_UNKNOWN
+	  && gfc_state_stack->construct
+
+	  && (expr2 = gfc_state_stack->construct->expr2)
+	  && expr2->expr_type == EXPR_FUNCTION
+	  && expr2->symtree
+	  && expr2->symtree->n.sym && expr2->symtree->n.sym->result)
+	selector->ts = expr2->symtree->n.sym->result->ts;
+
+      if (selector->ts.type == BT_CLASS
+	  && selector->attr.class_ok
 	  && selector->ts.u.derived && CLASS_DATA (selector))
 	{
 	  sym->attr.pointer
@@ -6490,7 +6619,6 @@ gfc_match_select_type (void)
   match m;
   char name[GFC_MAX_SYMBOL_LEN + 1];
   bool class_array;
-  gfc_symbol *sym;
   gfc_namespace *ns = gfc_current_ns;
 
   m = gfc_match_label ();
@@ -6512,24 +6640,11 @@ gfc_match_select_type (void)
   m = gfc_match (" %n => %e", name, &expr2);
   if (m == MATCH_YES)
     {
-      expr1 = gfc_get_expr ();
-      expr1->expr_type = EXPR_VARIABLE;
-      expr1->where = expr2->where;
-      if (gfc_get_sym_tree (name, NULL, &expr1->symtree, false))
+      if (build_associate_name (name, &expr1, &expr2))
 	{
 	  m = MATCH_ERROR;
 	  goto cleanup;
 	}
-
-      sym = expr1->symtree->n.sym;
-      if (expr2->ts.type == BT_UNKNOWN)
-	sym->attr.untyped = 1;
-      else
-	copy_ts_from_selector_to_associate (expr1, expr2);
-
-      sym->attr.flavor = FL_VARIABLE;
-      sym->attr.referenced = 1;
-      sym->attr.class_ok = 1;
     }
   else
     {
@@ -6572,6 +6687,17 @@ gfc_match_select_type (void)
     {
       gfc_error ("Selector in SELECT TYPE at %C is not a named variable; "
 		 "use associate-name=>");
+      m = MATCH_ERROR;
+      goto cleanup;
+    }
+
+  /* Prevent an existing associate name from reuse here by pushing expr1 to
+     expr2 and building a new associate name.  */
+  if (!expr2 && expr1->symtree->n.sym->assoc
+      && !expr1->symtree->n.sym->attr.select_type_temporary
+      && !expr1->symtree->n.sym->attr.select_rank_temporary
+      && build_associate_name (expr1->symtree->n.sym->name, &expr1, &expr2))
+    {
       m = MATCH_ERROR;
       goto cleanup;
     }
@@ -6731,8 +6857,20 @@ gfc_match_select_rank (void)
 
   gfc_current_ns = gfc_build_block_ns (ns);
   m = gfc_match (" %n => %e", name, &expr2);
+
   if (m == MATCH_YES)
     {
+      /* If expr2 corresponds to an implicitly typed variable, then the
+	 actual type of the variable may not have been set.  Set it here.  */
+      if (!gfc_current_ns->seen_implicit_none
+	  && expr2->expr_type == EXPR_VARIABLE
+	  && expr2->ts.type == BT_UNKNOWN
+	  && expr2->symtree && expr2->symtree->n.sym)
+	{
+	  gfc_set_default_type (expr2->symtree->n.sym, 0, gfc_current_ns);
+	  expr2->ts.type = expr2->symtree->n.sym->ts.type;
+	}
+
       expr1 = gfc_get_expr ();
       expr1->expr_type = EXPR_VARIABLE;
       expr1->where = expr2->where;

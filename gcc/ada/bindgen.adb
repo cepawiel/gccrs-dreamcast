@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -65,6 +65,15 @@ package body Bindgen is
    --  Number of default-sized primary stacks the binder needs to allocate for
    --  task objects declared in the program.
 
+   Command_Line_Used : Boolean := False;
+   --  Flag indicating whether the unit Ada.Command_Line is in the closure of
+   --  the partition. This is set by Resolve_Binder_Options, and is used to
+   --  determine whether or not to import and use symbols defined in
+   --  Ada.Command_Line's support packages (gnat_argc, gnat_argv, gnat_envp
+   --  and gnat_exit_status). Conservatively, it is always set to True for
+   --  non-configurable run-times as parts of the compiler and run-time assume
+   --  these symbols are available and can be imported directly.
+
    System_Restrictions_Used : Boolean := False;
    --  Flag indicating whether the unit System.Restrictions is in the closure
    --  of the partition. This is set by Resolve_Binder_Options, and is used
@@ -114,25 +123,23 @@ package body Bindgen is
    --  For CodePeer, introduce a wrapper subprogram which calls the
    --  user-defined main subprogram.
 
-   --  Names and link_names for CUDA device adainit/adafinal procs.
+   --  Name for local C-String variable
 
-   Device_Subp_Name_Prefix : constant String := "imported_device_";
+   Adainit_String_Obj_Name  : constant String := "Adainit_Name_C_String";
+
+   --  Name and link_name for CUDA device initialization procedure
+
+   Device_Ada_Init_Subp_Name : constant String := "Device_Initialization";
    Device_Link_Name_Prefix : constant String := "__device_";
 
-   function Device_Ada_Final_Link_Name return String is
-     (Device_Link_Name_Prefix & Ada_Final_Name.all);
+   function Device_Link_Name (Suffix : String) return String is
+     (Device_Link_Name_Prefix &
+       (if CUDA_Device_Library_Name = null
+        then "ada" -- is this an error path?
+        else CUDA_Device_Library_Name.all) & Suffix);
 
-   function Device_Ada_Final_Subp_Name return String is
-     (Device_Subp_Name_Prefix & Ada_Final_Name.all);
-
-   function Device_Ada_Init_Link_Name return String is
-     (Device_Link_Name_Prefix & Ada_Init_Name.all);
-
-   function Device_Ada_Init_Subp_Name return String is
-     (Device_Subp_Name_Prefix & Ada_Init_Name.all);
-
-   --  Text for aspect specifications (if any) given as part of the
-   --  Adainit and Adafinal spec declarations.
+   function Device_Ada_Init_Link_Name return String
+     is (Device_Link_Name (Suffix => "init"));
 
    ----------------------------------
    -- Interface_State Pragma Table --
@@ -521,12 +528,6 @@ package body Bindgen is
          WBI ("      System.Standard_Library.Adafinal;");
       end if;
 
-      --  perform device (as opposed to host) finalization
-      if Enable_CUDA_Expansion then
-         WBI ("      pragma CUDA_Execute (" &
-                Device_Ada_Final_Subp_Name & ", 1, 1);");
-      end if;
-
       WBI ("   end " & Ada_Final_Name.all & ";");
       WBI ("");
    end Gen_Adafinal;
@@ -698,6 +699,8 @@ package body Bindgen is
          then
             WBI ("      null;");
          end if;
+
+         Gen_Restrictions;
 
          --  Generate the default-sized secondary stack pool if the secondary
          --  stack is used by the program.
@@ -1360,11 +1363,13 @@ package body Bindgen is
       end loop;
 
       WBI ("   procedure " & Device_Ada_Init_Subp_Name & ";");
-      WBI ("   pragma Import (C, " & Device_Ada_Init_Subp_Name &
+      WBI ("   pragma Export (C, " & Device_Ada_Init_Subp_Name &
              ", Link_Name => """ & Device_Ada_Init_Link_Name & """);");
-      WBI ("   procedure " & Device_Ada_Final_Subp_Name & ";");
-      WBI ("   pragma Import (C, " & Device_Ada_Final_Subp_Name &
-             ", Link_Name => """ & Device_Ada_Final_Link_Name & """);");
+
+      --  C-string declaration for adainit
+      WBI ("   " & Adainit_String_Obj_Name
+            & " : Interfaces.C.Strings.Chars_Ptr;");
+      WBI ("");
 
       WBI ("");
    end Gen_CUDA_Defs;
@@ -1374,6 +1379,41 @@ package body Bindgen is
    -------------------
 
    procedure Gen_CUDA_Init is
+      --  Generate call to register one function
+      procedure Gen_CUDA_Register_Function_Call
+        (Kernel_Name   : String;
+         Kernel_String : String;
+         Kernel_Proc   : String);
+
+      -------------------------------------
+      -- Gen_CUDA_Register_Function_Call --
+      -------------------------------------
+
+      procedure Gen_CUDA_Register_Function_Call
+        (Kernel_Name   : String;
+         Kernel_String : String;
+         Kernel_Proc   : String) is
+      begin
+         WBI ("      " & Kernel_String & " :=");
+         WBI ("        Interfaces.C.Strings.New_Char_Array ("""
+               & Kernel_Name
+               & """);");
+
+         --  Generate call to CUDA runtime to register function.
+         WBI ("      CUDA_Register_Function (");
+         WBI ("        Fat_Binary_Handle, ");
+         WBI ("        " & Kernel_Proc & "'Address,");
+         WBI ("        " & Kernel_String & ",");
+         WBI ("        " & Kernel_String & ",");
+         WBI ("        -1,");
+         WBI ("        System.Null_Address,");
+         WBI ("        System.Null_Address,");
+         WBI ("        System.Null_Address,");
+         WBI ("        System.Null_Address,");
+         WBI ("        System.Null_Address);");
+         WBI ("");
+      end Gen_CUDA_Register_Function_Call;
+
    begin
       if not Enable_CUDA_Expansion then
          return;
@@ -1404,25 +1444,18 @@ package body Bindgen is
                Get_Name_String (CUDA_Kernels.Table (K).Kernel_Name);
             --  Kernel_Name is the name of the kernel, after package expansion.
          begin
-            WBI ("      " & Kernel_String & " :=");
-            WBI ("        Interfaces.C.Strings.New_Char_Array ("""
-                  & Kernel_Name
-                  & """);");
-            --  Generate call to CUDA runtime to register function.
-            WBI ("      CUDA_Register_Function (");
-            WBI ("        Fat_Binary_Handle, ");
-            WBI ("        " & Kernel_Proc & "'Address,");
-            WBI ("        " & Kernel_String & ",");
-            WBI ("        " & Kernel_String & ",");
-            WBI ("        -1,");
-            WBI ("        System.Null_Address,");
-            WBI ("        System.Null_Address,");
-            WBI ("        System.Null_Address,");
-            WBI ("        System.Null_Address,");
-            WBI ("        System.Null_Address);");
-            WBI ("");
+            Gen_CUDA_Register_Function_Call
+              (Kernel_Name   => Kernel_Name,
+               Kernel_String => Kernel_String,
+               Kernel_Proc   => Kernel_Proc);
          end;
       end loop;
+
+      --  Register device-side Adainit
+      Gen_CUDA_Register_Function_Call
+        (Kernel_Name   => Device_Ada_Init_Link_Name,
+         Kernel_String => Adainit_String_Obj_Name,
+         Kernel_Proc   => Device_Ada_Init_Subp_Name);
 
       WBI ("      CUDA_Register_Fat_Binary_End (Fat_Binary_Handle);");
 
@@ -2068,13 +2101,13 @@ package body Bindgen is
 
       WBI ("   begin");
 
-      --  Acquire command-line arguments if present on target
+      --  Acquire command-line arguments if supported on the target and used
+      --  by the program.
 
       if CodePeer_Mode then
          null;
 
-      elsif Command_Line_Args_On_Target then
-
+      elsif Command_Line_Args_On_Target and then Command_Line_Used then
          --  Initialize gnat_argc/gnat_argv only if not already initialized,
          --  to avoid losing the result of any command-line processing done by
          --  earlier GNAT run-time initialization.
@@ -2085,20 +2118,6 @@ package body Bindgen is
          WBI ("      end if;");
          WBI ("      gnat_envp := envp;");
          WBI ("");
-
-      --  If configurable run-time and no command-line args, then nothing needs
-      --  to be done since the gnat_argc/argv/envp variables are suppressed in
-      --  this case.
-
-      elsif Configurable_Run_Time_On_Target then
-         null;
-
-      --  Otherwise set dummy values (to be filled in by some other unit?)
-
-      else
-         WBI ("      gnat_argc := 0;");
-         WBI ("      gnat_argv := System.Null_Address;");
-         WBI ("      gnat_envp := System.Null_Address;");
       end if;
 
       if Opt.Default_Exit_Status /= 0
@@ -2175,7 +2194,14 @@ package body Bindgen is
          if No_Main_Subprogram
            or else ALIs.Table (ALIs.First).Main_Program = Proc
          then
-            WBI ("      return (gnat_exit_status);");
+            --  Return gnat_exit_status if Ada.Command_Line is used otherwise
+            --  return 0.
+
+            if Command_Line_Used then
+               WBI ("      return (gnat_exit_status);");
+            else
+               WBI ("      return (0);");
+            end if;
          else
             WBI ("      return (Result);");
          end if;
@@ -2571,38 +2597,35 @@ package body Bindgen is
       if Bind_Main_Program then
          --  Generate argc/argv stuff unless suppressed
 
-         if Command_Line_Args_On_Target
-           or not Configurable_Run_Time_On_Target
-         then
+         --  A run-time configured to support command line arguments defines
+         --  a number of internal symbols that need to be set by the binder.
+         --  We do not do this in cases where the program does not use
+         --  Ada.Command_Line, as the package and it's support files may not be
+         --  present.
+
+         if Command_Line_Args_On_Target and then Command_Line_Used then
             WBI ("");
             WBI ("   gnat_argc : Integer;");
             WBI ("   gnat_argv : System.Address;");
             WBI ("   gnat_envp : System.Address;");
 
-            --  If the standard library is not suppressed, these variables
-            --  are in the run-time data area for easy run time access.
-
-            if not Suppress_Standard_Library_On_Target then
-               WBI ("");
-               WBI ("   pragma Import (C, gnat_argc);");
-               WBI ("   pragma Import (C, gnat_argv);");
-               WBI ("   pragma Import (C, gnat_envp);");
-            end if;
+            WBI ("");
+            WBI ("   pragma Import (C, gnat_argc);");
+            WBI ("   pragma Import (C, gnat_argv);");
+            WBI ("   pragma Import (C, gnat_envp);");
          end if;
 
-         --  Define exit status. Again in normal mode, this is in the run-time
-         --  library, and is initialized there, but in the configurable
-         --  run-time case, the variable is declared and initialized in this
-         --  file.
+         --  Define exit status if supported by the target. The exit status is
+         --  stored in the run-time library to allow applications set the state
+         --  through Ada.Command_Line and is initialized in the run-time. Like
+         --  command line arguments, skip if Ada.Command_Line is not used in
+         --  the enclosure of the partition because this package may not be
+         --  available in the runtime.
 
          WBI ("");
 
-         if Configurable_Run_Time_Mode then
-            if Exit_Status_Supported_On_Target then
-               WBI ("   gnat_exit_status : Integer := 0;");
-            end if;
-
-         else
+         if Exit_Status_Supported_On_Target and then Command_Line_Used
+         then
             WBI ("   gnat_exit_status : Integer;");
             WBI ("   pragma Import (C, gnat_exit_status);");
          end if;
@@ -2644,7 +2667,8 @@ package body Bindgen is
       WBI ("   procedure " & Ada_Init_Name.all & ";");
       if Enable_CUDA_Device_Expansion then
          WBI ("   pragma Export (C, " & Ada_Init_Name.all &
-                ", Link_Name => """ & Device_Ada_Init_Link_Name & """);");
+                ", Link_Name => """ & Device_Link_Name_Prefix
+                & Ada_Init_Name.all & """);");
          WBI ("   pragma CUDA_Global (" & Ada_Init_Name.all & ");");
       else
          WBI ("   pragma Export (C, " & Ada_Init_Name.all & ", """ &
@@ -2661,10 +2685,10 @@ package body Bindgen is
       if not Cumulative_Restrictions.Set (No_Finalization) then
          WBI ("");
          WBI ("   procedure " & Ada_Final_Name.all & ";");
-
          if Enable_CUDA_Device_Expansion then
             WBI ("   pragma Export (C, " & Ada_Final_Name.all &
-                   ", Link_Name => """ & Device_Ada_Final_Link_Name & """);");
+                   ", Link_Name => """ & Device_Link_Name_Prefix &
+                   Ada_Final_Name.all & """);");
             WBI ("   pragma CUDA_Global (" & Ada_Final_Name.all & ");");
          else
             WBI ("   pragma Export (C, " & Ada_Final_Name.all & ", """ &
@@ -2781,9 +2805,7 @@ package body Bindgen is
       --  Generate with of System.Restrictions to initialize
       --  Run_Time_Restrictions.
 
-      if System_Restrictions_Used
-        and not Suppress_Standard_Library_On_Target
-      then
+      if System_Restrictions_Used then
          WBI ("");
          WBI ("with System.Restrictions;");
       end if;
@@ -2894,6 +2916,13 @@ package body Bindgen is
 
       Gen_Adainit (Elab_Order);
 
+      if Enable_CUDA_Expansion then
+         WBI ("   procedure " & Device_Ada_Init_Subp_Name & " is");
+         WBI ("   begin");
+         WBI ("      raise Program_Error;");
+         WBI ("   end " & Device_Ada_Init_Subp_Name & ";");
+      end if;
+
       if Bind_Main_Program then
          Gen_Main;
       end if;
@@ -2916,9 +2945,7 @@ package body Bindgen is
       Count : Integer;
 
    begin
-      if Suppress_Standard_Library_On_Target
-        or not System_Restrictions_Used
-      then
+      if not System_Restrictions_Used then
          return;
       end if;
 
@@ -3361,6 +3388,18 @@ package body Bindgen is
 
          Check_Package (System_Version_Control_Used,
                         "system.version_control%s");
+
+         --  Ditto for the use of Ada.Command_Line, except we always set
+         --  Command_Line_Used to True if on a non-configurable run-time
+         --  as parts of the compiler and run-time assume the GNAT command
+         --  line symbols are available and can be imported directly (as
+         --  long as No_Run_Time mode is not set).
+
+         if Configurable_Run_Time_On_Target then
+            Check_Package (Command_Line_Used, "ada.command_line%s");
+         elsif not No_Run_Time_Mode then
+            Command_Line_Used := True;
+         end if;
       end loop;
    end Resolve_Binder_Options;
 

@@ -1,5 +1,5 @@
 /* Consolidation of svalues and regions.
-   Copyright (C) 2020-2022 Free Software Foundation, Inc.
+   Copyright (C) 2020-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -34,6 +34,9 @@ public:
   region_model_manager (logger *logger = NULL);
   ~region_model_manager ();
 
+  unsigned get_num_symbols () const { return m_next_symbol_id; }
+  unsigned alloc_symbol_id () { return m_next_symbol_id++; }
+
   /* call_string consolidation.  */
   const call_string &get_empty_call_string () const
   {
@@ -42,13 +45,15 @@ public:
 
   /* svalue consolidation.  */
   const svalue *get_or_create_constant_svalue (tree cst_expr);
-  const svalue *get_or_create_int_cst (tree type, poly_int64);
+  const svalue *get_or_create_int_cst (tree type, const poly_wide_int_ref &cst);
+  const svalue *get_or_create_null_ptr (tree pointer_type);
   const svalue *get_or_create_unknown_svalue (tree type);
   const svalue *get_or_create_setjmp_svalue (const setjmp_record &r,
 					     tree type);
   const svalue *get_or_create_poisoned_svalue (enum poison_kind kind,
 					       tree type);
-  const svalue *get_or_create_initial_value (const region *reg);
+  const svalue *get_or_create_initial_value (const region *reg,
+					     bool check_poisoned = true);
   const svalue *get_ptr_svalue (tree ptr_type, const region *pointee);
   const svalue *get_or_create_unaryop (tree type, enum tree_code op,
 				       const svalue *arg);
@@ -74,7 +79,8 @@ public:
 					       const binding_map &map);
   const svalue *get_or_create_conjured_svalue (tree type, const gimple *stmt,
 					       const region *id_reg,
-					       const conjured_purge &p);
+					       const conjured_purge &p,
+					       unsigned idx = 0);
   const svalue *
   get_or_create_asm_output_svalue (tree type,
 				   const gasm *asm_stmt,
@@ -100,6 +106,7 @@ public:
   const svalue *create_unique_svalue (tree type);
 
   /* region consolidation.  */
+  const root_region *get_root_region () const { return &m_root_region; }
   const stack_region * get_stack_region () const { return &m_stack_region; }
   const heap_region *get_heap_region () const { return &m_heap_region; }
   const code_region *get_code_region () const { return &m_code_region; }
@@ -107,6 +114,7 @@ public:
   {
     return &m_globals_region;
   }
+  const errno_region *get_errno_region () const { return &m_errno_region; }
   const function_region *get_region_for_fndecl (tree fndecl);
   const label_region *get_region_for_label (tree label);
   const decl_region *get_region_for_global (tree expr);
@@ -123,7 +131,7 @@ public:
   const region *get_cast_region (const region *original_region,
 				 tree type);
   const frame_region *get_frame_region (const frame_region *calling_frame,
-					function *fun);
+					const function &fun);
   const region *get_symbolic_region (const svalue *sval);
   const string_region *get_region_for_string (tree string_cst);
   const region *get_bit_range (const region *parent, tree type,
@@ -138,8 +146,6 @@ public:
 				       tree t,
 				       const dump_location_t &loc);
 
-  unsigned alloc_region_id () { return m_next_region_id++; }
-
   store_manager *get_store_manager () { return &m_store_mgr; }
   bounded_ranges_manager *get_range_manager () const { return m_range_mgr; }
 
@@ -151,7 +157,8 @@ public:
   /* Dynamically-allocated region instances.
      The number of these within the analysis can grow arbitrarily.
      They are still owned by the manager.  */
-  const region *create_region_for_heap_alloc ();
+  const region *
+  get_or_create_region_for_heap_alloc (const bitmap &base_regs_in_use);
   const region *create_region_for_alloca (const frame_region *frame);
 
   void log_stats (logger *logger, bool show_objs) const;
@@ -188,9 +195,10 @@ private:
 
   logger *m_logger;
 
+  unsigned m_next_symbol_id;
+
   const call_string m_empty_call_string;
 
-  unsigned m_next_region_id;
   root_region m_root_region;
   stack_region m_stack_region;
   heap_region m_heap_region;
@@ -286,6 +294,9 @@ private:
   typedef hash_map<tree, decl_region *> globals_map_t;
   typedef globals_map_t::iterator globals_iterator_t;
   globals_map_t m_globals_map;
+
+  thread_local_region m_thread_local_region;
+  errno_region m_errno_region;
 
   consolidation_map<field_region> m_field_regions;
   consolidation_map<element_region> m_element_regions;

@@ -40,7 +40,8 @@ void foo_compiles() {}
     static assert(!__traits(compiles, delete p));
 
     int[int] aa;
-    static assert(!__traits(compiles, aa[0]));
+    static assert( __traits(compiles, aa[0]));
+    static assert(!__traits(compiles, (aa[0] = 10)));
 
     int[] a;
     static assert(!__traits(compiles, a.length = 1));
@@ -117,4 +118,13 @@ void f(bool cond, string s) @nogc {
     alias Unused1 = typeof(inner); // OK
     alias Unused2 = typeof(&inner); // (Does not) INFERS GC (anymore)
     enum Unused3 = __traits(compiles , &inner);
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=24072
+
+version (D_SIMD) void f24072() @nogc
+{
+    alias int4 = __vector(int[4]);
+    int4 b = cast(int4)[1, 2, 3, 4];
+    int4 c = cast(int4)[1, 2];
 }

@@ -1,5 +1,5 @@
 /* Prototypes for pa.cc functions used in the md file & elsewhere.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -106,7 +106,7 @@ extern void pa_asm_output_aligned_local (FILE *, const char *,
 					 unsigned int);
 extern void pa_hpux_asm_output_external (FILE *, tree, const char *);
 extern HOST_WIDE_INT pa_initial_elimination_offset (int, int);
-extern HOST_WIDE_INT pa_function_arg_size (machine_mode, const_tree);
+extern int pa_function_arg_size (machine_mode, const_tree);
 extern void pa_output_function_label (FILE *);
 extern void hppa_profile_hook (int);
 

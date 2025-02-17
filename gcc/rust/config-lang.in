@@ -1,6 +1,6 @@
 # config-lang.in -- Top level configure fragment for gcc Rust frontend.
 
-# Copyright (C) 2009-2022 Free Software Foundation, Inc.
+# Copyright (C) 2009-2024 Free Software Foundation, Inc.
 
 # This file is part of GCC.
 
@@ -25,10 +25,14 @@
 # compilers	- value to add to $(COMPILERS)
 
 language="rust"
-compilers="rust1\$(exeext)"
+compilers="crab1\$(exeext)"
 
 build_by_default="no"
 
-target_libs="target-libffi target-libbacktrace"
+target_libs="target-libgrust"
+lang_dirs=libgrust
 
-gtfiles="\$(srcdir)/rust/rust-lang.cc"
+gtfiles="\
+\$(srcdir)/rust/rust-lang.cc \$(srcdir)/rust/backend/rust-constexpr.cc \
+\$(srcdir)/rust/backend/rust-tree.h \$(srcdir)/rust/backend/rust-tree.cc \
+"

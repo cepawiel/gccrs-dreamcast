@@ -1,5 +1,5 @@
 /* Language-level data type conversion for GNU C.
-   Copyright (C) 1987-2022 Free Software Foundation, Inc.
+   Copyright (C) 1987-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -99,11 +99,25 @@ c_convert (tree type, tree expr, bool init_const)
     return fold_convert_loc (loc, type, expr);
   if (TREE_CODE (TREE_TYPE (expr)) == ERROR_MARK)
     return error_mark_node;
-  if (TREE_CODE (TREE_TYPE (expr)) == VOID_TYPE)
+  if (VOID_TYPE_P (TREE_TYPE (expr)))
     {
       error ("void value not ignored as it ought to be");
       return error_mark_node;
     }
+
+  {
+    tree false_value, true_value;
+    if (c_hardbool_type_attr (type, &false_value, &true_value))
+      {
+	bool save = in_late_binary_op;
+	in_late_binary_op = true;
+	expr = c_objc_common_truthvalue_conversion (input_location, expr);
+	in_late_binary_op = save;
+
+	return fold_build3_loc (loc, COND_EXPR, type,
+				expr, true_value, false_value);
+      }
+  }
 
   switch (code)
     {
@@ -117,9 +131,10 @@ c_convert (tree type, tree expr, bool init_const)
       gcc_fallthrough ();
 
     case INTEGER_TYPE:
+    case BITINT_TYPE:
       if (sanitize_flags_p (SANITIZE_FLOAT_CAST)
 	  && current_function_decl != NULL_TREE
-	  && TREE_CODE (TREE_TYPE (expr)) == REAL_TYPE
+	  && SCALAR_FLOAT_TYPE_P (TREE_TYPE (expr))
 	  && COMPLETE_TYPE_P (type))
 	{
 	  expr = save_expr (expr);
@@ -135,8 +150,7 @@ c_convert (tree type, tree expr, bool init_const)
 
     case BOOLEAN_TYPE:
     convert_to_boolean:
-      return fold_convert_loc
-	(loc, type, c_objc_common_truthvalue_conversion (input_location, expr));
+      return c_objc_common_truthvalue_conversion (input_location, expr, type);
 
     case POINTER_TYPE:
       /* The type nullptr_t may be converted to a pointer type.  The result is
@@ -156,6 +170,19 @@ c_convert (tree type, tree expr, bool init_const)
     case REFERENCE_TYPE:
       ret = convert_to_pointer (type, e);
       goto maybe_fold;
+
+    case NULLPTR_TYPE:
+      /* A null pointer constant or value of type nullptr_t may be
+	 converted to nullptr_t.  The latter case has already been
+	 handled.  build_c_cast will create an additional NOP_EXPR to
+	 ensure the result of the conversion is not itself a null
+	 pointer constant.  */
+      if (null_pointer_constant_p (expr))
+	{
+	  ret = build_int_cst (type, 0);
+	  goto maybe_fold;
+	}
+      break;
 
     case REAL_TYPE:
       ret = convert_to_real (type, e);
@@ -201,12 +228,14 @@ c_convert (tree type, tree expr, bool init_const)
     }
 
   /* If we are converting to nullptr_t, don't say "non-scalar type" because
-     the nullptr_t type is a scalar type.  Only nullptr_t shall be converted
-     to nullptr_t.  */
+     the nullptr_t type is a scalar type.  Only nullptr_t or a null pointer
+     constant shall be converted to nullptr_t.  */
   if (code == NULLPTR_TYPE)
     {
       error ("conversion from %qT to %qT", TREE_TYPE (e), type);
-      inform (input_location, "only %qT can be converted to %qT", type, type);
+      inform (input_location,
+	      "only %qT or a null pointer constant can be converted to %qT",
+	      type, type);
     }
   else
     error ("conversion to non-scalar type requested");

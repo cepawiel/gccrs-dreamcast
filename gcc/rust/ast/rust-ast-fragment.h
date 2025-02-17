@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -27,11 +27,6 @@ namespace AST {
 
 enum class FragmentKind
 {
-  /**
-   * If an AST Fragment still contains unexpanded tokens - this should only be
-   * used in the case of builtin macros which need to be expanded eagerly.
-   */
-  Unexpanded,
   /**
    * A completely expanded AST Fragment. This signifies that all
    * `SingleASTNode`s in the `nodes` vector are valid.
@@ -66,17 +61,25 @@ public:
   static Fragment create_error ();
 
   /**
-   * Create a complete AST fragment
+   * Create an empty fragment
    */
-  static Fragment complete (std::vector<AST::SingleASTNode> nodes);
+  static Fragment create_empty ();
 
   /**
-   * Create a fragment which contains unexpanded nodes
+   * Create a complete AST fragment
    */
-  static Fragment unexpanded ();
+  Fragment (std::vector<AST::SingleASTNode> nodes,
+	    std::vector<std::unique_ptr<AST::Token>> tokens);
+
+  /**
+   * Create a complete AST fragment made of a single token
+   */
+  Fragment (std::vector<AST::SingleASTNode> nodes,
+	    std::unique_ptr<AST::Token> tok);
 
   FragmentKind get_kind () const;
   std::vector<SingleASTNode> &get_nodes ();
+  std::vector<std::unique_ptr<AST::Token>> &get_tokens ();
 
   bool is_error () const;
   bool should_expand () const;
@@ -90,7 +93,8 @@ public:
   void accept_vis (ASTVisitor &vis);
 
 private:
-  Fragment (FragmentKind kind, std::vector<SingleASTNode> nodes);
+  Fragment (FragmentKind kind, std::vector<SingleASTNode> nodes,
+	    std::vector<std::unique_ptr<AST::Token>> tokens);
 
   FragmentKind kind;
 
@@ -105,6 +109,12 @@ private:
   std::vector<SingleASTNode> nodes;
 
   /**
+   * The tokens associated with an AST fragment. This vector represents the
+   * actual tokens of the various nodes that are part of the fragment.
+   */
+  std::vector<std::unique_ptr<AST::Token>> tokens;
+
+  /**
    * We need to make a special case for Expression and Type fragments as only
    * one Node will be extracted from the `nodes` vector
    */
@@ -112,6 +122,27 @@ private:
   bool is_single_fragment_of_kind (SingleASTNode::NodeType expected) const;
   void assert_single_fragment (SingleASTNode::NodeType expected) const;
 };
+
+enum class InvocKind
+{
+  Expr,
+  Semicoloned,
+};
+
+enum class AsmKind
+{
+  Global,
+  Inline
+};
+
+/**
+ * This is the type for transcriber functions found in
+ * rust-macro-builtins.{h,cc}.
+ */
+using MacroTranscriberFunc
+  = std::function<tl::optional<Fragment> (location_t, MacroInvocData &,
+					  InvocKind semicolon)>;
+
 } // namespace AST
 } // namespace Rust
 

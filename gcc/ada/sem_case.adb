@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1996-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1996-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -48,6 +48,7 @@ with Stringt;        use Stringt;
 with Table;
 with Tbuild;         use Tbuild;
 with Uintp;          use Uintp;
+with Warnsw;         use Warnsw;
 
 with Ada.Unchecked_Deallocation;
 
@@ -192,8 +193,13 @@ package body Sem_Case is
            record
               Low, High : Uint;
            end record;
+         function "=" (X, Y : Discrete_Range_Info) return Boolean is abstract;
+         --  Here (and below), we don't use "=", which is a good thing,
+         --  because it wouldn't work, because the user-defined "=" on
+         --  Uint does not compose according to Ada rules.
 
          type Composite_Range_Info is array (Part_Id) of Discrete_Range_Info;
+         function "=" (X, Y : Composite_Range_Info) return Boolean is abstract;
 
          type Choice_Range_Info (Is_Others : Boolean := False) is
            record
@@ -204,6 +210,9 @@ package body Sem_Case is
                     null;
               end case;
            end record;
+         pragma Annotate (CodePeer, False_Positive, "raise exception",
+                          "function is abstract, hence never called");
+         function "=" (X, Y : Choice_Range_Info) return Boolean is abstract;
 
          type Choices_Range_Info is array (Choice_Id) of Choice_Range_Info;
 
@@ -1611,7 +1620,7 @@ package body Sem_Case is
                   begin
                      while Present (Comp) loop
                         if Chars (First (Choices (Comp))) = Orig_Name then
-                           pragma Assert (not Present (Matching_Comp));
+                           pragma Assert (No (Matching_Comp));
                            Matching_Comp := Comp;
                         end if;
 
@@ -2743,7 +2752,7 @@ package body Sem_Case is
                procedure Test_Point_For_Match is
                   function In_Range (Val : Uint; Rang : Discrete_Range_Info)
                     return Boolean is
-                    ((Rang.Low <= Val) and then (Val <= Rang.High));
+                    (Rang.Low <= Val and then Val <= Rang.High);
                begin
                   pragma Assert (not Done);
                   Matches (Next_Index) :=
@@ -3420,8 +3429,8 @@ package body Sem_Case is
                      Others_Seen := True;
                   else
                      if Flag_Overlapping_Within_One_Alternative
-                        and then (Compare (Matches (Choice.Alternative),
-                                  Choice.Matches) /= Disjoint)
+                        and then Compare (Matches (Choice.Alternative),
+                                          Choice.Matches) /= Disjoint
                      then
                         Error_Msg_N
                           ("bad overlapping within one alternative", N);
@@ -3470,7 +3479,7 @@ package body Sem_Case is
                   Union (Target => Covered, Source => Matches (A1));
                end loop;
 
-               if (not Others_Seen) and then not Complement_Is_Empty (Covered)
+               if not Others_Seen and then not Complement_Is_Empty (Covered)
                then
                   Error_Msg_N ("not all values are covered", N);
                end if;
@@ -3581,7 +3590,7 @@ package body Sem_Case is
 
             --  Hold on, maybe it isn't a complete mess after all.
 
-            if Extensions_Allowed and then Subtyp /= Any_Type then
+            if Core_Extensions_Allowed and then Subtyp /= Any_Type then
                Check_Composite_Case_Selector;
                Check_Case_Pattern_Choices;
             end if;
@@ -3677,6 +3686,7 @@ package body Sem_Case is
                            if not Is_Discrete_Type (E)
                              or else not Has_Static_Predicate (E)
                              or else Has_Dynamic_Predicate_Aspect (E)
+                             or else Has_Ghost_Predicate_Aspect (E)
                            then
                               Bad_Predicated_Subtype_Use
                                 ("cannot use subtype& with non-static "
@@ -3814,7 +3824,7 @@ package body Sem_Case is
               (Choice_Table,
                Bounds_Type,
                Subtyp,
-               Others_Present or else (Choice_Type = Universal_Integer),
+               Others_Present or else Choice_Type = Universal_Integer,
                N);
 
             --  If no others choice we are all done, otherwise we have one more
@@ -3864,7 +3874,7 @@ package body Sem_Case is
    function Is_Case_Choice_Pattern (Expr : Node_Id) return Boolean is
       E : Node_Id := Expr;
    begin
-      if not Extensions_Allowed then
+      if not Core_Extensions_Allowed then
          return False;
       end if;
 

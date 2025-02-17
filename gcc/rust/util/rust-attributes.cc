@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -16,34 +16,66 @@
 // along with GCC; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
+#include "rust-ast-visitor.h"
 #include "rust-system.h"
+#include "rust-session-manager.h"
 #include "rust-attributes.h"
 #include "rust-ast.h"
 #include "rust-ast-full.h"
 #include "rust-diagnostics.h"
+#include "rust-unicode.h"
+#include "rust-attribute-values.h"
 
 namespace Rust {
 namespace Analysis {
 
+bool
+Attributes::is_known (const std::string &attribute_path)
+{
+  const auto &lookup
+    = BuiltinAttributeMappings::get ()->lookup_builtin (attribute_path);
+
+  return !lookup.is_error ();
+}
+
+using Attrs = Values::Attributes;
+
 // https://doc.rust-lang.org/stable/nightly-rustc/src/rustc_feature/builtin_attrs.rs.html#248
 static const BuiltinAttrDefinition __definitions[]
-  = {{"inline", CODE_GENERATION},
-     {"cold", CODE_GENERATION},
-     {"cfg", EXPANSION},
-     {"cfg_attr", EXPANSION},
-     {"deprecated", STATIC_ANALYSIS},
-     {"allow", STATIC_ANALYSIS},
-     {"doc", HIR_LOWERING},
-     {"must_use", STATIC_ANALYSIS},
-     {"lang", HIR_LOWERING},
-     {"link_section", CODE_GENERATION},
-     {"no_mangle", CODE_GENERATION},
-     {"repr", CODE_GENERATION},
-     {"path", EXPANSION},
-     {"macro_use", NAME_RESOLUTION},
+  = {{Attrs::INLINE, CODE_GENERATION},
+     {Attrs::COLD, CODE_GENERATION},
+     {Attrs::CFG, EXPANSION},
+     {Attrs::CFG_ATTR, EXPANSION},
+     {Attrs::DERIVE_ATTR, EXPANSION},
+     {Attrs::DEPRECATED, STATIC_ANALYSIS},
+     {Attrs::ALLOW, STATIC_ANALYSIS},
+     {Attrs::ALLOW_INTERNAL_UNSTABLE, STATIC_ANALYSIS},
+     {Attrs::DOC, HIR_LOWERING},
+     {Attrs::MUST_USE, STATIC_ANALYSIS},
+     {Attrs::LANG, HIR_LOWERING},
+     {Attrs::LINK_SECTION, CODE_GENERATION},
+     {Attrs::NO_MANGLE, CODE_GENERATION},
+     {Attrs::REPR, CODE_GENERATION},
+     {Attrs::RUSTC_BUILTIN_MACRO, EXPANSION},
+     {Attrs::PATH, EXPANSION},
+     {Attrs::MACRO_USE, NAME_RESOLUTION},
+     {Attrs::MACRO_EXPORT, NAME_RESOLUTION},
+     {Attrs::PROC_MACRO, EXPANSION},
+     {Attrs::PROC_MACRO_DERIVE, EXPANSION},
+     {Attrs::PROC_MACRO_ATTRIBUTE, EXPANSION},
+     // FIXME: This is not implemented yet, see
+     // https://github.com/Rust-GCC/gccrs/issues/1475
+     {Attrs::TARGET_FEATURE, CODE_GENERATION},
      // From now on, these are reserved by the compiler and gated through
      // #![feature(rustc_attrs)]
-     {"rustc_inherit_overflow_checks", CODE_GENERATION}};
+     {Attrs::RUSTC_DEPRECATED, STATIC_ANALYSIS},
+     {Attrs::RUSTC_INHERIT_OVERFLOW_CHECKS, CODE_GENERATION},
+     {Attrs::STABLE, STATIC_ANALYSIS},
+     {Attrs::UNSTABLE, STATIC_ANALYSIS},
+     // assuming we keep these for static analysis
+     {Attrs::RUSTC_CONST_STABLE, STATIC_ANALYSIS},
+     {Attrs::RUSTC_CONST_UNSTABLE, STATIC_ANALYSIS},
+     {Attrs::PRELUDE_IMPORT, NAME_RESOLUTION}};
 
 BuiltinAttributeMappings *
 BuiltinAttributeMappings::get ()
@@ -80,6 +112,12 @@ AttributeChecker::AttributeChecker () {}
 void
 AttributeChecker::go (AST::Crate &crate)
 {
+  visit (crate);
+}
+
+void
+AttributeChecker::visit (AST::Crate &crate)
+{
   check_attributes (crate.get_inner_attrs ());
 
   for (auto &item : crate.items)
@@ -111,7 +149,7 @@ is_builtin (const AST::Attribute &attribute, BuiltinAttrDefinition &builtin)
  * characters.
  */
 static void
-check_doc_alias (const std::string &alias_input, const Location &locus)
+check_doc_alias (const std::string &alias_input, const location_t locus)
 {
   // FIXME: The locus here is for the whole attribute. Can we get the locus
   // of the alias input instead?
@@ -158,6 +196,7 @@ check_doc_attribute (const AST::Attribute &attribute)
   switch (attribute.get_attr_input ().get_attr_input_type ())
     {
     case AST::AttrInput::LITERAL:
+    case AST::AttrInput::MACRO:
     case AST::AttrInput::META_ITEM:
       break;
       // FIXME: Handle them as well
@@ -177,12 +216,57 @@ check_doc_attribute (const AST::Attribute &attribute)
 		      ->get_name_value_pair ();
 
 		// FIXME: Check for other stuff than #[doc(alias = ...)]
-		if (name_value.first == "alias")
+		if (name_value.first.as_string () == "alias")
 		  check_doc_alias (name_value.second, attribute.get_locus ());
 	      }
 	  }
 	break;
       }
+    }
+}
+
+static bool
+is_proc_macro_type (const AST::Attribute &attribute)
+{
+  BuiltinAttrDefinition result;
+  if (!is_builtin (attribute, result))
+    return false;
+
+  auto name = result.name;
+  return name == Attrs::PROC_MACRO || name == Attrs::PROC_MACRO_DERIVE
+	 || name == Attrs::PROC_MACRO_ATTRIBUTE;
+}
+
+// Emit an error when one encountered attribute is either #[proc_macro],
+// #[proc_macro_attribute] or #[proc_macro_derive]
+static void
+check_proc_macro_non_function (const AST::AttrVec &attributes)
+{
+  for (auto &attr : attributes)
+    {
+      if (is_proc_macro_type (attr))
+	rust_error_at (
+	  attr.get_locus (),
+	  "the %<#[%s]%> attribute may only be used on bare functions",
+	  attr.get_path ().get_segments ()[0].as_string ().c_str ());
+    }
+}
+
+// Emit an error when one attribute is either proc_macro, proc_macro_attribute
+// or proc_macro_derive
+static void
+check_proc_macro_non_root (AST::AttrVec attributes, location_t loc)
+{
+  for (auto &attr : attributes)
+    {
+      if (is_proc_macro_type (attr))
+	{
+	  rust_error_at (
+	    loc,
+	    "functions tagged with %<#[%s]%> must currently "
+	    "reside in the root of the crate",
+	    attr.get_path ().get_segments ().at (0).as_string ().c_str ());
+	}
     }
 }
 
@@ -198,7 +282,7 @@ AttributeChecker::check_attribute (const AST::Attribute &attribute)
   // TODO: Add checks here for each builtin attribute
   // TODO: Have an enum of builtins as well, switching on strings is annoying
   // and costly
-  if (result.name == "doc")
+  if (result.name == Attrs::DOC)
     check_doc_attribute (attribute);
 }
 
@@ -210,632 +294,722 @@ AttributeChecker::check_attributes (const AST::AttrVec &attributes)
 }
 
 void
-AttributeChecker::visit (AST::Token &tok)
+AttributeChecker::visit (AST::Token &)
 {}
 
 void
-AttributeChecker::visit (AST::DelimTokenTree &delim_tok_tree)
+AttributeChecker::visit (AST::DelimTokenTree &)
 {}
 
 void
-AttributeChecker::visit (AST::AttrInputMetaItemContainer &input)
+AttributeChecker::visit (AST::AttrInputMetaItemContainer &)
 {}
 
 void
-AttributeChecker::visit (AST::IdentifierExpr &ident_expr)
+AttributeChecker::visit (AST::IdentifierExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::Lifetime &lifetime)
+AttributeChecker::visit (AST::Lifetime &)
 {}
 
 void
-AttributeChecker::visit (AST::LifetimeParam &lifetime_param)
+AttributeChecker::visit (AST::LifetimeParam &)
 {}
 
 void
-AttributeChecker::visit (AST::ConstGenericParam &const_param)
+AttributeChecker::visit (AST::ConstGenericParam &)
 {}
 
 // rust-path.h
 void
-AttributeChecker::visit (AST::PathInExpression &path)
+AttributeChecker::visit (AST::PathInExpression &)
 {}
 
 void
-AttributeChecker::visit (AST::TypePathSegment &segment)
+AttributeChecker::visit (AST::TypePathSegment &)
 {}
 
 void
-AttributeChecker::visit (AST::TypePathSegmentGeneric &segment)
+AttributeChecker::visit (AST::TypePathSegmentGeneric &)
 {}
 
 void
-AttributeChecker::visit (AST::TypePathSegmentFunction &segment)
+AttributeChecker::visit (AST::TypePathSegmentFunction &)
 {}
 
 void
-AttributeChecker::visit (AST::TypePath &path)
+AttributeChecker::visit (AST::TypePath &)
 {}
 
 void
-AttributeChecker::visit (AST::QualifiedPathInExpression &path)
+AttributeChecker::visit (AST::QualifiedPathInExpression &)
 {}
 
 void
-AttributeChecker::visit (AST::QualifiedPathInType &path)
+AttributeChecker::visit (AST::QualifiedPathInType &)
 {}
 
 // rust-expr.h
 void
-AttributeChecker::visit (AST::LiteralExpr &expr)
+AttributeChecker::visit (AST::LiteralExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::AttrInputLiteral &attr_input)
+AttributeChecker::visit (AST::AttrInputLiteral &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaItemLitExpr &meta_item)
+AttributeChecker::visit (AST::AttrInputMacro &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaItemPathLit &meta_item)
+AttributeChecker::visit (AST::MetaItemLitExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::BorrowExpr &expr)
+AttributeChecker::visit (AST::MetaItemPathLit &)
 {}
 
 void
-AttributeChecker::visit (AST::DereferenceExpr &expr)
+AttributeChecker::visit (AST::BorrowExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ErrorPropagationExpr &expr)
+AttributeChecker::visit (AST::DereferenceExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::NegationExpr &expr)
+AttributeChecker::visit (AST::ErrorPropagationExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ArithmeticOrLogicalExpr &expr)
+AttributeChecker::visit (AST::NegationExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ComparisonExpr &expr)
+AttributeChecker::visit (AST::ArithmeticOrLogicalExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::LazyBooleanExpr &expr)
+AttributeChecker::visit (AST::ComparisonExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::TypeCastExpr &expr)
+AttributeChecker::visit (AST::LazyBooleanExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::AssignmentExpr &expr)
+AttributeChecker::visit (AST::TypeCastExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::CompoundAssignmentExpr &expr)
+AttributeChecker::visit (AST::AssignmentExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::GroupedExpr &expr)
+AttributeChecker::visit (AST::CompoundAssignmentExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ArrayElemsValues &elems)
+AttributeChecker::visit (AST::GroupedExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ArrayElemsCopied &elems)
+AttributeChecker::visit (AST::ArrayElemsValues &)
 {}
 
 void
-AttributeChecker::visit (AST::ArrayExpr &expr)
+AttributeChecker::visit (AST::ArrayElemsCopied &)
 {}
 
 void
-AttributeChecker::visit (AST::ArrayIndexExpr &expr)
+AttributeChecker::visit (AST::ArrayExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::TupleExpr &expr)
+AttributeChecker::visit (AST::ArrayIndexExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::TupleIndexExpr &expr)
+AttributeChecker::visit (AST::TupleExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprStruct &expr)
+AttributeChecker::visit (AST::TupleIndexExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprFieldIdentifier &field)
+AttributeChecker::visit (AST::StructExprStruct &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprFieldIdentifierValue &field)
+AttributeChecker::visit (AST::StructExprFieldIdentifier &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprFieldIndexValue &field)
+AttributeChecker::visit (AST::StructExprFieldIdentifierValue &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprStructFields &expr)
+AttributeChecker::visit (AST::StructExprFieldIndexValue &)
 {}
 
 void
-AttributeChecker::visit (AST::StructExprStructBase &expr)
+AttributeChecker::visit (AST::StructExprStructFields &)
 {}
 
 void
-AttributeChecker::visit (AST::CallExpr &expr)
+AttributeChecker::visit (AST::StructExprStructBase &)
 {}
 
 void
-AttributeChecker::visit (AST::MethodCallExpr &expr)
+AttributeChecker::visit (AST::CallExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::FieldAccessExpr &expr)
+AttributeChecker::visit (AST::MethodCallExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ClosureExprInner &expr)
+AttributeChecker::visit (AST::FieldAccessExpr &)
+{}
+
+void
+AttributeChecker::visit (AST::ClosureExprInner &)
 {}
 
 void
 AttributeChecker::visit (AST::BlockExpr &expr)
+{
+  for (auto &stmt : expr.get_statements ())
+    {
+      if (stmt->get_stmt_kind () == AST::Stmt::Kind::Item)
+	{
+	  // Non owning pointer, let it go out of scope
+	  auto item = static_cast<AST::Item *> (stmt.get ());
+	  check_proc_macro_non_root (item->get_outer_attrs (),
+				     item->get_locus ());
+	}
+    }
+  AST::DefaultASTVisitor::visit (expr);
+}
+
+void
+AttributeChecker::visit (AST::ClosureExprInnerTyped &)
 {}
 
 void
-AttributeChecker::visit (AST::ClosureExprInnerTyped &expr)
+AttributeChecker::visit (AST::ContinueExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ContinueExpr &expr)
+AttributeChecker::visit (AST::BreakExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::BreakExpr &expr)
+AttributeChecker::visit (AST::RangeFromToExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeFromToExpr &expr)
+AttributeChecker::visit (AST::RangeFromExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeFromExpr &expr)
+AttributeChecker::visit (AST::RangeToExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeToExpr &expr)
+AttributeChecker::visit (AST::RangeFullExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeFullExpr &expr)
+AttributeChecker::visit (AST::RangeFromToInclExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeFromToInclExpr &expr)
+AttributeChecker::visit (AST::RangeToInclExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::RangeToInclExpr &expr)
+AttributeChecker::visit (AST::ReturnExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ReturnExpr &expr)
+AttributeChecker::visit (AST::LoopExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::UnsafeBlockExpr &expr)
+AttributeChecker::visit (AST::WhileLoopExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::LoopExpr &expr)
+AttributeChecker::visit (AST::WhileLetLoopExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::WhileLoopExpr &expr)
+AttributeChecker::visit (AST::ForLoopExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::WhileLetLoopExpr &expr)
+AttributeChecker::visit (AST::IfExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::ForLoopExpr &expr)
+AttributeChecker::visit (AST::IfExprConseqElse &)
 {}
 
 void
-AttributeChecker::visit (AST::IfExpr &expr)
+AttributeChecker::visit (AST::IfLetExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::IfExprConseqElse &expr)
+AttributeChecker::visit (AST::IfLetExprConseqElse &)
 {}
 
 void
-AttributeChecker::visit (AST::IfExprConseqIf &expr)
+AttributeChecker::visit (AST::MatchExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::IfExprConseqIfLet &expr)
+AttributeChecker::visit (AST::AwaitExpr &)
 {}
 
 void
-AttributeChecker::visit (AST::IfLetExpr &expr)
-{}
-
-void
-AttributeChecker::visit (AST::IfLetExprConseqElse &expr)
-{}
-
-void
-AttributeChecker::visit (AST::IfLetExprConseqIf &expr)
-{}
-
-void
-AttributeChecker::visit (AST::IfLetExprConseqIfLet &expr)
-{}
-
-void
-AttributeChecker::visit (AST::MatchExpr &expr)
-{}
-
-void
-AttributeChecker::visit (AST::AwaitExpr &expr)
-{}
-
-void
-AttributeChecker::visit (AST::AsyncBlockExpr &expr)
+AttributeChecker::visit (AST::AsyncBlockExpr &)
 {}
 
 // rust-item.h
 void
-AttributeChecker::visit (AST::TypeParam &param)
+AttributeChecker::visit (AST::TypeParam &)
 {}
 
 void
-AttributeChecker::visit (AST::LifetimeWhereClauseItem &item)
+AttributeChecker::visit (AST::LifetimeWhereClauseItem &)
 {}
 
 void
-AttributeChecker::visit (AST::TypeBoundWhereClauseItem &item)
-{}
-
-void
-AttributeChecker::visit (AST::Method &method)
+AttributeChecker::visit (AST::TypeBoundWhereClauseItem &)
 {}
 
 void
 AttributeChecker::visit (AST::Module &module)
-{}
+{
+  check_proc_macro_non_function (module.get_outer_attrs ());
+  for (auto &item : module.get_items ())
+    {
+      check_proc_macro_non_root (item->get_outer_attrs (), item->get_locus ());
+    }
+  AST::DefaultASTVisitor::visit (module);
+}
 
 void
 AttributeChecker::visit (AST::ExternCrate &crate)
+{
+  check_proc_macro_non_function (crate.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::UseTreeGlob &)
 {}
 
 void
-AttributeChecker::visit (AST::UseTreeGlob &use_tree)
+AttributeChecker::visit (AST::UseTreeList &)
 {}
 
 void
-AttributeChecker::visit (AST::UseTreeList &use_tree)
+AttributeChecker::visit (AST::UseTreeRebind &)
 {}
 
 void
-AttributeChecker::visit (AST::UseTreeRebind &use_tree)
-{}
+AttributeChecker::visit (AST::UseDeclaration &declaration)
+{
+  check_proc_macro_non_function (declaration.get_outer_attrs ());
+}
+
+static void
+check_no_mangle_function (const AST::Attribute &attribute,
+			  const AST::Function &fun)
+{
+  if (attribute.has_attr_input ())
+    {
+      rust_error_at (attribute.get_locus (), ErrorCode::E0754,
+		     "malformed %<no_mangle%> attribute input");
+      rust_inform (attribute.get_locus (),
+		   "must be of the form: %<#[no_mangle]%>");
+    }
+  if (!is_ascii_only (fun.get_function_name ().as_string ()))
+    rust_error_at (fun.get_function_name ().get_locus (),
+		   "the %<#[no_mangle]%> attribute requires ASCII identifier");
+}
 
 void
-AttributeChecker::visit (AST::UseDeclaration &use_decl)
-{}
+AttributeChecker::visit (AST::Function &fun)
+{
+  auto check_crate_type = [] (const char *name, AST::Attribute &attribute) {
+    if (!Session::get_instance ().options.is_proc_macro ())
+      rust_error_at (attribute.get_locus (),
+		     "the %<#[%s]%> attribute is only usable with crates of "
+		     "the %<proc-macro%> crate type",
+		     name);
+  };
+
+  BuiltinAttrDefinition result;
+  for (auto &attribute : fun.get_outer_attrs ())
+    {
+      if (!is_builtin (attribute, result))
+	return;
+
+      auto name = result.name.c_str ();
+
+      if (result.name == Attrs::PROC_MACRO_DERIVE)
+	{
+	  if (!attribute.has_attr_input ())
+	    {
+	      rust_error_at (attribute.get_locus (),
+			     "malformed %<%s%> attribute input", name);
+	      rust_inform (
+		attribute.get_locus (),
+		"must be of the form: %<#[proc_macro_derive(TraitName, "
+		"/*opt*/ attributes(name1, name2, ...))]%>");
+	    }
+	  check_crate_type (name, attribute);
+	}
+      else if (result.name == Attrs::PROC_MACRO
+	       || result.name == Attrs::PROC_MACRO_ATTRIBUTE)
+	{
+	  check_crate_type (name, attribute);
+	}
+      else if (result.name == "no_mangle")
+	check_no_mangle_function (attribute, fun);
+    }
+  if (fun.has_body ())
+    fun.get_definition ().value ()->accept_vis (*this);
+}
 
 void
-AttributeChecker::visit (AST::Function &function)
-{}
-
-void
-AttributeChecker::visit (AST::TypeAlias &type_alias)
-{}
+AttributeChecker::visit (AST::TypeAlias &alias)
+{
+  check_proc_macro_non_function (alias.get_outer_attrs ());
+}
 
 void
 AttributeChecker::visit (AST::StructStruct &struct_item)
 {
   check_attributes (struct_item.get_outer_attrs ());
+  check_proc_macro_non_function (struct_item.get_outer_attrs ());
 }
 
 void
-AttributeChecker::visit (AST::TupleStruct &tuple_struct)
+AttributeChecker::visit (AST::TupleStruct &tuplestruct)
+{
+  check_proc_macro_non_function (tuplestruct.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::EnumItem &)
 {}
 
 void
-AttributeChecker::visit (AST::EnumItem &item)
+AttributeChecker::visit (AST::EnumItemTuple &)
 {}
 
 void
-AttributeChecker::visit (AST::EnumItemTuple &item)
+AttributeChecker::visit (AST::EnumItemStruct &)
 {}
 
 void
-AttributeChecker::visit (AST::EnumItemStruct &item)
+AttributeChecker::visit (AST::EnumItemDiscriminant &)
 {}
 
 void
-AttributeChecker::visit (AST::EnumItemDiscriminant &item)
+AttributeChecker::visit (AST::Enum &enumeration)
+{
+  check_proc_macro_non_function (enumeration.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::Union &u)
+{
+  check_proc_macro_non_function (u.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::ConstantItem &item)
+{
+  check_proc_macro_non_function (item.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::StaticItem &item)
+{
+  check_proc_macro_non_function (item.get_outer_attrs ());
+}
+
+void
+AttributeChecker::visit (AST::TraitItemConst &)
 {}
 
 void
-AttributeChecker::visit (AST::Enum &enum_item)
-{}
-
-void
-AttributeChecker::visit (AST::Union &union_item)
-{}
-
-void
-AttributeChecker::visit (AST::ConstantItem &const_item)
-{}
-
-void
-AttributeChecker::visit (AST::StaticItem &static_item)
-{}
-
-void
-AttributeChecker::visit (AST::TraitItemFunc &item)
-{}
-
-void
-AttributeChecker::visit (AST::TraitItemMethod &item)
-{}
-
-void
-AttributeChecker::visit (AST::TraitItemConst &item)
-{}
-
-void
-AttributeChecker::visit (AST::TraitItemType &item)
+AttributeChecker::visit (AST::TraitItemType &)
 {}
 
 void
 AttributeChecker::visit (AST::Trait &trait)
-{}
+{
+  check_proc_macro_non_function (trait.get_outer_attrs ());
+}
 
 void
 AttributeChecker::visit (AST::InherentImpl &impl)
-{}
+{
+  check_proc_macro_non_function (impl.get_outer_attrs ());
+  AST::DefaultASTVisitor::visit (impl);
+}
 
 void
 AttributeChecker::visit (AST::TraitImpl &impl)
+{
+  check_proc_macro_non_function (impl.get_outer_attrs ());
+  AST::DefaultASTVisitor::visit (impl);
+}
+
+void
+AttributeChecker::visit (AST::ExternalTypeItem &)
 {}
 
 void
-AttributeChecker::visit (AST::ExternalStaticItem &item)
-{}
-
-void
-AttributeChecker::visit (AST::ExternalFunctionItem &item)
+AttributeChecker::visit (AST::ExternalStaticItem &)
 {}
 
 void
 AttributeChecker::visit (AST::ExternBlock &block)
-{}
+{
+  check_proc_macro_non_function (block.get_outer_attrs ());
+}
 
 // rust-macro.h
 void
-AttributeChecker::visit (AST::MacroMatchFragment &match)
+AttributeChecker::visit (AST::MacroMatchFragment &)
 {}
 
 void
-AttributeChecker::visit (AST::MacroMatchRepetition &match)
+AttributeChecker::visit (AST::MacroMatchRepetition &)
 {}
 
 void
-AttributeChecker::visit (AST::MacroMatcher &matcher)
+AttributeChecker::visit (AST::MacroMatcher &)
 {}
 
 void
-AttributeChecker::visit (AST::MacroRulesDefinition &rules_def)
+AttributeChecker::visit (AST::MacroRulesDefinition &)
 {}
 
 void
-AttributeChecker::visit (AST::MacroInvocation &macro_invoc)
+AttributeChecker::visit (AST::MacroInvocation &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaItemPath &meta_item)
+AttributeChecker::visit (AST::MetaItemPath &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaItemSeq &meta_item)
+AttributeChecker::visit (AST::MetaItemSeq &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaWord &meta_item)
+AttributeChecker::visit (AST::MetaWord &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaNameValueStr &meta_item)
+AttributeChecker::visit (AST::MetaNameValueStr &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaListPaths &meta_item)
+AttributeChecker::visit (AST::MetaListPaths &)
 {}
 
 void
-AttributeChecker::visit (AST::MetaListNameValueStr &meta_item)
+AttributeChecker::visit (AST::MetaListNameValueStr &)
 {}
 
 // rust-pattern.h
 void
-AttributeChecker::visit (AST::LiteralPattern &pattern)
+AttributeChecker::visit (AST::LiteralPattern &)
 {}
 
 void
-AttributeChecker::visit (AST::IdentifierPattern &pattern)
+AttributeChecker::visit (AST::IdentifierPattern &)
 {}
 
 void
-AttributeChecker::visit (AST::WildcardPattern &pattern)
-{}
-
-// void AttributeChecker::visit(RangePatternBound& bound){}
-
-void
-AttributeChecker::visit (AST::RangePatternBoundLiteral &bound)
+AttributeChecker::visit (AST::WildcardPattern &)
 {}
 
 void
-AttributeChecker::visit (AST::RangePatternBoundPath &bound)
+AttributeChecker::visit (AST::RestPattern &)
+{}
+
+// void AttributeChecker::visit(RangePatternBound& ){}
+
+void
+AttributeChecker::visit (AST::RangePatternBoundLiteral &)
 {}
 
 void
-AttributeChecker::visit (AST::RangePatternBoundQualPath &bound)
+AttributeChecker::visit (AST::RangePatternBoundPath &)
 {}
 
 void
-AttributeChecker::visit (AST::RangePattern &pattern)
+AttributeChecker::visit (AST::RangePatternBoundQualPath &)
 {}
 
 void
-AttributeChecker::visit (AST::ReferencePattern &pattern)
-{}
-
-// void AttributeChecker::visit(StructPatternField& field){}
-
-void
-AttributeChecker::visit (AST::StructPatternFieldTuplePat &field)
+AttributeChecker::visit (AST::RangePattern &)
 {}
 
 void
-AttributeChecker::visit (AST::StructPatternFieldIdentPat &field)
+AttributeChecker::visit (AST::ReferencePattern &)
+{}
+
+// void AttributeChecker::visit(StructPatternField& ){}
+
+void
+AttributeChecker::visit (AST::StructPatternFieldTuplePat &)
 {}
 
 void
-AttributeChecker::visit (AST::StructPatternFieldIdent &field)
+AttributeChecker::visit (AST::StructPatternFieldIdentPat &)
 {}
 
 void
-AttributeChecker::visit (AST::StructPattern &pattern)
-{}
-
-// void AttributeChecker::visit(TupleStructItems& tuple_items){}
-
-void
-AttributeChecker::visit (AST::TupleStructItemsNoRange &tuple_items)
+AttributeChecker::visit (AST::StructPatternFieldIdent &)
 {}
 
 void
-AttributeChecker::visit (AST::TupleStructItemsRange &tuple_items)
+AttributeChecker::visit (AST::StructPattern &)
+{}
+
+// void AttributeChecker::visit(TupleStructItems& ){}
+
+void
+AttributeChecker::visit (AST::TupleStructItemsNoRange &)
 {}
 
 void
-AttributeChecker::visit (AST::TupleStructPattern &pattern)
-{}
-
-// void AttributeChecker::visit(TuplePatternItems& tuple_items){}
-
-void
-AttributeChecker::visit (AST::TuplePatternItemsMultiple &tuple_items)
+AttributeChecker::visit (AST::TupleStructItemsRange &)
 {}
 
 void
-AttributeChecker::visit (AST::TuplePatternItemsRanged &tuple_items)
+AttributeChecker::visit (AST::TupleStructPattern &)
+{}
+
+// void AttributeChecker::visit(TuplePatternItems& ){}
+
+void
+AttributeChecker::visit (AST::TuplePatternItemsMultiple &)
 {}
 
 void
-AttributeChecker::visit (AST::TuplePattern &pattern)
+AttributeChecker::visit (AST::TuplePatternItemsRanged &)
 {}
 
 void
-AttributeChecker::visit (AST::GroupedPattern &pattern)
+AttributeChecker::visit (AST::TuplePattern &)
 {}
 
 void
-AttributeChecker::visit (AST::SlicePattern &pattern)
+AttributeChecker::visit (AST::GroupedPattern &)
+{}
+
+void
+AttributeChecker::visit (AST::SlicePattern &)
+{}
+
+void
+AttributeChecker::visit (AST::AltPattern &)
 {}
 
 // rust-stmt.h
 void
-AttributeChecker::visit (AST::EmptyStmt &stmt)
+AttributeChecker::visit (AST::EmptyStmt &)
 {}
 
 void
-AttributeChecker::visit (AST::LetStmt &stmt)
+AttributeChecker::visit (AST::LetStmt &)
 {}
 
 void
-AttributeChecker::visit (AST::ExprStmtWithoutBlock &stmt)
-{}
-
-void
-AttributeChecker::visit (AST::ExprStmtWithBlock &stmt)
+AttributeChecker::visit (AST::ExprStmt &)
 {}
 
 // rust-type.h
 void
-AttributeChecker::visit (AST::TraitBound &bound)
+AttributeChecker::visit (AST::TraitBound &)
 {}
 
 void
-AttributeChecker::visit (AST::ImplTraitType &type)
+AttributeChecker::visit (AST::ImplTraitType &)
 {}
 
 void
-AttributeChecker::visit (AST::TraitObjectType &type)
+AttributeChecker::visit (AST::TraitObjectType &)
 {}
 
 void
-AttributeChecker::visit (AST::ParenthesisedType &type)
+AttributeChecker::visit (AST::ParenthesisedType &)
 {}
 
 void
-AttributeChecker::visit (AST::ImplTraitTypeOneBound &type)
+AttributeChecker::visit (AST::ImplTraitTypeOneBound &)
 {}
 
 void
-AttributeChecker::visit (AST::TraitObjectTypeOneBound &type)
+AttributeChecker::visit (AST::TraitObjectTypeOneBound &)
 {}
 
 void
-AttributeChecker::visit (AST::TupleType &type)
+AttributeChecker::visit (AST::TupleType &)
 {}
 
 void
-AttributeChecker::visit (AST::NeverType &type)
+AttributeChecker::visit (AST::NeverType &)
 {}
 
 void
-AttributeChecker::visit (AST::RawPointerType &type)
+AttributeChecker::visit (AST::RawPointerType &)
 {}
 
 void
-AttributeChecker::visit (AST::ReferenceType &type)
+AttributeChecker::visit (AST::ReferenceType &)
 {}
 
 void
-AttributeChecker::visit (AST::ArrayType &type)
+AttributeChecker::visit (AST::ArrayType &)
 {}
 
 void
-AttributeChecker::visit (AST::SliceType &type)
+AttributeChecker::visit (AST::SliceType &)
 {}
 
 void
-AttributeChecker::visit (AST::InferredType &type)
+AttributeChecker::visit (AST::InferredType &)
 {}
 
 void
-AttributeChecker::visit (AST::BareFunctionType &type)
+AttributeChecker::visit (AST::BareFunctionType &)
+{}
+
+void
+AttributeChecker::visit (AST::SelfParam &)
+{}
+
+void
+AttributeChecker::visit (AST::VariadicParam &)
+{}
+
+void
+AttributeChecker::visit (AST::FunctionParam &)
 {}
 
 } // namespace Analysis

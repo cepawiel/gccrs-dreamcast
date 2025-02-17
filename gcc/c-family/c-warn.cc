@@ -1,5 +1,5 @@
 /* Diagnostic routines shared by all languages that are variants of C.
-   Copyright (C) 1992-2022 Free Software Foundation, Inc.
+   Copyright (C) 1992-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -39,6 +39,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "calls.h"
 #include "stor-layout.h"
 #include "tree-pretty-print.h"
+#include "langhooks.h"
 
 /* Print a warning if a constant expression had overflow in folding.
    Invoke this function on every expression that the language
@@ -1226,7 +1227,7 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
 	  {
 	    bool cstresult
 	      = (result
-		 && TREE_CODE_CLASS (TREE_CODE (result)) == tcc_constant);
+		 && CONSTANT_CLASS_P (result));
 	    if (TYPE_UNSIGNED (type))
 	      {
 		if (cstresult)
@@ -1254,7 +1255,7 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
 			      expr_type, type, expr);
 	      }
 	  }
-	else if (TREE_CODE_CLASS (TREE_CODE (result)) == tcc_constant)
+	else if (CONSTANT_CLASS_P (result))
 	  warning_at (loc, warnopt,
 		      "conversion from %qT to %qT changes value from %qE to %qE",
 		      expr_type, type, expr, result);
@@ -1305,8 +1306,10 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
       }
 
     case BIT_AND_EXPR:
-      if (TREE_CODE (expr_type) == INTEGER_TYPE
-	  && TREE_CODE (type) == INTEGER_TYPE)
+      if ((TREE_CODE (expr_type) == INTEGER_TYPE
+	   || TREE_CODE (expr_type) == BITINT_TYPE)
+	  && (TREE_CODE (type) == INTEGER_TYPE
+	      || TREE_CODE (type) == BITINT_TYPE))
 	for (int i = 0; i < 2; ++i)
 	  {
 	    tree op = TREE_OPERAND (expr, i);
@@ -1347,9 +1350,7 @@ conversion_warning (location_t loc, tree type, tree expr, tree result)
 	  break;
 
 	if (arith_ops
-	    && global_dc->option_enabled (warnopt,
-					  global_dc->lang_mask,
-					  global_dc->option_state))
+	    && global_dc->option_enabled_p (warnopt))
 	  {
 	    for (int i = 0; i < arith_ops; ++i)
 	      {
@@ -1403,7 +1404,7 @@ warnings_for_convert_and_check (location_t loc, tree type, tree expr,
   while (TREE_CODE (result) == COMPOUND_EXPR)
     result = TREE_OPERAND (result, 1);
 
-  bool cst = TREE_CODE_CLASS (TREE_CODE (result)) == tcc_constant;
+  bool cst = CONSTANT_CLASS_P (result);
   tree exprtype = TREE_TYPE (expr);
   tree result_diag;
   /* We're interested in the actual numerical value here, not its ASCII
@@ -1415,6 +1416,7 @@ warnings_for_convert_and_check (location_t loc, tree type, tree expr,
 
   if (TREE_CODE (expr) == INTEGER_CST
       && (TREE_CODE (type) == INTEGER_TYPE
+	  || TREE_CODE (type) == BITINT_TYPE
 	  || (TREE_CODE (type) == ENUMERAL_TYPE
 	      && TREE_CODE (ENUM_UNDERLYING_TYPE (type)) != BOOLEAN_TYPE))
       && !int_fits_type_p (expr, type))
@@ -1465,9 +1467,10 @@ warnings_for_convert_and_check (location_t loc, tree type, tree expr,
 	}
       /* No warning for converting 0x80000000 to int.  */
       else if (pedantic
-	       && (TREE_CODE (exprtype) != INTEGER_TYPE
-		   || TYPE_PRECISION (exprtype)
-		   != TYPE_PRECISION (type)))
+	       && ((TREE_CODE (exprtype) != INTEGER_TYPE
+		    && TREE_CODE (exprtype) != BITINT_TYPE)
+		   || (TYPE_PRECISION (exprtype)
+		       != TYPE_PRECISION (type))))
 	{
 	  if (cst)
 	    warning_at (loc, OPT_Woverflow,
@@ -1512,13 +1515,15 @@ match_case_to_enum_1 (tree key, tree type, tree label)
     return;
 
   char buf[WIDE_INT_PRINT_BUFFER_SIZE];
+  wide_int w = wi::to_wide (key);
 
+  gcc_assert (w.get_precision () <= WIDE_INT_MAX_INL_PRECISION);
   if (tree_fits_uhwi_p (key))
-    print_dec (wi::to_wide (key), buf, UNSIGNED);
+    print_dec (w, buf, UNSIGNED);
   else if (tree_fits_shwi_p (key))
-    print_dec (wi::to_wide (key), buf, SIGNED);
+    print_dec (w, buf, SIGNED);
   else
-    print_hex (wi::to_wide (key), buf);
+    print_hex (w, buf);
 
   if (TYPE_NAME (type) == NULL_TREE)
     warning_at (DECL_SOURCE_LOCATION (CASE_LABEL (label)),
@@ -2258,6 +2263,76 @@ warn_for_memset (location_t loc, tree arg0, tree arg2,
     }
 }
 
+/* Warn for calloc (sizeof (X), n).  */
+
+void
+warn_for_calloc (location_t *sizeof_arg_loc, tree callee,
+		 vec<tree, va_gc> *params, tree *sizeof_arg, tree attr)
+{
+  if (!TREE_VALUE (attr) || !TREE_CHAIN (TREE_VALUE (attr)))
+    return;
+
+  int arg1 = TREE_INT_CST_LOW (TREE_VALUE (TREE_VALUE (attr))) - 1;
+  int arg2
+    = TREE_INT_CST_LOW (TREE_VALUE (TREE_CHAIN (TREE_VALUE (attr)))) - 1;
+  if (arg1 < 0
+      || (unsigned) arg1 >= vec_safe_length (params)
+      || arg1 >= 6
+      || arg2 < 0
+      || (unsigned) arg2 >= vec_safe_length (params)
+      || arg2 >= 6
+      || arg1 >= arg2)
+    return;
+
+  if (sizeof_arg[arg1] == NULL_TREE || sizeof_arg[arg2] != NULL_TREE)
+    return;
+
+  if (warning_at (sizeof_arg_loc[arg1], OPT_Wcalloc_transposed_args,
+		  "%qD sizes specified with %<sizeof%> in the earlier "
+		  "argument and not in the later argument", callee))
+    inform (sizeof_arg_loc[arg1], "earlier argument should specify number "
+	    "of elements, later size of each element");
+}
+
+/* Warn for allocator calls where the constant allocated size is smaller
+   than sizeof (TYPE).  */
+
+void
+warn_for_alloc_size (location_t loc, tree type, tree call, tree alloc_size)
+{
+  if (!TREE_VALUE (alloc_size))
+    return;
+
+  tree arg1 = TREE_VALUE (TREE_VALUE (alloc_size));
+  int idx1 = TREE_INT_CST_LOW (arg1) - 1;
+  if (idx1 < 0 || idx1 >= call_expr_nargs (call))
+    return;
+  arg1 = CALL_EXPR_ARG (call, idx1);
+  if (TREE_CODE (arg1) != INTEGER_CST)
+    return;
+  if (TREE_CHAIN (TREE_VALUE (alloc_size)))
+    {
+      tree arg2 = TREE_VALUE (TREE_CHAIN (TREE_VALUE (alloc_size)));
+      int idx2 = TREE_INT_CST_LOW (arg2) - 1;
+      if (idx2 < 0 || idx2 >= call_expr_nargs (call))
+	return;
+      arg2 = CALL_EXPR_ARG (call, idx2);
+      if (TREE_CODE (arg2) != INTEGER_CST)
+	return;
+      arg1 = int_const_binop (MULT_EXPR, fold_convert (sizetype, arg1),
+			      fold_convert (sizetype, arg2));
+      if (TREE_CODE (arg1) != INTEGER_CST)
+	return;
+    }
+  if (!VOID_TYPE_P (type)
+      && TYPE_SIZE_UNIT (type)
+      && TREE_CODE (TYPE_SIZE_UNIT (type)) == INTEGER_CST
+      && tree_int_cst_lt (arg1, TYPE_SIZE_UNIT (type)))
+    warning_at (loc, OPT_Walloc_size,
+		"allocation of insufficient size %qE for type %qT with "
+		"size %qE", arg1, type, TYPE_SIZE_UNIT (type));
+}
+
 /* Subroutine of build_binary_op. Give warnings for comparisons
    between signed and unsigned quantities that may fail. Do the
    checking based on the original operand trees ORIG_OP0 and ORIG_OP1,
@@ -2344,42 +2419,63 @@ warn_for_sign_compare (location_t location,
      have all bits set that are set in the ~ operand when it is
      extended.  */
 
-  op0 = c_common_get_narrower (op0, &unsignedp0);
-  op1 = c_common_get_narrower (op1, &unsignedp1);
+  /* bits0 is the bit index of op0 extended to result_type, which will
+     be always 0 and so all bits above it.  If there is a BIT_NOT_EXPR
+     in that operand possibly sign or zero extended to op0 and then
+     possibly further sign or zero extended to result_type, bits0 will
+     be the precision of result type if all the extensions involved
+     if any are sign extensions, and will be the place of the innermost
+     zero extension otherwise.  We warn only if BIT_NOT_EXPR's operand is
+     zero extended from some even smaller precision, in that case after
+     BIT_NOT_EXPR some bits below bits0 will be guaranteed to be set.
+     Similarly for bits1.  */
+  int bits0 = TYPE_PRECISION (result_type);
+  if (TYPE_UNSIGNED (TREE_TYPE (op0)))
+    bits0 = TYPE_PRECISION (TREE_TYPE (op0));
+  tree arg0 = c_common_get_narrower (op0, &unsignedp0);
+  if (TYPE_PRECISION (TREE_TYPE (arg0)) == TYPE_PRECISION (TREE_TYPE (op0)))
+    unsignedp0 = TYPE_UNSIGNED (TREE_TYPE (op0));
+  else if (unsignedp0)
+    bits0 = TYPE_PRECISION (TREE_TYPE (arg0));
+  op0 = arg0;
+  int bits1 = TYPE_PRECISION (result_type);
+  if (TYPE_UNSIGNED (TREE_TYPE (op1)))
+    bits1 = TYPE_PRECISION (TREE_TYPE (op1));
+  tree arg1 = c_common_get_narrower (op1, &unsignedp1);
+  if (TYPE_PRECISION (TREE_TYPE (arg1)) == TYPE_PRECISION (TREE_TYPE (op1)))
+    unsignedp1 = TYPE_UNSIGNED (TREE_TYPE (op1));
+  else if (unsignedp1)
+    bits1 = TYPE_PRECISION (TREE_TYPE (arg1));
+  op1 = arg1;
 
   if ((TREE_CODE (op0) == BIT_NOT_EXPR)
       ^ (TREE_CODE (op1) == BIT_NOT_EXPR))
     {
-      if (TREE_CODE (op0) == BIT_NOT_EXPR)
-	op0 = c_common_get_narrower (TREE_OPERAND (op0, 0), &unsignedp0);
       if (TREE_CODE (op1) == BIT_NOT_EXPR)
-	op1 = c_common_get_narrower (TREE_OPERAND (op1, 0), &unsignedp1);
-
-      if (tree_fits_shwi_p (op0) || tree_fits_shwi_p (op1))
 	{
-	  tree primop;
-	  HOST_WIDE_INT constant, mask;
-	  int unsignedp;
-	  unsigned int bits;
+	  std::swap (op0, op1);
+	  std::swap (unsignedp0, unsignedp1);
+	  std::swap (bits0, bits1);
+	}
 
-	  if (tree_fits_shwi_p (op0))
-	    {
-	      primop = op1;
-	      unsignedp = unsignedp1;
-	      constant = tree_to_shwi (op0);
-	    }
-	  else
-	    {
-	      primop = op0;
-	      unsignedp = unsignedp0;
-	      constant = tree_to_shwi (op1);
-	    }
+      int unsignedp;
+      arg0 = c_common_get_narrower (TREE_OPERAND (op0, 0), &unsignedp);
 
-	  bits = TYPE_PRECISION (TREE_TYPE (primop));
-	  if (bits < TYPE_PRECISION (result_type)
-	      && bits < HOST_BITS_PER_LONG && unsignedp)
+      /* For these warnings, we need BIT_NOT_EXPR operand to be
+	 zero extended from narrower type to BIT_NOT_EXPR's type.
+	 In that case, all those bits above the narrower's type
+	 are after BIT_NOT_EXPR set to 1.  */
+      if (tree_fits_shwi_p (op1))
+	{
+	  HOST_WIDE_INT constant = tree_to_shwi (op1);
+	  unsigned int bits = TYPE_PRECISION (TREE_TYPE (arg0));
+	  if (unsignedp
+	      && bits < TYPE_PRECISION (TREE_TYPE (op0))
+	      && bits < HOST_BITS_PER_WIDE_INT)
 	    {
-	      mask = HOST_WIDE_INT_M1U << bits;
+	      HOST_WIDE_INT mask = HOST_WIDE_INT_M1U << bits;
+	      if (bits0 < HOST_BITS_PER_WIDE_INT)
+		mask &= ~(HOST_WIDE_INT_M1U << bits0);
 	      if ((mask & constant) != mask)
 		{
 		  if (constant == 0)
@@ -2393,11 +2489,11 @@ warn_for_sign_compare (location_t location,
 		}
 	    }
 	}
-      else if (unsignedp0 && unsignedp1
-	       && (TYPE_PRECISION (TREE_TYPE (op0))
-		   < TYPE_PRECISION (result_type))
-	       && (TYPE_PRECISION (TREE_TYPE (op1))
-		   < TYPE_PRECISION (result_type)))
+      else if ((TYPE_PRECISION (TREE_TYPE (arg0))
+		< TYPE_PRECISION (TREE_TYPE (op0)))
+	       && unsignedp
+	       && unsignedp1
+	       && TYPE_PRECISION (TREE_TYPE (op1)) < bits0)
 	warning_at (location, OPT_Wsign_compare,
 		    "comparison of promoted bitwise complement "
 		    "of an unsigned value with unsigned");
@@ -2535,7 +2631,7 @@ warn_duplicated_cond_add_or_warn (location_t loc, tree cond, vec<tree> **chain)
   if (*chain == NULL)
     return;
 
-  if (TREE_SIDE_EFFECTS (cond))
+  if (TREE_SIDE_EFFECTS (cond) || instantiation_dependent_expression_p (cond))
     {
       /* Uh-oh!  This condition has a side-effect, thus invalidates
 	 the whole chain.  */
@@ -2615,14 +2711,19 @@ maybe_warn_shift_overflow (location_t loc, tree op0, tree op1)
       || TREE_CODE (op1) != INTEGER_CST)
     return false;
 
-  tree type0 = TREE_TYPE (op0);
+  /* match.pd could have narrowed the left shift already,
+     take type promotion into account.  */
+  tree type0 = lang_hooks.types.type_promotes_to (TREE_TYPE (op0));
   unsigned int prec0 = TYPE_PRECISION (type0);
 
   /* Left-hand operand must be signed.  */
   if (TYPE_OVERFLOW_WRAPS (type0) || cxx_dialect >= cxx20)
     return false;
 
-  unsigned int min_prec = (wi::min_precision (wi::to_wide (op0), SIGNED)
+  signop sign = SIGNED;
+  if (TYPE_PRECISION (TREE_TYPE (op0)) < TYPE_PRECISION (type0))
+    sign = TYPE_SIGN (TREE_TYPE (op0));
+  unsigned int min_prec = (wi::min_precision (wi::to_wide (op0), sign)
 			   + TREE_INT_CST_LOW (op1));
   /* Handle the case of left-shifting 1 into the sign bit.
    * However, shifting 1 _out_ of the sign bit, as in
@@ -2645,7 +2746,8 @@ maybe_warn_shift_overflow (location_t loc, tree op0, tree op1)
     warning_at (loc, OPT_Wshift_overflow_,
 		"result of %qE requires %u bits to represent, "
 		"but %qT only has %u bits",
-		build2_loc (loc, LSHIFT_EXPR, type0, op0, op1),
+		build2_loc (loc, LSHIFT_EXPR, type0,
+			    fold_convert (type0, op0), op1),
 		min_prec, type0, prec0);
 
   return overflowed;
@@ -2917,7 +3019,7 @@ warn_for_multistatement_macros (location_t body_loc, location_t next_loc,
   while (linemap_macro_expansion_map_p (guard_map))
     {
       const line_map_macro *mm = linemap_check_macro (guard_map);
-      guard_loc_exp = MACRO_MAP_EXPANSION_POINT_LOCATION (mm);
+      guard_loc_exp = mm->get_expansion_point_location ();
       guard_map = linemap_lookup (line_table, guard_loc_exp);
       if (guard_map == body_map)
 	return;
@@ -2959,14 +3061,13 @@ check_alignment_of_packed_member (tree type, tree field, bool rvalue)
   return NULL_TREE;
 }
 
-/* Return struct or union type if the right hand value, RHS:
-   1. Is a pointer value which isn't aligned to a pointer type TYPE.
-   2. Is an address which takes the unaligned address of packed member
-      of struct or union when assigning to TYPE.
+/* Return struct or union type if the right hand value, RHS,
+   is an address which takes the unaligned address of packed member
+   of struct or union when assigning to TYPE.
    Otherwise, return NULL_TREE.  */
 
 static tree
-check_address_or_pointer_of_packed_member (tree type, tree rhs)
+check_address_of_packed_member (tree type, tree rhs)
 {
   bool rvalue = true;
   bool indirect = false;
@@ -2988,53 +3089,6 @@ check_address_or_pointer_of_packed_member (tree type, tree rhs)
     return NULL_TREE;
 
   type = TREE_TYPE (type);
-
-  if (TREE_CODE (rhs) == PARM_DECL
-      || VAR_P (rhs)
-      || TREE_CODE (rhs) == CALL_EXPR)
-    {
-      tree rhstype = TREE_TYPE (rhs);
-      if (TREE_CODE (rhs) == CALL_EXPR)
-	{
-	  rhs = CALL_EXPR_FN (rhs);	/* Pointer expression.  */
-	  if (rhs == NULL_TREE)
-	    return NULL_TREE;
-	  rhs = TREE_TYPE (rhs);	/* Pointer type.  */
-	  rhs = TREE_TYPE (rhs);	/* Function type.  */
-	  rhstype = TREE_TYPE (rhs);
-	  if (!rhstype || !POINTER_TYPE_P (rhstype))
-	    return NULL_TREE;
-	  rvalue = true;
-	}
-      if (rvalue && POINTER_TYPE_P (rhstype))
-	rhstype = TREE_TYPE (rhstype);
-      while (TREE_CODE (rhstype) == ARRAY_TYPE)
-	rhstype = TREE_TYPE (rhstype);
-      if (TYPE_PACKED (rhstype))
-	{
-	  unsigned int type_align = min_align_of_type (type);
-	  unsigned int rhs_align = min_align_of_type (rhstype);
-	  if (rhs_align < type_align)
-	    {
-	      auto_diagnostic_group d;
-	      location_t location = EXPR_LOC_OR_LOC (rhs, input_location);
-	      if (warning_at (location, OPT_Waddress_of_packed_member,
-			      "converting a packed %qT pointer (alignment %d) "
-			      "to a %qT pointer (alignment %d) may result in "
-			      "an unaligned pointer value",
-			      rhstype, rhs_align, type, type_align))
-		{
-		  tree decl = TYPE_STUB_DECL (rhstype);
-		  if (decl)
-		    inform (DECL_SOURCE_LOCATION (decl), "defined here");
-		  decl = TYPE_STUB_DECL (type);
-		  if (decl)
-		    inform (DECL_SOURCE_LOCATION (decl), "defined here");
-		}
-	    }
-	}
-      return NULL_TREE;
-    }
 
   tree context = NULL_TREE;
 
@@ -3058,14 +3112,12 @@ check_address_or_pointer_of_packed_member (tree type, tree rhs)
   return context;
 }
 
-/* Check and warn if the right hand value, RHS:
-   1. Is a pointer value which isn't aligned to a pointer type TYPE.
-   2. Is an address which takes the unaligned address of packed member
-      of struct or union when assigning to TYPE.
- */
+/* Check and warn if the right hand value, RHS,
+   is an address which takes the unaligned address of packed member
+   of struct or union when assigning to TYPE.  */
 
 static void
-check_and_warn_address_or_pointer_of_packed_member (tree type, tree rhs)
+check_and_warn_address_of_packed_member (tree type, tree rhs)
 {
   bool nop_p = false;
   tree orig_rhs;
@@ -3083,11 +3135,11 @@ check_and_warn_address_or_pointer_of_packed_member (tree type, tree rhs)
   if (TREE_CODE (rhs) == COND_EXPR)
     {
       /* Check the THEN path.  */
-      check_and_warn_address_or_pointer_of_packed_member
+      check_and_warn_address_of_packed_member
 	(type, TREE_OPERAND (rhs, 1));
 
       /* Check the ELSE path.  */
-      check_and_warn_address_or_pointer_of_packed_member
+      check_and_warn_address_of_packed_member
 	(type, TREE_OPERAND (rhs, 2));
     }
   else
@@ -3111,7 +3163,7 @@ check_and_warn_address_or_pointer_of_packed_member (tree type, tree rhs)
 	}
 
       tree context
-	= check_address_or_pointer_of_packed_member (type, rhs);
+	= check_address_of_packed_member (type, rhs);
       if (context)
 	{
 	  location_t loc = EXPR_LOC_OR_LOC (rhs, input_location);
@@ -3123,14 +3175,12 @@ check_and_warn_address_or_pointer_of_packed_member (tree type, tree rhs)
     }
 }
 
-/* Warn if the right hand value, RHS:
-   1. Is a pointer value which isn't aligned to a pointer type TYPE.
-   2. Is an address which takes the unaligned address of packed member
-      of struct or union when assigning to TYPE.
-*/
+/* Warn if the right hand value, RHS,
+   is an address which takes the unaligned address of packed member
+   of struct or union when assigning to TYPE.  */
 
 void
-warn_for_address_or_pointer_of_packed_member (tree type, tree rhs)
+warn_for_address_of_packed_member (tree type, tree rhs)
 {
   if (!warn_address_of_packed_member)
     return;
@@ -3139,7 +3189,7 @@ warn_for_address_or_pointer_of_packed_member (tree type, tree rhs)
   if (!POINTER_TYPE_P (type))
     return;
 
-  check_and_warn_address_or_pointer_of_packed_member (type, rhs);
+  check_and_warn_address_of_packed_member (type, rhs);
 }
 
 /* Return EXPR + 1.  Convenience helper used below.  */
@@ -3567,23 +3617,13 @@ warn_parm_array_mismatch (location_t origloc, tree fndecl, tree newparms)
 	      continue;
 	    }
 
-	  if (newunspec != curunspec)
+	  if (newunspec > curunspec)
 	    {
 	      location_t warnloc = newloc, noteloc = origloc;
 	      const char *warnparmstr = newparmstr.c_str ();
 	      const char *noteparmstr = curparmstr.c_str ();
 	      unsigned warnunspec = newunspec, noteunspec = curunspec;
 
-	      if (newunspec < curunspec)
-		{
-		  /* If the new declaration has fewer unspecified bounds
-		     point the warning to the previous declaration to make
-		     it clear that that's the one to change.  Otherwise,
-		     point it to the new decl.  */
-		  std::swap (warnloc, noteloc);
-		  std::swap (warnparmstr, noteparmstr);
-		  std::swap (warnunspec, noteunspec);
-		}
 	      if (warning_n (warnloc, OPT_Wvla_parameter, warnunspec,
 			     "argument %u of type %s declared with "
 			     "%u unspecified variable bound",
@@ -3611,10 +3651,8 @@ warn_parm_array_mismatch (location_t origloc, tree fndecl, tree newparms)
 	}
 
       /* Iterate over the lists of VLA variable bounds, comparing each
-	 pair for equality, and diagnosing mismatches.  The case of
-	 the lists having different lengths is handled above so at
-	 this point they do .  */
-      for (tree newvbl = newa->size, curvbl = cura->size; newvbl;
+	 pair for equality, and diagnosing mismatches.  */
+      for (tree newvbl = newa->size, curvbl = cura->size; newvbl && curvbl;
 	   newvbl = TREE_CHAIN (newvbl), curvbl = TREE_CHAIN (curvbl))
 	{
 	  tree newpos = TREE_PURPOSE (newvbl);
@@ -3801,14 +3839,15 @@ do_warn_array_compare (location_t location, tree_code code, tree op0, tree op1)
     }
 }
 
-/* Given LHS_VAL ^ RHS_VAL, where LHS_LOC is the location of the LHS and
-   OPERATOR_LOC is the location of the ^, complain with -Wxor-used-as-pow
-   if it looks like the user meant exponentiation rather than xor.  */
+/* Given LHS_VAL ^ RHS_VAL, where LHS_LOC is the location of the LHS,
+   OPERATOR_LOC is the location of the ^, and RHS_LOC the location of the
+   RHS, complain with -Wxor-used-as-pow if it looks like the user meant
+   exponentiation rather than xor.  */
 
 void
 check_for_xor_used_as_pow (location_t lhs_loc, tree lhs_val,
 			   location_t operator_loc,
-			   tree rhs_val)
+			   location_t rhs_loc, tree rhs_val)
 {
   /* Only complain if both args are non-negative integer constants that fit
      in uhwi.  */
@@ -3824,6 +3863,20 @@ check_for_xor_used_as_pow (location_t lhs_loc, tree lhs_val,
   unsigned HOST_WIDE_INT xor_result = lhs_uhwi ^ rhs_uhwi;
   binary_op_rich_location loc (operator_loc,
 			       lhs_val, rhs_val, false);
+
+  /* Reject cases where we don't have 3 distinct locations.
+     This can happen e.g. due to macro expansion with
+     -ftrack-macro-expansion=0 */
+  if (!(lhs_loc != operator_loc
+	&& lhs_loc != rhs_loc
+	&& operator_loc != rhs_loc))
+    return;
+
+  /* Reject cases in which any of the locations came from a macro.  */
+  if (from_macro_expansion_at (lhs_loc)
+      || from_macro_expansion_at (operator_loc)
+      || from_macro_expansion_at (rhs_loc))
+    return;
 
   /* If we issue fix-it hints with the warning then we will also issue a
      note suggesting how to suppress the warning with a different change.

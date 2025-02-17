@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -17,27 +17,70 @@
 // <http://www.gnu.org/licenses/>.
 
 #include "rust-early-name-resolver.h"
-#include "rust-ast-full.h"
+#include "rust-pattern.h"
 #include "rust-name-resolver.h"
+#include "rust-macro-builtins.h"
+#include "rust-attribute-values.h"
 
 namespace Rust {
 namespace Resolver {
 
+// Check if a module contains the `#[macro_use]` attribute
+static bool
+is_macro_use_module (const AST::Module &mod)
+{
+  for (const auto &attr : mod.get_outer_attrs ())
+    if (attr.get_path ().as_string () == Values::Attributes::MACRO_USE)
+      return true;
+
+  return false;
+}
+
+std::vector<std::unique_ptr<AST::Item>>
+EarlyNameResolver::accumulate_escaped_macros (AST::Module &module)
+{
+  if (!is_macro_use_module (module))
+    return {};
+
+  // Parse the module's items if they haven't been expanded and the file
+  // should be parsed (i.e isn't hidden behind an untrue or impossible cfg
+  // directive)
+  if (module.get_kind () == AST::Module::UNLOADED)
+    module.load_items ();
+
+  std::vector<std::unique_ptr<AST::Item>> escaped_macros;
+
+  scoped (module.get_node_id (), [&module, &escaped_macros, this] {
+    for (auto &item : module.get_items ())
+      {
+	if (item->get_item_kind () == AST::Item::Kind::Module)
+	  {
+	    auto &module = *static_cast<AST::Module *> (item.get ());
+	    auto new_macros = accumulate_escaped_macros (module);
+
+	    std::move (new_macros.begin (), new_macros.end (),
+		       std::back_inserter (escaped_macros));
+
+	    continue;
+	  }
+
+	if (item->get_item_kind () == AST::Item::Kind::MacroRulesDefinition)
+	  escaped_macros.emplace_back (item->clone_item ());
+      }
+  });
+
+  return escaped_macros;
+}
+
 EarlyNameResolver::EarlyNameResolver ()
-  : resolver (*Resolver::get ()), mappings (*Analysis::Mappings::get ())
+  : current_scope (UNKNOWN_NODEID), resolver (*Resolver::get ()),
+    mappings (Analysis::Mappings::get ())
 {}
 
 void
 EarlyNameResolver::go (AST::Crate &crate)
 {
-  // FIXME: Is that valid? Why is the regular name resolution doing
-  // mappings->get_next_node_id()?
-  resolver.get_macro_scope ().push (crate.get_node_id ());
-
-  for (auto &item : crate.items)
-    item->accept_vis (*this);
-
-  // FIXME: Should we pop the macro scope?
+  visit (crate);
 }
 
 void
@@ -47,44 +90,65 @@ EarlyNameResolver::resolve_generic_args (AST::GenericArgs &generic_args)
     arg.accept_vis (*this);
 
   for (auto &arg : generic_args.get_binding_args ())
-    arg.get_type ()->accept_vis (*this);
+    arg.get_type ().accept_vis (*this);
 }
 
 void
 EarlyNameResolver::resolve_qualified_path_type (AST::QualifiedPathType &path)
 {
-  path.get_type ()->accept_vis (*this);
+  path.get_type ().accept_vis (*this);
 
   if (path.has_as_clause ())
     path.get_as_type_path ().accept_vis (*this);
 }
 
 void
-EarlyNameResolver::visit (AST::Token &tok)
+EarlyNameResolver::visit (AST::Crate &crate)
+{
+  std::vector<std::unique_ptr<AST::Item>> new_items;
+  auto items = crate.take_items ();
+
+  scoped (crate.get_node_id (), [&items, &new_items, this] {
+    for (auto &&item : items)
+      {
+	auto new_macros = std::vector<std::unique_ptr<AST::Item>> ();
+
+	if (item->get_item_kind () == AST::Item::Kind::Module)
+	  new_macros = accumulate_escaped_macros (
+	    *static_cast<AST::Module *> (item.get ()));
+
+	new_items.emplace_back (std::move (item));
+	std::move (new_macros.begin (), new_macros.end (),
+		   std::back_inserter (new_items));
+      }
+  });
+
+  crate.set_items (std::move (new_items));
+
+  scoped (crate.get_node_id (), [&crate, this] () {
+    for (auto &item : crate.items)
+      item->accept_vis (*this);
+  });
+}
+
+void
+EarlyNameResolver::visit (AST::DelimTokenTree &)
 {}
 
 void
-EarlyNameResolver::visit (AST::DelimTokenTree &delim_tok_tree)
+EarlyNameResolver::visit (AST::AttrInputMetaItemContainer &)
 {}
 
 void
-EarlyNameResolver::visit (AST::AttrInputMetaItemContainer &input)
+EarlyNameResolver::visit (AST::IdentifierExpr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::IdentifierExpr &ident_expr)
+EarlyNameResolver::visit (AST::LifetimeParam &)
 {}
 
 void
-EarlyNameResolver::visit (AST::Lifetime &lifetime)
-{}
-
-void
-EarlyNameResolver::visit (AST::LifetimeParam &lifetime_param)
-{}
-
-void
-EarlyNameResolver::visit (AST::ConstGenericParam &const_param)
+EarlyNameResolver::visit (AST::ConstGenericParam &)
 {}
 
 // FIXME: ARTHUR: Do we need to perform macro resolution for paths as well?
@@ -92,36 +156,17 @@ EarlyNameResolver::visit (AST::ConstGenericParam &const_param)
 void
 EarlyNameResolver::visit (AST::PathInExpression &path)
 {
-  for (auto &segment : path.get_segments ())
-    if (segment.has_generic_args ())
-      resolve_generic_args (segment.get_generic_args ());
+  if (!path.is_lang_item ())
+    for (auto &segment : path.get_segments ())
+      if (segment.has_generic_args ())
+	resolve_generic_args (segment.get_generic_args ());
 }
-
-void
-EarlyNameResolver::visit (AST::TypePathSegment &segment)
-{}
 
 void
 EarlyNameResolver::visit (AST::TypePathSegmentGeneric &segment)
 {
   if (segment.has_generic_args ())
     resolve_generic_args (segment.get_generic_args ());
-}
-
-void
-EarlyNameResolver::visit (AST::TypePathSegmentFunction &segment)
-{
-  for (auto &type : segment.get_type_path_function ().get_params ())
-    type->accept_vis (*this);
-
-  segment.get_type_path_function ().get_return_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TypePath &path)
-{
-  for (auto &seg : path.get_segments ())
-    seg->accept_vis (*this);
 }
 
 void
@@ -144,657 +189,248 @@ EarlyNameResolver::visit (AST::QualifiedPathInType &path)
 }
 
 void
-EarlyNameResolver::visit (AST::LiteralExpr &expr)
+EarlyNameResolver::visit (AST::LiteralExpr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::AttrInputLiteral &attr_input)
+EarlyNameResolver::visit (AST::AttrInputLiteral &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaItemLitExpr &meta_item)
+EarlyNameResolver::visit (AST::AttrInputMacro &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaItemPathLit &meta_item)
+EarlyNameResolver::visit (AST::MetaItemLitExpr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::BorrowExpr &expr)
-{
-  expr.get_borrowed_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::DereferenceExpr &expr)
-{
-  expr.get_dereferenced_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ErrorPropagationExpr &expr)
-{
-  expr.get_propagating_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::NegationExpr &expr)
-{
-  expr.get_negated_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ArithmeticOrLogicalExpr &expr)
-{
-  expr.get_left_expr ()->accept_vis (*this);
-  expr.get_right_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ComparisonExpr &expr)
-{
-  expr.get_left_expr ()->accept_vis (*this);
-  expr.get_right_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::LazyBooleanExpr &expr)
-{
-  expr.get_left_expr ()->accept_vis (*this);
-  expr.get_right_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TypeCastExpr &expr)
-{
-  expr.get_casted_expr ()->accept_vis (*this);
-  expr.get_type_to_cast_to ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::AssignmentExpr &expr)
-{
-  expr.get_left_expr ()->accept_vis (*this);
-  expr.get_right_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::CompoundAssignmentExpr &expr)
-{
-  expr.get_left_expr ()->accept_vis (*this);
-  expr.get_right_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::GroupedExpr &expr)
-{
-  expr.get_expr_in_parens ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ArrayElemsValues &elems)
-{
-  for (auto &expr : elems.get_values ())
-    expr->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ArrayElemsCopied &elems)
-{
-  elems.get_elem_to_copy ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ArrayExpr &expr)
-{
-  expr.get_array_elems ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ArrayIndexExpr &expr)
-{
-  expr.get_array_expr ()->accept_vis (*this);
-  expr.get_index_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TupleExpr &expr)
-{
-  for (auto &elem : expr.get_tuple_elems ())
-    elem->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TupleIndexExpr &expr)
-{
-  expr.get_tuple_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructExprStruct &expr)
+EarlyNameResolver::visit (AST::MetaItemPathLit &)
 {}
 
 void
-EarlyNameResolver::visit (AST::StructExprFieldIdentifier &field)
+EarlyNameResolver::visit (AST::StructExprStruct &)
 {}
 
 void
-EarlyNameResolver::visit (AST::StructExprFieldIdentifierValue &field)
-{
-  field.get_value ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructExprFieldIndexValue &field)
-{
-  field.get_value ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructExprStructFields &expr)
-{
-  for (auto &field : expr.get_fields ())
-    field->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructExprStructBase &expr)
+EarlyNameResolver::visit (AST::StructExprFieldIdentifier &)
 {}
 
 void
-EarlyNameResolver::visit (AST::CallExpr &expr)
-{
-  expr.get_function_expr ()->accept_vis (*this);
-  for (auto &param : expr.get_params ())
-    param->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::MethodCallExpr &expr)
-{
-  expr.get_receiver_expr ()->accept_vis (*this);
-  for (auto &param : expr.get_params ())
-    param->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::FieldAccessExpr &expr)
-{
-  expr.get_receiver_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ClosureExprInner &expr)
-{
-  expr.get_definition_expr ()->accept_vis (*this);
-
-  for (auto &param : expr.get_params ())
-    param.get_type ()->accept_vis (*this);
-}
+EarlyNameResolver::visit (AST::StructExprStructBase &)
+{}
 
 void
 EarlyNameResolver::visit (AST::BlockExpr &expr)
 {
-  for (auto &stmt : expr.get_statements ())
-    stmt->accept_vis (*this);
+  scoped (expr.get_node_id (), [&expr, this] () {
+    for (auto &stmt : expr.get_statements ())
+      stmt->accept_vis (*this);
 
-  if (expr.has_tail_expr ())
-    expr.get_tail_expr ()->accept_vis (*this);
+    if (expr.has_tail_expr ())
+      expr.get_tail_expr ().accept_vis (*this);
+  });
 }
 
 void
-EarlyNameResolver::visit (AST::ClosureExprInnerTyped &expr)
-{
-  expr.get_definition_block ()->accept_vis (*this);
-
-  for (auto &param : expr.get_params ())
-    param.get_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ContinueExpr &expr)
+EarlyNameResolver::visit (AST::ContinueExpr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::BreakExpr &expr)
-{
-  if (expr.has_break_expr ())
-    expr.get_break_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::RangeFromToExpr &expr)
-{
-  expr.get_from_expr ()->accept_vis (*this);
-  expr.get_to_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::RangeFromExpr &expr)
-{
-  expr.get_from_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::RangeToExpr &expr)
-{
-  expr.get_to_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::RangeFullExpr &expr)
+EarlyNameResolver::visit (AST::RangeFullExpr &)
 {}
-
-void
-EarlyNameResolver::visit (AST::RangeFromToInclExpr &expr)
-{
-  expr.get_from_expr ()->accept_vis (*this);
-  expr.get_to_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::RangeToInclExpr &expr)
-{
-  expr.get_to_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ReturnExpr &expr)
-{
-  if (expr.has_returned_expr ())
-    expr.get_returned_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::UnsafeBlockExpr &expr)
-{
-  expr.get_block_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::LoopExpr &expr)
-{
-  expr.get_loop_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::WhileLoopExpr &expr)
-{
-  expr.get_predicate_expr ()->accept_vis (*this);
-  expr.get_loop_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::WhileLetLoopExpr &expr)
-{
-  expr.get_scrutinee_expr ()->accept_vis (*this);
-  expr.get_loop_block ()->accept_vis (*this);
-}
 
 void
 EarlyNameResolver::visit (AST::ForLoopExpr &expr)
 {
-  expr.get_iterator_expr ()->accept_vis (*this);
-  expr.get_loop_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfExpr &expr)
-{
-  expr.get_condition_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfExprConseqElse &expr)
-{
-  expr.get_condition_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_else_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfExprConseqIf &expr)
-{
-  expr.get_condition_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_conseq_if_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfExprConseqIfLet &expr)
-{
-  expr.get_condition_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_conseq_if_let_expr ()->accept_vis (*this);
+  scoped (expr.get_node_id (), [&expr, this] () {
+    expr.get_pattern ().accept_vis (*this);
+    expr.get_iterator_expr ().accept_vis (*this);
+    expr.get_loop_block ().accept_vis (*this);
+  });
 }
 
 void
 EarlyNameResolver::visit (AST::IfLetExpr &expr)
 {
-  expr.get_value_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-}
+  expr.get_value_expr ().accept_vis (*this);
 
-void
-EarlyNameResolver::visit (AST::IfLetExprConseqElse &expr)
-{
-  expr.get_value_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_else_block ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfLetExprConseqIf &expr)
-{
-  expr.get_value_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_conseq_if_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::IfLetExprConseqIfLet &expr)
-{
-  expr.get_value_expr ()->accept_vis (*this);
-  expr.get_if_block ()->accept_vis (*this);
-  expr.get_conseq_if_let_expr ()->accept_vis (*this);
+  scoped (expr.get_node_id (),
+	  [&expr, this] () { expr.get_if_block ().accept_vis (*this); });
 }
 
 void
 EarlyNameResolver::visit (AST::MatchExpr &expr)
 {
-  expr.get_scrutinee_expr ()->accept_vis (*this);
-  for (auto &match_arm : expr.get_match_cases ())
-    {
-      if (match_arm.get_arm ().has_match_arm_guard ())
-	match_arm.get_arm ().get_guard_expr ()->accept_vis (*this);
+  expr.get_scrutinee_expr ().accept_vis (*this);
 
-      for (auto &pattern : match_arm.get_arm ().get_patterns ())
-	pattern->accept_vis (*this);
+  scoped (expr.get_node_id (), [&expr, this] () {
+    for (auto &arm : expr.get_match_cases ())
+      {
+	scoped (arm.get_node_id (), [&arm, this] () {
+	  if (arm.get_arm ().has_match_arm_guard ())
+	    arm.get_arm ().get_guard_expr ().accept_vis (*this);
 
-      match_arm.get_expr ()->accept_vis (*this);
-    }
+	  for (auto &pattern : arm.get_arm ().get_patterns ())
+	    pattern->accept_vis (*this);
+
+	  arm.get_expr ().accept_vis (*this);
+	});
+      }
+  });
 }
 
 void
-EarlyNameResolver::visit (AST::AwaitExpr &expr)
-{
-  expr.get_awaited_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::AsyncBlockExpr &expr)
-{
-  expr.get_block_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TypeParam &param)
-{
-  for (auto &bound : param.get_type_param_bounds ())
-    bound->accept_vis (*this);
-
-  if (param.has_type ())
-    param.get_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::LifetimeWhereClauseItem &item)
+EarlyNameResolver::visit (AST::LifetimeWhereClauseItem &)
 {}
-
-void
-EarlyNameResolver::visit (AST::TypeBoundWhereClauseItem &item)
-{
-  for (auto &bound : item.get_type_param_bounds ())
-    bound->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::Method &method)
-{
-  if (method.has_generics ())
-    for (auto &generic : method.get_generic_params ())
-      generic->accept_vis (*this);
-
-  if (method.get_self_param ().has_type ())
-    method.get_self_param ().get_type ()->accept_vis (*this);
-
-  for (auto &param : method.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (method.has_return_type ())
-    method.get_return_type ()->accept_vis (*this);
-
-  method.get_definition ()->accept_vis (*this);
-}
 
 void
 EarlyNameResolver::visit (AST::Module &module)
 {
-  for (auto &item : module.get_items ())
-    item->accept_vis (*this);
+  if (module.get_kind () == AST::Module::UNLOADED)
+    module.load_items ();
+
+  // so we need to only go "one scope down" for fetching macros. Macros within
+  // functions are still scoped only within that function. But we have to be
+  // careful because nested modules with #[macro_use] actually works!
+  std::vector<std::unique_ptr<AST::Item>> new_items;
+  auto items = module.take_items ();
+
+  scoped (module.get_node_id (), [&items, &new_items, this] {
+    for (auto &&item : items)
+      {
+	auto new_macros = std::vector<std::unique_ptr<AST::Item>> ();
+
+	if (item->get_item_kind () == AST::Item::Kind::Module)
+	  new_macros = accumulate_escaped_macros (
+	    *static_cast<AST::Module *> (item.get ()));
+
+	new_items.emplace_back (std::move (item));
+	std::move (new_macros.begin (), new_macros.end (),
+		   std::back_inserter (new_items));
+      }
+  });
+
+  module.set_items (std::move (new_items));
+
+  scoped (module.get_node_id (), [&module, this] () {
+    for (auto &item : module.get_items ())
+      item->accept_vis (*this);
+  });
 }
 
 void
-EarlyNameResolver::visit (AST::ExternCrate &crate)
+EarlyNameResolver::visit (AST::ExternCrate &)
 {}
 
 void
-EarlyNameResolver::visit (AST::UseTreeGlob &use_tree)
+EarlyNameResolver::visit (AST::UseTreeGlob &)
 {}
 
 void
-EarlyNameResolver::visit (AST::UseTreeList &use_tree)
+EarlyNameResolver::visit (AST::UseTreeList &)
 {}
 
 void
-EarlyNameResolver::visit (AST::UseTreeRebind &use_tree)
+EarlyNameResolver::visit (AST::UseTreeRebind &)
 {}
 
 void
-EarlyNameResolver::visit (AST::UseDeclaration &use_decl)
+EarlyNameResolver::visit (AST::UseDeclaration &)
 {}
 
 void
-EarlyNameResolver::visit (AST::Function &function)
-{
-  if (function.has_generics ())
-    for (auto &generic : function.get_generic_params ())
-      generic->accept_vis (*this);
-
-  for (auto &param : function.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (function.has_return_type ())
-    function.get_return_type ()->accept_vis (*this);
-
-  function.get_definition ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TypeAlias &type_alias)
-{
-  type_alias.get_type_aliased ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructStruct &struct_item)
-{
-  for (auto &field : struct_item.get_fields ())
-    field.get_field_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TupleStruct &tuple_struct)
-{
-  for (auto &field : tuple_struct.get_fields ())
-    field.get_field_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::EnumItem &item)
+EarlyNameResolver::visit (AST::EnumItem &)
 {}
 
 void
-EarlyNameResolver::visit (AST::EnumItemTuple &item)
+EarlyNameResolver::visit (AST::Union &)
 {}
 
 void
-EarlyNameResolver::visit (AST::EnumItemStruct &item)
-{}
-
-void
-EarlyNameResolver::visit (AST::EnumItemDiscriminant &item)
-{}
-
-void
-EarlyNameResolver::visit (AST::Enum &enum_item)
-{}
-
-void
-EarlyNameResolver::visit (AST::Union &union_item)
-{}
-
-void
-EarlyNameResolver::visit (AST::ConstantItem &const_item)
-{
-  const_item.get_type ()->accept_vis (*this);
-  const_item.get_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StaticItem &static_item)
-{
-  static_item.get_type ()->accept_vis (*this);
-  static_item.get_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TraitItemFunc &item)
-{
-  auto &decl = item.get_trait_function_decl ();
-
-  if (decl.has_return_type ())
-    decl.get_return_type ()->accept_vis (*this);
-
-  for (auto &generic : decl.get_generic_params ())
-    generic->accept_vis (*this);
-
-  for (auto &param : decl.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (item.has_definition ())
-    item.get_definition ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TraitItemMethod &item)
-{
-  // FIXME: Can we factor this with the above function?
-  auto &decl = item.get_trait_method_decl ();
-
-  if (decl.has_return_type ())
-    decl.get_return_type ()->accept_vis (*this);
-
-  for (auto &generic : decl.get_generic_params ())
-    generic->accept_vis (*this);
-
-  for (auto &param : decl.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (item.has_definition ())
-    item.get_definition ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TraitItemConst &item)
-{
-  item.get_type ()->accept_vis (*this);
-
-  if (item.has_expr ())
-    item.get_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TraitItemType &item)
+EarlyNameResolver::visit (AST::TraitItemType &)
 {}
 
 void
 EarlyNameResolver::visit (AST::Trait &trait)
 {
-  for (auto &item : trait.get_trait_items ())
-    item->accept_vis (*this);
+  // shouldn't need to visit trait.get_implicit_self ()
+
+  for (auto &generic : trait.get_generic_params ())
+    generic->accept_vis (*this);
+
+  scoped (trait.get_node_id (), [&trait, this] () {
+    for (auto &item : trait.get_trait_items ())
+      item->accept_vis (*this);
+  });
 }
 
 void
 EarlyNameResolver::visit (AST::InherentImpl &impl)
 {
-  impl.get_type ()->accept_vis (*this);
+  impl.get_type ().accept_vis (*this);
 
   for (auto &generic : impl.get_generic_params ())
     generic->accept_vis (*this);
 
-  for (auto &item : impl.get_impl_items ())
-    item->accept_vis (*this);
+  scoped (impl.get_node_id (), [&impl, this] () {
+    for (auto &item : impl.get_impl_items ())
+      item->accept_vis (*this);
+  });
 }
 
 void
 EarlyNameResolver::visit (AST::TraitImpl &impl)
 {
-  impl.get_type ()->accept_vis (*this);
+  impl.get_type ().accept_vis (*this);
 
   for (auto &generic : impl.get_generic_params ())
     generic->accept_vis (*this);
 
-  for (auto &item : impl.get_impl_items ())
-    item->accept_vis (*this);
+  scoped (impl.get_node_id (), [&impl, this] () {
+    for (auto &item : impl.get_impl_items ())
+      item->accept_vis (*this);
+  });
 }
 
 void
-EarlyNameResolver::visit (AST::ExternalStaticItem &item)
+EarlyNameResolver::visit (AST::ExternalTypeItem &item)
 {
-  item.get_type ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ExternalFunctionItem &item)
-{
-  for (auto &generic : item.get_generic_params ())
-    generic->accept_vis (*this);
-
-  for (auto &param : item.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (item.has_return_type ())
-    item.get_return_type ()->accept_vis (*this);
+  // nothing to do?
 }
 
 void
 EarlyNameResolver::visit (AST::ExternBlock &block)
 {
-  for (auto &item : block.get_extern_items ())
-    item->accept_vis (*this);
+  scoped (block.get_node_id (), [&block, this] () {
+    for (auto &item : block.get_extern_items ())
+      item->accept_vis (*this);
+  });
 }
 
 void
-EarlyNameResolver::visit (AST::MacroMatchFragment &match)
+EarlyNameResolver::visit (AST::MacroMatchRepetition &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MacroMatchRepetition &match)
-{}
-
-void
-EarlyNameResolver::visit (AST::MacroMatcher &matcher)
+EarlyNameResolver::visit (AST::MacroMatcher &)
 {}
 
 void
 EarlyNameResolver::visit (AST::MacroRulesDefinition &rules_def)
 {
   auto path = CanonicalPath::new_seg (rules_def.get_node_id (),
-				      rules_def.get_rule_name ());
+				      rules_def.get_rule_name ().as_string ());
   resolver.get_macro_scope ().insert (path, rules_def.get_node_id (),
 				      rules_def.get_locus ());
+
+  /* Since the EarlyNameResolver runs multiple time (fixed point algorithm)
+   * we could be inserting the same macro def over and over again until we
+   * implement some optimizations */
+  // FIXME: ARTHUR: Remove that lookup and add proper optimizations instead
+  if (mappings.lookup_macro_def (rules_def.get_node_id ()))
+    return;
+
   mappings.insert_macro_def (&rules_def);
   rust_debug_loc (rules_def.get_locus (), "inserting macro def: [%s]",
 		  path.get ().c_str ());
@@ -805,6 +441,10 @@ EarlyNameResolver::visit (AST::MacroInvocation &invoc)
 {
   auto &invoc_data = invoc.get_invoc_data ();
   auto has_semicolon = invoc.has_semicolon ();
+
+  if (invoc.get_kind () == AST::MacroInvocation::InvocKind::Builtin)
+    for (auto &pending_invoc : invoc.get_pending_eager_invocations ())
+      pending_invoc->accept_vis (*this);
 
   // ??
   // switch on type of macro:
@@ -830,7 +470,7 @@ EarlyNameResolver::visit (AST::MacroInvocation &invoc)
   if (has_semicolon)
     source_node = invoc.get_macro_node_id ();
   else
-    source_node = invoc.get_pattern_node_id ();
+    source_node = invoc.get_node_id ();
   auto seg
     = CanonicalPath::new_seg (source_node, invoc_data.get_path ().as_string ());
 
@@ -843,245 +483,130 @@ EarlyNameResolver::visit (AST::MacroInvocation &invoc)
     }
 
   // lookup the rules
-  AST::MacroRulesDefinition *rules_def = nullptr;
-  bool ok = mappings.lookup_macro_def (resolved_node, &rules_def);
-  rust_assert (ok);
+  auto rules_def = mappings.lookup_macro_def (resolved_node);
 
-  mappings.insert_macro_invocation (invoc, rules_def);
+  auto &outer_attrs = rules_def.value ()->get_outer_attrs ();
+  bool is_builtin
+    = std::any_of (outer_attrs.begin (), outer_attrs.end (),
+		   [] (AST::Attribute attr) {
+		     return attr.get_path ()
+			    == Values::Attributes::RUSTC_BUILTIN_MACRO;
+		   });
+
+  if (is_builtin)
+    {
+      auto builtin_kind = builtin_macro_from_string (
+	rules_def.value ()->get_rule_name ().as_string ());
+      invoc.map_to_builtin (builtin_kind.value ());
+    }
+
+  auto attributes = rules_def.value ()->get_outer_attrs ();
+
+  /* Since the EarlyNameResolver runs multiple time (fixed point algorithm)
+   * we could be inserting the same macro def over and over again until we
+   * implement some optimizations */
+  // FIXME: ARTHUR: Remove that lookup and add proper optimizations instead
+  if (mappings.lookup_macro_invocation (invoc))
+    return;
+
+  mappings.insert_macro_invocation (invoc, *rules_def);
 }
 
 // FIXME: ARTHUR: Do we need to resolve these as well here?
 
 void
-EarlyNameResolver::visit (AST::MetaItemPath &meta_item)
+EarlyNameResolver::visit (AST::MetaItemPath &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaItemSeq &meta_item)
+EarlyNameResolver::visit (AST::MetaItemSeq &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaWord &meta_item)
+EarlyNameResolver::visit (AST::MetaNameValueStr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaNameValueStr &meta_item)
+EarlyNameResolver::visit (AST::MetaListPaths &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaListPaths &meta_item)
+EarlyNameResolver::visit (AST::MetaListNameValueStr &)
 {}
 
 void
-EarlyNameResolver::visit (AST::MetaListNameValueStr &meta_item)
+EarlyNameResolver::visit (AST::RangePatternBoundLiteral &)
 {}
 
 void
-EarlyNameResolver::visit (AST::LiteralPattern &pattern)
+EarlyNameResolver::visit (AST::RangePatternBoundPath &)
 {}
 
 void
-EarlyNameResolver::visit (AST::IdentifierPattern &pattern)
-{
-  if (pattern.has_pattern_to_bind ())
-    pattern.get_pattern_to_bind ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::WildcardPattern &pattern)
+EarlyNameResolver::visit (AST::RangePatternBoundQualPath &)
 {}
 
 void
-EarlyNameResolver::visit (AST::RangePatternBoundLiteral &bound)
+EarlyNameResolver::visit (AST::StructPatternFieldIdent &)
 {}
 
 void
-EarlyNameResolver::visit (AST::RangePatternBoundPath &bound)
+EarlyNameResolver::visit (AST::StructPattern &)
 {}
-
-void
-EarlyNameResolver::visit (AST::RangePatternBoundQualPath &bound)
-{}
-
-void
-EarlyNameResolver::visit (AST::RangePattern &pattern)
-{
-  pattern.get_lower_bound ()->accept_vis (*this);
-  pattern.get_upper_bound ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ReferencePattern &pattern)
-{
-  pattern.get_referenced_pattern ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructPatternFieldTuplePat &field)
-{
-  field.get_index_pattern ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructPatternFieldIdentPat &field)
-{
-  field.get_ident_pattern ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::StructPatternFieldIdent &field)
-{}
-
-void
-EarlyNameResolver::visit (AST::StructPattern &pattern)
-{}
-
-void
-EarlyNameResolver::visit (AST::TupleStructItemsNoRange &tuple_items)
-{
-  for (auto &pattern : tuple_items.get_patterns ())
-    pattern->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TupleStructItemsRange &tuple_items)
-{
-  for (auto &pattern : tuple_items.get_lower_patterns ())
-    pattern->accept_vis (*this);
-  for (auto &pattern : tuple_items.get_upper_patterns ())
-    pattern->accept_vis (*this);
-}
 
 void
 EarlyNameResolver::visit (AST::TupleStructPattern &pattern)
 {
-  pattern.get_items ()->accept_vis (*this);
+  pattern.get_items ().accept_vis (*this);
 }
 
 void
-EarlyNameResolver::visit (AST::TuplePatternItemsMultiple &tuple_items)
-{
-  for (auto &pattern : tuple_items.get_patterns ())
-    pattern->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TuplePatternItemsRanged &tuple_items)
-{
-  for (auto &pattern : tuple_items.get_lower_patterns ())
-    pattern->accept_vis (*this);
-  for (auto &pattern : tuple_items.get_upper_patterns ())
-    pattern->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TuplePattern &pattern)
-{
-  pattern.get_items ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::GroupedPattern &pattern)
-{
-  pattern.get_pattern_in_parens ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::SlicePattern &pattern)
-{
-  for (auto &item : pattern.get_items ())
-    item->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::EmptyStmt &stmt)
+EarlyNameResolver::visit (AST::TraitBound &)
 {}
 
 void
-EarlyNameResolver::visit (AST::LetStmt &stmt)
-{
-  if (stmt.has_type ())
-    stmt.get_type ()->accept_vis (*this);
-
-  if (stmt.has_init_expr ())
-    stmt.get_init_expr ()->accept_vis (*this);
-
-  stmt.get_pattern ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ExprStmtWithoutBlock &stmt)
-{
-  stmt.get_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::ExprStmtWithBlock &stmt)
-{
-  stmt.get_expr ()->accept_vis (*this);
-}
-
-void
-EarlyNameResolver::visit (AST::TraitBound &bound)
+EarlyNameResolver::visit (AST::ImplTraitType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::ImplTraitType &type)
+EarlyNameResolver::visit (AST::TraitObjectType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::TraitObjectType &type)
+EarlyNameResolver::visit (AST::ParenthesisedType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::ParenthesisedType &type)
+EarlyNameResolver::visit (AST::ImplTraitTypeOneBound &)
 {}
 
 void
-EarlyNameResolver::visit (AST::ImplTraitTypeOneBound &type)
+EarlyNameResolver::visit (AST::TraitObjectTypeOneBound &)
 {}
 
 void
-EarlyNameResolver::visit (AST::TraitObjectTypeOneBound &type)
+EarlyNameResolver::visit (AST::TupleType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::TupleType &type)
+EarlyNameResolver::visit (AST::RawPointerType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::NeverType &type)
+EarlyNameResolver::visit (AST::ReferenceType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::RawPointerType &type)
+EarlyNameResolver::visit (AST::ArrayType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::ReferenceType &type)
+EarlyNameResolver::visit (AST::SliceType &)
 {}
 
 void
-EarlyNameResolver::visit (AST::ArrayType &type)
+EarlyNameResolver::visit (AST::InferredType &)
 {}
-
-void
-EarlyNameResolver::visit (AST::SliceType &type)
-{}
-
-void
-EarlyNameResolver::visit (AST::InferredType &type)
-{}
-
-void
-EarlyNameResolver::visit (AST::BareFunctionType &type)
-{
-  for (auto &param : type.get_function_params ())
-    param.get_type ()->accept_vis (*this);
-
-  if (type.has_return_type ())
-    type.get_return_type ()->accept_vis (*this);
-}
 
 } // namespace Resolver
 } // namespace Rust

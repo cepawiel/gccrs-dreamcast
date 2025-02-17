@@ -1,5 +1,5 @@
 /* SSA Jump Threading
-   Copyright (C) 2005-2022 Free Software Foundation, Inc.
+   Copyright (C) 2005-2024 Free Software Foundation, Inc.
    Contributed by Jeff Law  <law@redhat.com>
 
 This file is part of GCC.
@@ -497,9 +497,9 @@ jump_threader::simplify_control_stmt_condition_1
     }
 
   /* If the condition has the form (A & B) CMP 0 or (A | B) CMP 0 then
-     recurse into the LHS to see if there is a dominating ASSERT_EXPR
-     of A or of B that makes this condition always true or always false
-     along the edge E.  */
+     recurse into the LHS to see if there is a simplification that
+     makes this condition always true or always false along the edge
+     E.  */
   if ((cond_code == EQ_EXPR || cond_code == NE_EXPR)
       && TREE_CODE (op0) == SSA_NAME
       && integer_zerop (op1))
@@ -1193,7 +1193,6 @@ void
 jump_threader::thread_outgoing_edges (basic_block bb)
 {
   int flags = (EDGE_IGNORE | EDGE_COMPLEX | EDGE_ABNORMAL);
-  gimple *last;
 
   if (!flag_thread_jumps)
     return;
@@ -1204,8 +1203,7 @@ jump_threader::thread_outgoing_edges (basic_block bb)
      will be traversed when the incoming edge from BB is traversed.  */
   if (single_succ_to_potentially_threadable_block (bb))
     thread_across_edge (single_succ_edge (bb));
-  else if ((last = last_stmt (bb))
-	   && gimple_code (last) == GIMPLE_COND
+  else if (safe_is_a <gcond *> (*gsi_last_bb (bb))
 	   && EDGE_COUNT (bb->succs) == 2
 	   && (EDGE_SUCC (bb, 0)->flags & flags) == 0
 	   && (EDGE_SUCC (bb, 1)->flags & flags) == 0)

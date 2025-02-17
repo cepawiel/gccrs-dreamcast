@@ -1,8 +1,11 @@
 // { dg-additional-options "-w" }
-// { dg-output "foo_deref\nimm_deref\n" }
+// { dg-output "foo_deref\r*\nimm_deref\r*\n" }
 extern "C" {
     fn printf(s: *const i8, ...);
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 #[lang = "deref"]
 pub trait Deref {

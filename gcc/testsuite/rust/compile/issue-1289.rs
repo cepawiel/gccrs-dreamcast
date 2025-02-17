@@ -1,3 +1,8 @@
+#![feature(intrinsics)]
+
+#[lang = "sized"]
+pub trait Sized {}
+
 extern "C" {
     fn printf(s: *const i8, ...);
 }

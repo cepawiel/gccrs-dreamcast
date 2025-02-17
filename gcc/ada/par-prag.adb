@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -73,10 +73,12 @@ function Prag (Pragma_Node : Node_Id; Semi : Source_Ptr) return Node_Id is
    --  Check the expression of the specified argument to make sure that it
    --  is a string literal. If not give error and raise Error_Resync.
 
-   procedure Check_Arg_Is_On_Or_Off (Arg : Node_Id);
+   procedure Check_Arg_Is_On_Or_Off
+     (Arg : Node_Id; All_OK_Too : Boolean := False);
    --  Check the expression of the specified argument to make sure that it
    --  is an identifier which is either ON or OFF, and if not, then issue
-   --  an error message and raise Error_Resync.
+   --  an error message and raise Error_Resync. If All_OK_Too is True,
+   --  then an ALL identifer is also acceptable.
 
    procedure Check_No_Identifier (Arg : Node_Id);
    --  Checks that the given argument does not have an identifier. If
@@ -118,7 +120,7 @@ function Prag (Pragma_Node : Node_Id; Semi : Source_Ptr) return Node_Id is
    procedure Add_List_Pragma_Entry (PT : List_Pragma_Type; Loc : Source_Ptr) is
    begin
       if List_Pragmas.Last < List_Pragmas.First
-        or else (List_Pragmas.Table (List_Pragmas.Last)) /= ((PT, Loc))
+        or else List_Pragmas.Table (List_Pragmas.Last) /= (PT, Loc)
       then
          List_Pragmas.Append ((PT, Loc));
       end if;
@@ -167,17 +169,26 @@ function Prag (Pragma_Node : Node_Id; Semi : Source_Ptr) return Node_Id is
    -- Check_Arg_Is_On_Or_Off --
    ----------------------------
 
-   procedure Check_Arg_Is_On_Or_Off (Arg : Node_Id) is
+   procedure Check_Arg_Is_On_Or_Off
+     (Arg : Node_Id; All_OK_Too : Boolean := False)
+   is
       Argx : constant Node_Id := Expression (Arg);
-
+      Error : Boolean := Nkind (Expression (Arg)) /= N_Identifier;
    begin
-      if Nkind (Expression (Arg)) /= N_Identifier
-        or else Chars (Argx) not in Name_On | Name_Off
-      then
+      if not Error then
+         Error := Chars (Argx) not in Name_On | Name_Off
+           and then not (All_OK_Too and Chars (Argx) = Name_All);
+      end if;
+      if Error then
          Error_Msg_Name_2 := Name_On;
          Error_Msg_Name_3 := Name_Off;
 
-         Error_Msg_N ("argument for pragma% must be% or%", Argx);
+         if All_OK_Too then
+            Error_Msg_Name_4 := Name_All;
+            Error_Msg_N ("argument for pragma% must be% or% or%", Argx);
+         else
+            Error_Msg_N ("argument for pragma% must be% or%", Argx);
+         end if;
          raise Error_Resync;
       end if;
    end Check_Arg_Is_On_Or_Off;
@@ -414,7 +425,7 @@ begin
       -- Extensions_Allowed (GNAT) --
       -------------------------------
 
-      --  pragma Extensions_Allowed (Off | On)
+      --  pragma Extensions_Allowed (Off | On | All)
 
       --  The processing for pragma Extensions_Allowed must be done at
       --  parse time, since extensions mode may affect what is accepted.
@@ -422,10 +433,12 @@ begin
       when Pragma_Extensions_Allowed =>
          Check_Arg_Count (1);
          Check_No_Identifier (Arg1);
-         Check_Arg_Is_On_Or_Off (Arg1);
+         Check_Arg_Is_On_Or_Off (Arg1, All_OK_Too => True);
 
          if Chars (Expression (Arg1)) = Name_On then
-            Ada_Version := Ada_With_Extensions;
+            Ada_Version := Ada_With_Core_Extensions;
+         elsif Chars (Expression (Arg1)) = Name_All then
+            Ada_Version := Ada_With_All_Extensions;
          else
             Ada_Version := Ada_Version_Explicit;
          end if;
@@ -1072,6 +1085,62 @@ begin
       when Pragma_Suppress_All =>
          Set_Has_Pragma_Suppress_All (Cunit (Current_Source_Unit));
 
+      -----------------------------------
+      -- User_Aspect_Definition (GNAT) --
+      -----------------------------------
+
+      --  pragma User_Aspect_Definition
+      --    (Identifier, {, Identifier [(Identifier {, Identifier})]});
+
+      when Pragma_User_Aspect_Definition =>
+         if Arg_Count < 1 then
+            Check_Arg_Count (1);
+         end if;
+         declare
+            OK   : Boolean := True;
+            Expr : Node_Id;
+
+            function All_Identifiers (L : List_Id) return Boolean;
+            --  Return True if every list element has Nkind = N_Identifier.
+
+            ---------------------
+            -- All_Identifiers --
+            ---------------------
+            function All_Identifiers (L : List_Id) return Boolean is
+               N : Node_Id := First (L);
+            begin
+               while Present (N) loop
+                  if Nkind (N) /= N_Identifier then
+                     return False;
+                  end if;
+                  Next (N);
+               end loop;
+               return True;
+            end All_Identifiers;
+
+         begin
+            Arg_Node := Arg1;
+            while Present (Arg_Node) and OK loop
+               Check_No_Identifier (Arg_Node);
+               Expr := Expression (Arg_Node);
+               case Nkind (Expr) is
+                  when N_Identifier =>
+                     OK := True;
+                  when N_Indexed_Component =>
+                     OK := Arg_Node /= Arg1 -- first arg must be identifier
+                             and then Nkind (Prefix (Expr)) = N_Identifier
+                             and then All_Identifiers (Expressions (Expr));
+                  when others =>
+                     OK := False;
+               end case;
+               Next (Arg_Node);
+            end loop;
+            if not OK then
+               Error_Msg_N ("incorrect argument for pragma%", Arg_Node);
+               raise Error_Resync;
+            end if;
+         end;
+
       ----------------------
       -- Warning_As_Error --
       ----------------------
@@ -1137,13 +1206,14 @@ begin
          -------------------------------------
 
          function First_Arg_Is_Matching_Tool_Name return Boolean is
+            Expr : constant Node_Id := Get_Pragma_Arg (Arg1);
          begin
-            return Nkind (Arg1) = N_Identifier
+            return Nkind (Expr) = N_Identifier
 
               --  Return True if the tool name is GNAT, and we're not in
               --  GNATprove or CodePeer mode...
 
-              and then ((Chars (Arg1) = Name_Gnat
+              and then ((Chars (Expr) = Name_Gnat
                           and then not
                             (CodePeer_Mode or GNATprove_Mode))
 
@@ -1151,7 +1221,7 @@ begin
               --  mode.
 
                         or else
-                        (Chars (Arg1) = Name_Gnatprove
+                        (Chars (Expr) = Name_Gnatprove
                           and then GNATprove_Mode));
          end First_Arg_Is_Matching_Tool_Name;
 
@@ -1176,7 +1246,7 @@ begin
          --------------
 
          function Last_Arg return Node_Id is
-               Last_Arg : Node_Id;
+            Last_Arg : Node_Id;
 
          begin
             if Arg_Count = 1 then
@@ -1301,6 +1371,7 @@ begin
          | Pragma_Aggregate_Individually_Assign
          | Pragma_All_Calls_Remote
          | Pragma_Allow_Integer_Address
+         | Pragma_Always_Terminates
          | Pragma_Annotate
          | Pragma_Assert
          | Pragma_Assert_And_Cut
@@ -1357,6 +1428,7 @@ begin
          | Pragma_Elaboration_Checks
          | Pragma_Eliminate
          | Pragma_Enable_Atomic_Synchronization
+         | Pragma_Exceptional_Cases
          | Pragma_Export
          | Pragma_Export_Function
          | Pragma_Export_Object
@@ -1472,6 +1544,7 @@ begin
          | Pragma_Rename_Pragma
          | Pragma_Restricted_Run_Time
          | Pragma_Reviewable
+         | Pragma_Side_Effects
          | Pragma_SPARK_Mode
          | Pragma_Secondary_Stack_Size
          | Pragma_Share_Generic

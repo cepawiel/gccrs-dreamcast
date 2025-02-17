@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -41,6 +41,7 @@ with Sinput;         use Sinput;
 with Stand;          use Stand;
 with Targparm;       use Targparm;
 with Uname;          use Uname;
+with Warnsw;         use Warnsw;
 
 package body Restrict is
 
@@ -508,6 +509,18 @@ package body Restrict is
          Update_Restrictions (Main_Restrictions);
       end if;
 
+      declare
+         use Local_Restrictions;
+      begin
+         if Local_Restriction_Checking_Hook /= null then
+            --  A given global restriction (which may or may not be in
+            --  effect) has been violated. Even if the global restriction
+            --  is not in effect, a corresponding local restriction may be
+            --  in effect (in which case the violation needs to be flagged).
+            Local_Restriction_Checking_Hook.all (R, N);
+         end if;
+      end;
+
       --  Nothing to do if restriction message suppressed
 
       if Suppress_Restriction_Message (N) then
@@ -896,7 +909,10 @@ package body Restrict is
          declare
             S : constant String := Restriction_Id'Image (J);
          begin
-            if S = Name_Buffer (1 .. Name_Len) then
+            if S = Name_Buffer (1 .. Name_Len)
+              --  users cannot name the N_T_H_Implicit restriction
+              and then J /= No_Task_Hierarchy_Implicit
+            then
                return J;
             end if;
          end;
@@ -1103,7 +1119,12 @@ package body Restrict is
 
    function Restriction_Active (R : All_Restrictions) return Boolean is
    begin
-      return Restrictions.Set (R) and then not Restriction_Warnings (R);
+      if Restrictions.Set (R) and then not Restriction_Warnings (R) then
+         return True;
+      else
+         return R = No_Task_Hierarchy
+           and then Restriction_Active (No_Task_Hierarchy_Implicit);
+      end if;
    end Restriction_Active;
 
    --------------------------------

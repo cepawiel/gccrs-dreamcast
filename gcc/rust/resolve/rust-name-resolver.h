@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -30,14 +30,34 @@ namespace Resolver {
 class Rib
 {
 public:
-  // Rust uses local_def_ids assigned by def_collector on the AST
-  // lets use NodeId instead
+  enum ItemType
+  {
+    Var,
+    Param,
+    Function,
+    Type,
+    Module,
+    Static,
+    Const,
+    Trait,
+    Impl,
+    TraitImpl,
+    ExternCrate,
+    MacroDecl,
+    Label,
+    Unknown
+  };
+
+  // FIXME
+  // Rust uses local_def_ids assigned by def_collector on the AST. Consider
+  // moving to a local-def-id
   Rib (CrateNum crateNum, NodeId node_id);
 
   // this takes the relative paths of items within a compilation unit for lookup
   void insert_name (
-    const CanonicalPath &path, NodeId id, Location locus, bool shadow,
-    std::function<void (const CanonicalPath &, NodeId, Location)> dup_cb);
+    const CanonicalPath &path, NodeId id, location_t locus, bool shadow,
+    ItemType type,
+    std::function<void (const CanonicalPath &, NodeId, location_t)> dup_cb);
 
   bool lookup_canonical_path (const NodeId &id, CanonicalPath *ident);
   bool lookup_name (const CanonicalPath &ident, NodeId *id);
@@ -45,21 +65,22 @@ public:
   void append_reference_for_def (NodeId def, NodeId ref);
   bool have_references_for_node (NodeId def) const;
   bool decl_was_declared_here (NodeId def) const;
+  bool lookup_decl_type (NodeId def, ItemType *type) const;
   void debug () const;
   std::string debug_str () const;
 
   CrateNum get_crate_num () const { return crate_num; }
   NodeId get_node_id () const { return node_id; }
-  std::map<NodeId, Location> &get_declarations () { return decls_within_rib; }
+  std::map<NodeId, location_t> &get_declarations () { return decls_within_rib; }
 
 private:
   CrateNum crate_num;
   NodeId node_id;
   std::map<CanonicalPath, NodeId> path_mappings;
   std::map<NodeId, CanonicalPath> reverse_path_mappings;
-  std::map<NodeId, Location> decls_within_rib;
+  std::map<NodeId, location_t> decls_within_rib;
   std::map<NodeId, std::set<NodeId>> references;
-  Analysis::Mappings *mappings;
+  std::map<NodeId, ItemType> decl_type_mappings;
 };
 
 class Scope
@@ -67,12 +88,16 @@ class Scope
 public:
   Scope (CrateNum crate_num);
 
-  void
-  insert (const CanonicalPath &ident, NodeId id, Location locus, bool shadow,
-	  std::function<void (const CanonicalPath &, NodeId, Location)> dup_cb);
+  void insert (
+    const CanonicalPath &ident, NodeId id, location_t locus, bool shadow,
+    Rib::ItemType type,
+    std::function<void (const CanonicalPath &, NodeId, location_t)> dup_cb);
 
-  void insert (const CanonicalPath &ident, NodeId id, Location locus);
+  void insert (const CanonicalPath &ident, NodeId id, location_t locus,
+	       Rib::ItemType type = Rib::ItemType::Unknown);
   bool lookup (const CanonicalPath &ident, NodeId *id);
+  bool lookup_decl_type (NodeId id, Rib::ItemType *type);
+  bool lookup_rib_for_decl (NodeId id, const Rib **rib);
 
   void iterate (std::function<bool (Rib *)> cb);
   void iterate (std::function<bool (const Rib *)> cb) const;
@@ -85,6 +110,8 @@ public:
   void append_reference_for_def (NodeId refId, NodeId defId);
 
   CrateNum get_crate_num () const { return crate_num; }
+
+  const std::vector<Rib *> &get_context () const { return stack; };
 
 private:
   CrateNum crate_num;
@@ -136,8 +163,12 @@ public:
   Scope &get_macro_scope () { return macro_scope; }
 
   NodeId get_global_type_node_id () { return global_type_node_id; }
+
   void set_unit_type_node_id (NodeId id) { unit_ty_node_id = id; }
   NodeId get_unit_type_node_id () { return unit_ty_node_id; }
+
+  void set_never_type_node_id (NodeId id) { never_ty_node_id = id; }
+  NodeId get_never_type_node_id () { return never_ty_node_id; }
 
   void push_new_module_scope (NodeId module_id)
   {
@@ -168,12 +199,57 @@ public:
     return current_module_stack.at (current_module_stack.size () - 2);
   }
 
+  void push_closure_context (NodeId closure_expr_id);
+  void pop_closure_context ();
+  void insert_captured_item (NodeId id);
+  const std::set<NodeId> &get_captures (NodeId id) const;
+
+  std::string as_debug_string () const
+  {
+    std::stringstream ss;
+
+    ss << "Names:\n";
+    for (auto &n : name_ribs)
+      {
+	ss << "\tNodeID: " << n.first << " Rib: " << n.second->debug_str ()
+	   << "\n";
+      }
+    ss << "Types:\n";
+    for (auto &n : type_ribs)
+      {
+	ss << "\tNodeID: " << n.first << " Rib: " << n.second->debug_str ()
+	   << "\n";
+      }
+    ss << "Macros:\n";
+
+    for (auto &n : macro_ribs)
+      {
+	ss << "\tNodeID: " << n.first << " Rib: " << n.second->debug_str ()
+	   << "\n";
+      }
+
+    ss << "Labels:\n";
+
+    for (auto &n : label_ribs)
+      {
+	ss << "\tNodeID: " << n.first << " Rib: " << n.second->debug_str ()
+	   << "\n";
+      }
+
+    return ss.str ();
+  }
+
+protected:
+  bool decl_needs_capture (NodeId decl_rib_node_id, NodeId closure_rib_node_id,
+			   const Scope &scope);
+
 private:
   Resolver ();
 
   void generate_builtins ();
+  NodeId setup_builtin (const std::string &name, TyTy::BaseType *tyty);
 
-  Analysis::Mappings *mappings;
+  Analysis::Mappings &mappings;
   TypeCheckContext *tyctx;
 
   std::vector<AST::Type *> builtins;
@@ -185,6 +261,7 @@ private:
 
   NodeId global_type_node_id;
   NodeId unit_ty_node_id;
+  NodeId never_ty_node_id;
 
   // map a AST Node to a Rib
   std::map<NodeId, Rib *> name_ribs;
@@ -210,6 +287,10 @@ private:
 
   // keep track of the current module scope ids
   std::vector<NodeId> current_module_stack;
+
+  // captured variables mappings
+  std::vector<NodeId> closure_context;
+  std::map<NodeId, std::set<NodeId>> closures_capture_mappings;
 };
 
 } // namespace Resolver

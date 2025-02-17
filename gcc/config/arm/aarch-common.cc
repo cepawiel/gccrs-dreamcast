@@ -1,7 +1,7 @@
 /* Dependency checks for instruction scheduling, shared between ARM and
    AARCH64.
 
-   Copyright (C) 1991-2022 Free Software Foundation, Inc.
+   Copyright (C) 1991-2024 Free Software Foundation, Inc.
    Contributed by ARM Ltd.
 
    This file is part of GCC.
@@ -36,6 +36,7 @@
 #include "expr.h"
 #include "function.h"
 #include "emit-rtl.h"
+#include "aarch-common.h"
 
 /* Return TRUE if X is either an arithmetic shift left, or
    is a multiplication by a power of two.  */
@@ -533,7 +534,8 @@ arm_mac_accumulator_is_mul_result (rtx producer, rtx consumer)
 rtx_insn *
 arm_md_asm_adjust (vec<rtx> &outputs, vec<rtx> & /*inputs*/,
 		   vec<machine_mode> & /*input_modes*/,
-		   vec<const char *> &constraints, vec<rtx> & /*clobbers*/,
+		   vec<const char *> &constraints,
+		   vec<rtx> & /*uses*/, vec<rtx> & /*clobbers*/,
 		   HARD_REG_SET & /*clobbered_regs*/, location_t loc)
 {
   bool saw_asm_flag = false;
@@ -656,4 +658,148 @@ arm_md_asm_adjust (vec<rtx> &outputs, vec<rtx> & /*inputs*/,
   end_sequence ();
 
   return saw_asm_flag ? seq : NULL;
+}
+
+static void
+aarch_handle_no_branch_protection (void)
+{
+  aarch_ra_sign_scope = AARCH_FUNCTION_NONE;
+  aarch_enable_bti = 0;
+}
+
+static void
+aarch_handle_standard_branch_protection (void)
+{
+  aarch_ra_sign_scope = AARCH_FUNCTION_NON_LEAF;
+  aarch_ra_sign_key = AARCH_KEY_A;
+  aarch_enable_bti = 1;
+}
+
+static void
+aarch_handle_pac_ret_protection (void)
+{
+  aarch_ra_sign_scope = AARCH_FUNCTION_NON_LEAF;
+  aarch_ra_sign_key = AARCH_KEY_A;
+}
+
+static void
+aarch_handle_pac_ret_leaf (void)
+{
+  aarch_ra_sign_scope = AARCH_FUNCTION_ALL;
+}
+
+static void
+aarch_handle_pac_ret_b_key (void)
+{
+  aarch_ra_sign_key = AARCH_KEY_B;
+}
+
+static void
+aarch_handle_bti_protection (void)
+{
+  aarch_enable_bti = 1;
+}
+
+static const struct aarch_branch_protect_type aarch_pac_ret_subtypes[] = {
+  { "leaf", false, aarch_handle_pac_ret_leaf, NULL, 0 },
+  { "b-key", false, aarch_handle_pac_ret_b_key, NULL, 0 },
+  { NULL, false, NULL, NULL, 0 }
+};
+
+static const struct aarch_branch_protect_type aarch_branch_protect_types[] = {
+  { "none", true, aarch_handle_no_branch_protection, NULL, 0 },
+  { "standard", true, aarch_handle_standard_branch_protection, NULL, 0 },
+  { "pac-ret", false, aarch_handle_pac_ret_protection, aarch_pac_ret_subtypes,
+    ARRAY_SIZE (aarch_pac_ret_subtypes) },
+  { "bti", false, aarch_handle_bti_protection, NULL, 0 },
+  { NULL, false, NULL, NULL, 0 }
+};
+
+/* In-place split *str at delim, return *str and set *str to the tail
+   of the string or NULL if the end is reached.  */
+
+static char *
+next_tok (char **str, int delim)
+{
+  char *tok = *str;
+  for (char *p = tok; p && *p != '\0'; p++)
+    {
+      if (*p == delim)
+	{
+	  *p = '\0';
+	  *str = p + 1;
+	  return tok;
+	}
+    }
+  *str = NULL;
+  return tok;
+}
+
+/* Parses CONST_STR for branch protection features specified in
+   aarch64_branch_protect_types, and set any global variables required.
+   Returns true on success.  */
+
+bool
+aarch_validate_mbranch_protection (const char *const_str, const char *opt)
+{
+  char *str_root = xstrdup (const_str);
+  char *next_str = str_root;
+  char *str = next_tok (&next_str, '+');
+  char *alone_str = NULL;
+  bool reject_alone = false;
+  bool res = true;
+
+  /* First entry is "none" and it is used to reset the state.  */
+  aarch_branch_protect_types[0].handler ();
+
+  while (str)
+    {
+      const aarch_branch_protect_type *type = aarch_branch_protect_types;
+      for (; type->name; type++)
+	if (strcmp (str, type->name) == 0)
+	  break;
+      if (type->name == NULL)
+	{
+	  res = false;
+	  if (strcmp (str, "") == 0)
+	    error ("missing feature or flag for %<%s%>", opt);
+	  else
+	    error ("invalid argument %<%s%> for %<%s%>", str, opt);
+	  break;
+	}
+
+      if (type->alone && alone_str == NULL)
+	alone_str = str;
+      else
+	reject_alone = true;
+      if (reject_alone && alone_str != NULL)
+	{
+	  res = false;
+	  error ("argument %<%s%> can only appear alone in %<%s%>",
+		 alone_str, opt);
+	  break;
+	}
+
+      type->handler ();
+      str = next_tok (&next_str, '+');
+      if (type->subtypes == NULL)
+	continue;
+
+      /* Loop through tokens until we find one that isn't a subtype.  */
+      while (str)
+	{
+	  const aarch_branch_protect_type *subtype = type->subtypes;
+	  for (; subtype->name; subtype++)
+	    if (strcmp (str, subtype->name) == 0)
+	      break;
+	  if (subtype->name == NULL)
+	    break;
+
+	  subtype->handler ();
+	  str = next_tok (&next_str, '+');
+	}
+    }
+
+  free (str_root);
+  return res;
 }

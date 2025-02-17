@@ -19,7 +19,7 @@ import core.thread.threadbase;
 import core.thread.context;
 import core.thread.types;
 import core.atomic;
-import core.memory : GC;
+import core.memory : GC, pageSize;
 import core.time;
 import core.exception : onOutOfMemoryError;
 import core.internal.traits : externDFunc;
@@ -493,9 +493,8 @@ class Thread : ThreadBase
         slock.lock_nothrow();
         scope(exit) slock.unlock_nothrow();
         {
-            ++nAboutToStart;
-            pAboutToStart = cast(ThreadBase*)realloc(pAboutToStart, Thread.sizeof * nAboutToStart);
-            pAboutToStart[nAboutToStart - 1] = this;
+            incrementAboutToStart(this);
+
             version (Windows)
             {
                 if ( ResumeThread( m_hndl ) == -1 )
@@ -1115,7 +1114,7 @@ unittest
 
 unittest
 {
-    // use >PAGESIZE to avoid stack overflow (e.g. in an syscall)
+    // use >pageSize to avoid stack overflow (e.g. in an syscall)
     auto thr = new Thread(function{}, 4096 + 1).start();
     thr.join();
 }
@@ -1626,7 +1625,7 @@ extern (C) @nogc nothrow
 }
 
 
-package extern(D) void* getStackTop() nothrow @nogc
+private extern(D) void* getStackTop() nothrow @nogc
 {
     version (D_InlineAsm_X86)
         asm pure nothrow @nogc { naked; mov EAX, ESP; ret; }
@@ -1639,7 +1638,7 @@ package extern(D) void* getStackTop() nothrow @nogc
 }
 
 
-package extern(D) void* getStackBottom() nothrow @nogc
+private extern(D) void* getStackBottom() nothrow @nogc
 {
     version (Windows)
     {
@@ -1997,12 +1996,17 @@ extern (C) void thread_suspendAll() nothrow
         Thread.criticalRegionLock.lock_nothrow();
         scope (exit) Thread.criticalRegionLock.unlock_nothrow();
         size_t cnt;
+        bool suspendedSelf;
         Thread t = ThreadBase.sm_tbeg.toThread;
         while (t)
         {
             auto tn = t.next.toThread;
             if (suspend(t))
+            {
+                if (t is ThreadBase.getThis())
+                    suspendedSelf = true;
                 ++cnt;
+            }
             t = tn;
         }
 
@@ -2010,9 +2014,12 @@ extern (C) void thread_suspendAll() nothrow
         {}
         else version (Posix)
         {
-            // subtract own thread
+            // Subtract own thread if we called suspend() on ourselves.
+            // For example, suspendedSelf would be false if the current
+            // thread ran thread_detachThis().
             assert(cnt >= 1);
-            --cnt;
+            if (suspendedSelf)
+                --cnt;
             // wait for semaphore notifications
             for (; cnt; --cnt)
             {
@@ -2096,6 +2103,8 @@ private extern (D) void resume(ThreadBase _t) nothrow @nogc
             t.m_curr.tstack = t.m_curr.bstack;
         }
     }
+    else
+        static assert(false, "Platform not supported.");
 }
 
 
@@ -2121,6 +2130,13 @@ extern (C) void thread_init() @nogc nothrow
         static extern(C) void initChildAfterFork()
         {
             auto thisThread = Thread.getThis();
+            if (!thisThread)
+            {
+                // It is possible that runtime was not properly initialized in the current process or thread -
+                // it may happen after `fork` call when using a dynamically loaded shared library written in D from a multithreaded non-D program.
+                // In such case getThis will return null.
+                return;
+            }
             thisThread.m_addr = pthread_self();
             assert( thisThread.m_addr != thisThread.m_addr.init );
             thisThread.m_tmach = pthread_mach_thread_np( thisThread.m_addr );
@@ -2881,8 +2897,8 @@ private size_t adjustStackSize(size_t sz) nothrow @nogc
         }
     }
 
-    // stack size must be a multiple of PAGESIZE
-    sz = ((sz + PAGESIZE - 1) & ~(PAGESIZE - 1));
+    // stack size must be a multiple of pageSize
+    sz = ((sz + pageSize - 1) & ~(pageSize - 1));
 
     return sz;
 }

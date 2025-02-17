@@ -1,5 +1,5 @@
 /* A state machine for detecting misuses of the malloc/free API.
-   Copyright (C) 2019-2022 Free Software Foundation, Inc.
+   Copyright (C) 2019-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -19,16 +19,18 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #include "config.h"
+#define INCLUDE_MEMORY
 #include "system.h"
 #include "coretypes.h"
+#include "make-unique.h"
 #include "tree.h"
 #include "function.h"
 #include "basic-block.h"
 #include "gimple.h"
 #include "options.h"
 #include "bitmap.h"
+#include "diagnostic-core.h"
 #include "diagnostic-path.h"
-#include "diagnostic-metadata.h"
 #include "analyzer/analyzer.h"
 #include "diagnostic-event-id.h"
 #include "analyzer/analyzer-logging.h"
@@ -38,10 +40,14 @@ along with GCC; see the file COPYING3.  If not see
 #include "analyzer/program-point.h"
 #include "analyzer/store.h"
 #include "analyzer/region-model.h"
+#include "analyzer/call-details.h"
 #include "stringpool.h"
 #include "attribs.h"
 #include "analyzer/function-set.h"
 #include "analyzer/program-state.h"
+#include "analyzer/checker-event.h"
+#include "analyzer/exploded-graph.h"
+#include "analyzer/inlining-iterator.h"
 
 #if ENABLE_ANALYZER
 
@@ -85,6 +91,9 @@ enum resource_state
   /* The start state.  */
   RS_START,
 
+  /* State for a pointer that's been unconditionally dereferenced.  */
+  RS_ASSUMED_NON_NULL,
+
   /* State for a pointer that's known to be NULL.  */
   RS_NULL,
 
@@ -124,13 +133,32 @@ struct allocation_state : public state_machine::state
     m_deallocator (deallocator)
   {}
 
-  void dump_to_pp (pretty_printer *pp) const final override;
+  void dump_to_pp (pretty_printer *pp) const override;
 
   const allocation_state *get_nonnull () const;
 
   enum resource_state m_rs;
   const deallocator_set *m_deallocators;
   const deallocator *m_deallocator;
+};
+
+/* Custom state subclass, for the "assumed-non-null" state
+   where the assumption happens in a particular frame.  */
+
+struct assumed_non_null_state : public allocation_state
+{
+  assumed_non_null_state (const char *name, unsigned id,
+			  const frame_region *frame)
+  : allocation_state (name, id, RS_ASSUMED_NON_NULL,
+		      NULL, NULL),
+    m_frame (frame)
+  {
+    gcc_assert (m_frame);
+  }
+
+  void dump_to_pp (pretty_printer *pp) const final override;
+
+  const frame_region *m_frame;
 };
 
 /* An enum for choosing which wording to use in various diagnostics
@@ -382,19 +410,35 @@ public:
 		     enum tree_code op,
 		     const svalue *rhs) const final override;
 
+  void on_pop_frame (sm_state_map *smap,
+		     const frame_region *) const final override;
+
   bool can_purge_p (state_t s) const final override;
-  pending_diagnostic *on_leak (tree var) const final override;
+  std::unique_ptr<pending_diagnostic> on_leak (tree var) const final override;
 
   bool reset_when_passed_to_unknown_fn_p (state_t s,
 					  bool is_mutable) const final override;
 
+  state_t
+  maybe_get_merged_states_nonequal (state_t state_a,
+				    state_t state_b) const final override;
+
   static bool unaffected_by_call_p (tree fndecl);
+
+  void maybe_assume_non_null (sm_context *sm_ctxt,
+			      tree ptr,
+			      const gimple *stmt) const;
 
   void on_realloc_with_move (region_model *model,
 			     sm_state_map *smap,
 			     const svalue *old_ptr_sval,
 			     const svalue *new_ptr_sval,
 			     const extrinsic_state &ext_state) const;
+
+  void transition_ptr_sval_non_null (region_model *model,
+      sm_state_map *smap,
+      const svalue *new_ptr_sval,
+      const extrinsic_state &ext_state) const;
 
   standard_deallocator_set m_free;
   standard_deallocator_set m_scalar_delete;
@@ -403,6 +447,10 @@ public:
   standard_deallocator m_realloc;
 
   /* States that are independent of api.  */
+
+  /* States for a pointer that's been unconditionally dereferenced
+     in a particular stack frame.  */
+  hash_map<const frame_region *, state_t> m_assumed_non_null;
 
   /* State for a pointer that's known to be NULL.  */
   state_t m_null;
@@ -422,6 +470,16 @@ private:
   maybe_create_custom_deallocator_set (tree allocator_fndecl);
   const deallocator *
   get_or_create_deallocator (tree deallocator_fndecl);
+
+  state_t
+  get_or_create_assumed_non_null_state_for_frame (const frame_region *frame);
+
+  void
+  maybe_complain_about_deref_before_check (sm_context *sm_ctxt,
+					   const supernode *node,
+					   const gimple *stmt,
+					   const assumed_non_null_state *,
+					   tree ptr) const;
 
   void on_allocator_call (sm_context *sm_ctxt,
 			  const gcall *call,
@@ -676,6 +734,14 @@ freed_p (state_machine::state_t state)
   return get_rs (state) == RS_FREED;
 }
 
+/* Return true if STATE is a value that has been assumed to be non-NULL.  */
+
+static bool
+assumed_non_null_p (state_machine::state_t state)
+{
+  return get_rs (state) == RS_ASSUMED_NON_NULL;
+}
+
 /* Class for diagnostics relating to malloc_state_machine.  */
 
 class malloc_diagnostic : public pending_diagnostic
@@ -694,7 +760,7 @@ public:
     override
   {
     if (change.m_old_state == m_sm.get_start_state ()
-	&& unchecked_p (change.m_new_state))
+	&& (unchecked_p (change.m_new_state) || nonnull_p (change.m_new_state)))
       // TODO: verify that it's the allocation stmt, not a copy
       return label_text::borrow ("allocated here");
     if (unchecked_p (change.m_old_state)
@@ -775,23 +841,20 @@ public:
     return OPT_Wanalyzer_mismatching_deallocation;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     auto_diagnostic_group d;
-    diagnostic_metadata m;
-    m.add_cwe (762); /* CWE-762: Mismatched Memory Management Routines.  */
+    ctxt.add_cwe (762); /* CWE-762: Mismatched Memory Management Routines.  */
     if (const deallocator *expected_dealloc
 	  = m_expected_deallocators->maybe_get_single ())
-      return warning_meta (rich_loc, m, get_controlling_option (),
-			   "%qE should have been deallocated with %qs"
-			   " but was deallocated with %qs",
-			   m_arg, expected_dealloc->m_name,
-			   m_actual_dealloc->m_name);
+      return ctxt.warn ("%qE should have been deallocated with %qs"
+			" but was deallocated with %qs",
+			m_arg, expected_dealloc->m_name,
+			m_actual_dealloc->m_name);
     else
-      return warning_meta (rich_loc, m, get_controlling_option (),
-			   "%qs called on %qE returned from a mismatched"
-			   " allocation function",
-			   m_actual_dealloc->m_name, m_arg);
+      return ctxt.warn ("%qs called on %qE returned from a mismatched"
+			" allocation function",
+			m_actual_dealloc->m_name, m_arg);
   }
 
   label_text describe_state_change (const evdesc::state_change &change)
@@ -854,13 +917,11 @@ public:
     return OPT_Wanalyzer_double_free;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     auto_diagnostic_group d;
-    diagnostic_metadata m;
-    m.add_cwe (415); /* CWE-415: Double Free.  */
-    return warning_meta (rich_loc, m, get_controlling_option (),
-			 "double-%qs of %qE", m_funcname, m_arg);
+    ctxt.add_cwe (415); /* CWE-415: Double Free.  */
+    return ctxt.warn ("double-%qs of %qE", m_funcname, m_arg);
   }
 
   label_text describe_state_change (const evdesc::state_change &change)
@@ -950,13 +1011,11 @@ public:
     return OPT_Wanalyzer_possible_null_dereference;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* CWE-690: Unchecked Return Value to NULL Pointer Dereference.  */
-    diagnostic_metadata m;
-    m.add_cwe (690);
-    return warning_meta (rich_loc, m, get_controlling_option (),
-			 "dereference of possibly-NULL %qE", m_arg);
+    ctxt.add_cwe (690);
+    return ctxt.warn ("dereference of possibly-NULL %qE", m_arg);
   }
 
   label_text describe_final_event (const evdesc::final_event &ev) final override
@@ -1039,16 +1098,14 @@ public:
     return OPT_Wanalyzer_possible_null_argument;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* CWE-690: Unchecked Return Value to NULL Pointer Dereference.  */
     auto_diagnostic_group d;
-    diagnostic_metadata m;
-    m.add_cwe (690);
+    ctxt.add_cwe (690);
     bool warned
-      = warning_meta (rich_loc, m, get_controlling_option (),
-		      "use of possibly-NULL %qE where non-null expected",
-		      m_arg);
+      = ctxt.warn ("use of possibly-NULL %qE where non-null expected",
+		   m_arg);
     if (warned)
       inform_nonnull_attribute (m_fndecl, m_arg_idx);
     return warned;
@@ -1090,13 +1147,13 @@ public:
     return OPT_Wanalyzer_null_dereference;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool terminate_path_p () const final override { return true; }
+
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* CWE-476: NULL Pointer Dereference.  */
-    diagnostic_metadata m;
-    m.add_cwe (476);
-    return warning_meta (rich_loc, m, get_controlling_option (),
-			 "dereference of NULL %qE", m_arg);
+    ctxt.add_cwe (476);
+    return ctxt.warn ("dereference of NULL %qE", m_arg);
   }
 
   label_text describe_return_of_state (const evdesc::return_of_state &info)
@@ -1111,6 +1168,21 @@ public:
   label_text describe_final_event (const evdesc::final_event &ev) final override
   {
     return ev.formatted_print ("dereference of NULL %qE", ev.m_expr);
+  }
+
+  /* Implementation of pending_diagnostic::supercedes_p for
+     null-deref.
+
+     We want null-deref to supercede use-of-unitialized-value,
+     so that if we have these at the same stmt, we don't emit
+     a use-of-uninitialized, just the null-deref.  */
+
+  bool supercedes_p (const pending_diagnostic &other) const final override
+  {
+    if (other.use_of_uninit_p ())
+      return true;
+
+    return false;
   }
 };
 
@@ -1143,21 +1215,20 @@ public:
     return OPT_Wanalyzer_null_argument;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool terminate_path_p () const final override { return true; }
+
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* CWE-476: NULL Pointer Dereference.  */
     auto_diagnostic_group d;
-    diagnostic_metadata m;
-    m.add_cwe (476);
+    ctxt.add_cwe (476);
 
     bool warned;
     if (zerop (m_arg))
-      warned = warning_meta (rich_loc, m, get_controlling_option (),
-			     "use of NULL where non-null expected");
+      warned = ctxt.warn ("use of NULL where non-null expected");
     else
-      warned = warning_meta (rich_loc, m, get_controlling_option (),
-			     "use of NULL %qE where non-null expected",
-			     m_arg);
+      warned = ctxt.warn ("use of NULL %qE where non-null expected",
+			  m_arg);
     if (warned)
       inform_nonnull_attribute (m_fndecl, m_arg_idx);
     return warned;
@@ -1200,14 +1271,12 @@ public:
     return OPT_Wanalyzer_use_after_free;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* CWE-416: Use After Free.  */
-    diagnostic_metadata m;
-    m.add_cwe (416);
-    return warning_meta (rich_loc, m, get_controlling_option (),
-			 "use after %<%s%> of %qE",
-			 m_deallocator->m_name, m_arg);
+    ctxt.add_cwe (416);
+    return ctxt.warn ("use after %<%s%> of %qE",
+		      m_deallocator->m_name, m_arg);
   }
 
   label_text describe_state_change (const evdesc::state_change &change)
@@ -1294,17 +1363,14 @@ public:
     return OPT_Wanalyzer_malloc_leak;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     /* "CWE-401: Missing Release of Memory after Effective Lifetime".  */
-    diagnostic_metadata m;
-    m.add_cwe (401);
+    ctxt.add_cwe (401);
     if (m_arg)
-      return warning_meta (rich_loc, m, get_controlling_option (),
-			   "leak of %qE", m_arg);
+      return ctxt.warn ("leak of %qE", m_arg);
     else
-      return warning_meta (rich_loc, m, get_controlling_option (),
-			   "leak of %qs", "<unknown>");
+      return ctxt.warn ("leak of %qs", "<unknown>");
   }
 
   label_text describe_state_change (const evdesc::state_change &change)
@@ -1368,11 +1434,10 @@ public:
     return OPT_Wanalyzer_free_of_non_heap;
   }
 
-  bool emit (rich_location *rich_loc) final override
+  bool emit (diagnostic_emission_context &ctxt) final override
   {
     auto_diagnostic_group d;
-    diagnostic_metadata m;
-    m.add_cwe (590); /* CWE-590: Free of Memory not on the Heap.  */
+    ctxt.add_cwe (590); /* CWE-590: Free of Memory not on the Heap.  */
     switch (get_memory_space ())
       {
       default:
@@ -1382,16 +1447,14 @@ public:
       case MEMSPACE_CODE:
       case MEMSPACE_GLOBALS:
       case MEMSPACE_READONLY_DATA:
-	return warning_meta (rich_loc, m, get_controlling_option (),
-			     "%<%s%> of %qE which points to memory"
-			     " not on the heap",
-			     m_funcname, m_arg);
+	return ctxt.warn ("%<%s%> of %qE which points to memory"
+			  " not on the heap",
+			  m_funcname, m_arg);
 	break;
       case MEMSPACE_STACK:
-	return warning_meta (rich_loc, m, get_controlling_option (),
-			     "%<%s%> of %qE which points to memory"
-			     " on the stack",
-			     m_funcname, m_arg);
+	return ctxt.warn ("%<%s%> of %qE which points to memory"
+			  " on the stack",
+			  m_funcname, m_arg);
 	break;
       }
   }
@@ -1426,6 +1489,154 @@ private:
   const char *m_funcname;
 };
 
+/* Concrete pending_diagnostic subclass for -Wanalyzer-deref-before-check.  */
+
+class deref_before_check : public malloc_diagnostic
+{
+public:
+  deref_before_check (const malloc_state_machine &sm, tree arg)
+  : malloc_diagnostic (sm, arg),
+    m_deref_enode (NULL),
+    m_deref_expr (NULL),
+    m_check_enode (NULL)
+  {
+    gcc_assert (arg);
+  }
+
+  const char *get_kind () const final override { return "deref_before_check"; }
+
+  int get_controlling_option () const final override
+  {
+    return OPT_Wanalyzer_deref_before_check;
+  }
+
+  bool emit (diagnostic_emission_context &ctxt) final override
+  {
+    /* Don't emit the warning if we can't show where the deref
+       and the check occur.  */
+    if (!m_deref_enode)
+      return false;
+    if (!m_check_enode)
+      return false;
+    /* Only emit the warning for intraprocedural cases.  */
+    const program_point &deref_point = m_deref_enode->get_point ();
+    const program_point &check_point = m_check_enode->get_point ();
+
+    if (!program_point::effectively_intraprocedural_p (deref_point,
+						       check_point))
+      return false;
+
+    /* Reject the warning if the check occurs within a macro defintion.
+       This avoids false positives for such code as:
+
+	#define throw_error \
+	   do {             \
+	     if (p)         \
+	       cleanup (p); \
+	     return;        \
+	   } while (0)
+
+	if (p->idx >= n)
+	  throw_error ();
+
+       where the usage of "throw_error" implicitly adds a check
+       on 'p'.
+
+       We do warn when the check is in a macro expansion if we can get
+       at the location of the condition and it is't part of the
+       definition, so that we warn for checks such as:
+	   if (words[0][0] == '@')
+	     return;
+	   g_assert(words[0] != NULL); <--- here
+       Unfortunately we don't have locations for individual gimple
+       arguments, so in:
+	   g_assert (ptr);
+       we merely have a gimple_cond
+	   if (p_2(D) == 0B)
+       with no way of getting at the location of the condition separately
+       from that of the gimple_cond (where the "if" is within the macro
+       definition).  We reject the warning for such cases.
+
+       We do warn when the *deref* occurs in a macro, since this can be
+       a source of real bugs; see e.g. PR 77425.  */
+    location_t check_loc = m_check_enode->get_point ().get_location ();
+    if (linemap_location_from_macro_definition_p (line_table, check_loc))
+      return false;
+
+    /* Reject if m_deref_expr is sufficiently different from m_arg
+       for cases where the dereference is spelled differently from
+       the check, which is probably two different ways to get the
+       same svalue, and thus not worth reporting.  */
+    if (!m_deref_expr)
+      return false;
+    if (!sufficiently_similar_p (m_deref_expr, m_arg))
+      return false;
+
+    /* Reject the warning if the deref's BB doesn't dominate that
+       of the check, so that we don't warn e.g. for shared cleanup
+       code that checks a pointer for NULL, when that code is sometimes
+       used before a deref and sometimes after.
+       Using the dominance code requires setting cfun.  */
+    auto_cfun sentinel (m_deref_enode->get_function ());
+    calculate_dominance_info (CDI_DOMINATORS);
+    if (!dominated_by_p (CDI_DOMINATORS,
+			 m_check_enode->get_supernode ()->m_bb,
+			 m_deref_enode->get_supernode ()->m_bb))
+      return false;
+
+    return ctxt.warn ("check of %qE for NULL after already"
+		      " dereferencing it",
+		      m_arg);
+  }
+
+  label_text describe_state_change (const evdesc::state_change &change)
+    final override
+  {
+    if (change.m_old_state == m_sm.get_start_state ()
+	&& assumed_non_null_p (change.m_new_state))
+      {
+	m_first_deref_event = change.m_event_id;
+	m_deref_enode = change.m_event.get_exploded_node ();
+	m_deref_expr = change.m_expr;
+	return change.formatted_print ("pointer %qE is dereferenced here",
+				       m_arg);
+      }
+    return malloc_diagnostic::describe_state_change (change);
+  }
+
+  label_text describe_final_event (const evdesc::final_event &ev) final override
+  {
+    m_check_enode = ev.m_event.get_exploded_node ();
+    if (m_first_deref_event.known_p ())
+      return ev.formatted_print ("pointer %qE is checked for NULL here but"
+				 " it was already dereferenced at %@",
+				 m_arg, &m_first_deref_event);
+    else
+      return ev.formatted_print ("pointer %qE is checked for NULL here but"
+				 " it was already dereferenced",
+				 m_arg);
+  }
+
+private:
+  static bool sufficiently_similar_p (tree expr_a, tree expr_b)
+  {
+    pretty_printer *pp_a = global_dc->printer->clone ();
+    pretty_printer *pp_b = global_dc->printer->clone ();
+    pp_printf (pp_a, "%qE", expr_a);
+    pp_printf (pp_b, "%qE", expr_b);
+    bool result = (strcmp (pp_formatted_text (pp_a), pp_formatted_text (pp_b))
+		   == 0);
+    delete pp_a;
+    delete pp_b;
+    return result;
+  }
+
+  diagnostic_event_id_t m_first_deref_event;
+  const exploded_node *m_deref_enode;
+  tree m_deref_expr;
+  const exploded_node *m_check_enode;
+};
+
 /* struct allocation_state : public state_machine::state.  */
 
 /* Implementation of state_machine::state::dump_to_pp vfunc
@@ -1452,6 +1663,17 @@ allocation_state::get_nonnull () const
 {
   gcc_assert (m_deallocators);
   return as_a_allocation_state (m_deallocators->m_nonnull);
+}
+
+/* struct assumed_non_null_state : public allocation_state.  */
+
+void
+assumed_non_null_state::dump_to_pp (pretty_printer *pp) const
+{
+  allocation_state::dump_to_pp (pp);
+  pp_string (pp, " (in ");
+  m_frame->dump_to_pp (pp, true);
+  pp_character (pp, ')');
 }
 
 /* malloc_state_machine's ctor.  */
@@ -1595,6 +1817,22 @@ malloc_state_machine::get_or_create_deallocator (tree deallocator_fndecl)
   return d;
 }
 
+/* Get the "assumed-non-null" state for assumptions made within FRAME,
+   creating it if necessary.  */
+
+state_machine::state_t
+malloc_state_machine::
+get_or_create_assumed_non_null_state_for_frame (const frame_region *frame)
+{
+  if (state_t *slot = m_assumed_non_null.get (frame))
+    return *slot;
+  state_machine::state *new_state
+    = new assumed_non_null_state ("assumed-non-null", alloc_state_id (), frame);
+  add_custom_state (new_state);
+  m_assumed_non_null.put (frame, new_state);
+  return new_state;
+}
+
 /* Try to identify the function declaration either by name or as a known malloc
    builtin.  */
 
@@ -1627,6 +1865,33 @@ known_allocator_p (const_tree fndecl, const gcall *call)
   return false;
 }
 
+/* If PTR's nullness is not known, transition it to the "assumed-non-null"
+   state for the current frame.  */
+
+void
+malloc_state_machine::maybe_assume_non_null (sm_context *sm_ctxt,
+					     tree ptr,
+					     const gimple *stmt) const
+{
+  const region_model *old_model = sm_ctxt->get_old_region_model ();
+  if (!old_model)
+    return;
+
+  tree null_ptr_cst = build_int_cst (TREE_TYPE (ptr), 0);
+  tristate known_non_null
+    = old_model->eval_condition (ptr, NE_EXPR, null_ptr_cst, NULL);
+  if (known_non_null.is_unknown ())
+    {
+      /* Cast away const-ness for cache-like operations.  */
+      malloc_state_machine *mut_this
+	= const_cast <malloc_state_machine *> (this);
+      state_t next_state
+	= mut_this->get_or_create_assumed_non_null_state_for_frame
+	(old_model->get_current_frame ());
+      sm_ctxt->set_next_state (stmt, ptr, next_state);
+    }
+}
+
 /* Implementation of state_machine::on_stmt vfunc for malloc_state_machine.  */
 
 bool
@@ -1643,12 +1908,20 @@ malloc_state_machine::on_stmt (sm_context *sm_ctxt,
 	    return true;
 	  }
 
-	if (is_named_call_p (callee_fndecl, "operator new", call, 1))
-	  on_allocator_call (sm_ctxt, call, &m_scalar_delete);
-	else if (is_named_call_p (callee_fndecl, "operator new []", call, 1))
-	  on_allocator_call (sm_ctxt, call, &m_vector_delete);
-	else if (is_named_call_p (callee_fndecl, "operator delete", call, 1)
-		 || is_named_call_p (callee_fndecl, "operator delete", call, 2))
+	if (!is_placement_new_p (call))
+	  {
+	    bool returns_nonnull = !TREE_NOTHROW (callee_fndecl)
+				   && flag_exceptions;
+	    if (is_named_call_p (callee_fndecl, "operator new"))
+	      on_allocator_call (sm_ctxt, call,
+				 &m_scalar_delete, returns_nonnull);
+	    else if (is_named_call_p (callee_fndecl, "operator new []"))
+	      on_allocator_call (sm_ctxt, call,
+				 &m_vector_delete, returns_nonnull);
+	  }
+
+	if (is_named_call_p (callee_fndecl, "operator delete", call, 1)
+	    || is_named_call_p (callee_fndecl, "operator delete", call, 2))
 	  {
 	    on_deallocator_call (sm_ctxt, node, call,
 				 &m_scalar_delete.m_deallocator, 0);
@@ -1693,71 +1966,119 @@ malloc_state_machine::on_stmt (sm_context *sm_ctxt,
 	malloc_state_machine *mutable_this
 	  = const_cast <malloc_state_machine *> (this);
 
-	/* Handle "__attribute__((malloc(FOO)))".   */
-	if (const deallocator_set *deallocators
+	/* Handle interesting attributes of the callee_fndecl,
+	   or prioritize those of the builtin that callee_fndecl is expected
+	   to be.
+	   Might want this to be controlled by a flag.  */
+	{
+	  tree fndecl = callee_fndecl;
+	  /* If call is recognized as a builtin known_function, use that
+	     builtin's function_decl.  */
+	  if (const region_model *old_model = sm_ctxt->get_old_region_model ())
+	    if (const builtin_known_function *builtin_kf
+		= old_model->get_builtin_kf (call))
+	      fndecl = builtin_kf->builtin_decl ();
+
+	  /* Handle "__attribute__((malloc(FOO)))".   */
+	  if (const deallocator_set *deallocators
 	      = mutable_this->get_or_create_custom_deallocator_set
-		  (callee_fndecl))
+		  (fndecl))
+	    {
+	      tree attrs = TYPE_ATTRIBUTES (TREE_TYPE (fndecl));
+	      bool returns_nonnull
+		= lookup_attribute ("returns_nonnull", attrs);
+	      on_allocator_call (sm_ctxt, call, deallocators, returns_nonnull);
+	    }
+
 	  {
-	    tree attrs = TYPE_ATTRIBUTES (TREE_TYPE (callee_fndecl));
-	    bool returns_nonnull
-	      = lookup_attribute ("returns_nonnull", attrs);
-	    on_allocator_call (sm_ctxt, call, deallocators, returns_nonnull);
+	    /* Handle "__attribute__((nonnull))".   */
+	    tree fntype = TREE_TYPE (fndecl);
+	    bitmap nonnull_args = get_nonnull_args (fntype);
+	    if (nonnull_args)
+	      {
+		for (unsigned i = 0; i < gimple_call_num_args (stmt); i++)
+		  {
+		    tree arg = gimple_call_arg (stmt, i);
+		    if (TREE_CODE (TREE_TYPE (arg)) != POINTER_TYPE)
+		      continue;
+		    /* If we have a nonnull-args, and either all pointers, or
+		       just the specified pointers.  */
+		    if (bitmap_empty_p (nonnull_args)
+			|| bitmap_bit_p (nonnull_args, i))
+		      {
+			state_t state = sm_ctxt->get_state (stmt, arg);
+			/* Can't use a switch as the states are non-const.  */
+			/* Do use the fndecl that caused the warning so that the
+			   misused attributes are printed and the user not
+			   confused.  */
+			if (unchecked_p (state))
+			  {
+			    tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
+			    sm_ctxt->warn (node, stmt, arg,
+					  make_unique<possible_null_arg>
+					    (*this, diag_arg, fndecl, i));
+			    const allocation_state *astate
+			      = as_a_allocation_state (state);
+			    sm_ctxt->set_next_state (stmt, arg,
+						    astate->get_nonnull ());
+			  }
+			else if (state == m_null)
+			  {
+			    tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
+			    sm_ctxt->warn (node, stmt, arg,
+					  make_unique<null_arg>
+					    (*this, diag_arg, fndecl, i));
+			    sm_ctxt->set_next_state (stmt, arg, m_stop);
+			  }
+			else if (state == m_start)
+			  maybe_assume_non_null (sm_ctxt, arg, stmt);
+		      }
+		  }
+		BITMAP_FREE (nonnull_args);
+	      }
 	  }
 
-	/* Handle "__attribute__((nonnull))".   */
-	{
-	  tree fntype = TREE_TYPE (callee_fndecl);
-	  bitmap nonnull_args = get_nonnull_args (fntype);
-	  if (nonnull_args)
+	  /* Check for this after nonnull, so that if we have both
+	     then we transition to "freed", rather than "checked".  */
+	  unsigned dealloc_argno = fndecl_dealloc_argno (fndecl);
+	  if (dealloc_argno != UINT_MAX)
 	    {
-	      for (unsigned i = 0; i < gimple_call_num_args (stmt); i++)
-		{
-		  tree arg = gimple_call_arg (stmt, i);
-		  if (TREE_CODE (TREE_TYPE (arg)) != POINTER_TYPE)
-		    continue;
-		  /* If we have a nonnull-args, and either all pointers, or just
-		     the specified pointers.  */
-		  if (bitmap_empty_p (nonnull_args)
-		      || bitmap_bit_p (nonnull_args, i))
-		    {
-		      state_t state = sm_ctxt->get_state (stmt, arg);
-		      /* Can't use a switch as the states are non-const.  */
-		      if (unchecked_p (state))
-			{
-			  tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
-			  sm_ctxt->warn (node, stmt, arg,
-					 new possible_null_arg (*this, diag_arg,
-								callee_fndecl,
-								i));
-			  const allocation_state *astate
-			    = as_a_allocation_state (state);
-			  sm_ctxt->set_next_state (stmt, arg,
-						   astate->get_nonnull ());
-			}
-		      else if (state == m_null)
-			{
-			  tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
-			  sm_ctxt->warn (node, stmt, arg,
-					 new null_arg (*this, diag_arg,
-						       callee_fndecl, i));
-			  sm_ctxt->set_next_state (stmt, arg, m_stop);
-			}
-		    }
-		}
-	      BITMAP_FREE (nonnull_args);
+	      const deallocator *d
+		= mutable_this->get_or_create_deallocator (fndecl);
+	      on_deallocator_call (sm_ctxt, node, call, d, dealloc_argno);
 	    }
 	}
-
-	/* Check for this after nonnull, so that if we have both
-	   then we transition to "freed", rather than "checked".  */
-	unsigned dealloc_argno = fndecl_dealloc_argno (callee_fndecl);
-	if (dealloc_argno != UINT_MAX)
-	  {
-	    const deallocator *d
-	      = mutable_this->get_or_create_deallocator (callee_fndecl);
-	    on_deallocator_call (sm_ctxt, node, call, d, dealloc_argno);
-	  }
       }
+
+  /* Look for pointers explicitly being compared against zero
+     that are in state assumed_non_null i.e. we already defererenced
+     them.
+     We have to do this check here, rather than in on_condition
+     because we add a constraint that the pointer is non-null when
+     dereferencing it, and this makes the apply_constraints_for_gcond
+     find known-true and known-false conditions; on_condition is only
+     called when adding new constraints.  */
+  if (const gcond *cond_stmt = dyn_cast <const gcond *> (stmt))
+    {
+      enum tree_code op = gimple_cond_code (cond_stmt);
+      if (op == EQ_EXPR || op == NE_EXPR)
+	{
+	  tree lhs = gimple_cond_lhs (cond_stmt);
+	  tree rhs = gimple_cond_rhs (cond_stmt);
+	  if (any_pointer_p (lhs)
+	      && any_pointer_p (rhs)
+	      && zerop (rhs))
+	    {
+	      state_t state = sm_ctxt->get_state (stmt, lhs);
+	      if (assumed_non_null_p (state))
+		maybe_complain_about_deref_before_check
+		  (sm_ctxt, node,
+		   stmt,
+		   (const assumed_non_null_state *)state,
+		   lhs);
+	    }
+	}
+    }
 
   if (tree lhs = sm_ctxt->is_zero_assignment (stmt))
     if (any_pointer_p (lhs))
@@ -1777,11 +2098,14 @@ malloc_state_machine::on_stmt (sm_context *sm_ctxt,
 	  tree arg = TREE_OPERAND (op, 0);
 
 	  state_t state = sm_ctxt->get_state (stmt, arg);
-	  if (unchecked_p (state))
+	  if (state == m_start)
+	    maybe_assume_non_null (sm_ctxt, arg, stmt);
+	  else if (unchecked_p (state))
 	    {
 	      tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
 	      sm_ctxt->warn (node, stmt, arg,
-			     new possible_null_deref (*this, diag_arg));
+			     make_unique<possible_null_deref> (*this,
+							       diag_arg));
 	      const allocation_state *astate = as_a_allocation_state (state);
 	      sm_ctxt->set_next_state (stmt, arg, astate->get_nonnull ());
 	    }
@@ -1789,7 +2113,7 @@ malloc_state_machine::on_stmt (sm_context *sm_ctxt,
 	    {
 	      tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
 	      sm_ctxt->warn (node, stmt, arg,
-			     new null_deref (*this, diag_arg));
+			     make_unique<null_deref> (*this, diag_arg));
 	      sm_ctxt->set_next_state (stmt, arg, m_stop);
 	    }
 	  else if (freed_p (state))
@@ -1797,13 +2121,70 @@ malloc_state_machine::on_stmt (sm_context *sm_ctxt,
 	      tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
 	      const allocation_state *astate = as_a_allocation_state (state);
 	      sm_ctxt->warn (node, stmt, arg,
-			     new use_after_free (*this, diag_arg,
-						 astate->m_deallocator));
+			     make_unique<use_after_free>
+			       (*this, diag_arg, astate->m_deallocator));
 	      sm_ctxt->set_next_state (stmt, arg, m_stop);
 	    }
 	}
     }
   return false;
+}
+
+/* Given a check against null of PTR in assumed-non-null state STATE,
+   potentially add a deref_before_check warning to SM_CTXT.  */
+
+void
+malloc_state_machine::
+maybe_complain_about_deref_before_check (sm_context *sm_ctxt,
+					 const supernode *node,
+					 const gimple *stmt,
+					 const assumed_non_null_state *state,
+					 tree ptr) const
+{
+  const region_model *model = sm_ctxt->get_old_region_model ();
+  if (!model)
+    return;
+
+  /* Don't complain if the current frame (where the check is occurring) is
+     deeper than the frame in which the "not null" assumption was made.
+     This suppress false positives for cases like:
+
+	void foo (struct s *p)
+	{
+	  int val = s->some_field; // deref here
+	  shared_helper (p);
+	}
+
+     where "shared_helper" has:
+
+	void shared_helper (struct s *p)
+	{
+	  if (!p) // check here
+	    return;
+	  // etc
+	}
+
+     since the check in "shared_helper" is OK.  */
+  const frame_region *checked_in_frame = model->get_current_frame ();
+  const frame_region *assumed_nonnull_in_frame = state->m_frame;
+  if (checked_in_frame->get_index () > assumed_nonnull_in_frame->get_index ())
+    return;
+
+  /* Don't complain if STMT was inlined from another function, to avoid
+     similar false positives involving shared helper functions.  */
+  if (stmt->location)
+    {
+      inlining_info info (stmt->location);
+      if (info.get_extra_frames () > 0)
+	return;
+    }
+
+  tree diag_ptr = sm_ctxt->get_diagnostic_tree (ptr);
+  if (diag_ptr)
+    sm_ctxt->warn
+      (node, stmt, ptr,
+       make_unique<deref_before_check> (*this, diag_ptr));
+  sm_ctxt->set_next_state (stmt, ptr, m_stop);
 }
 
 /* Handle a call to an allocator.
@@ -1850,8 +2231,8 @@ malloc_state_machine::handle_free_of_non_heap (sm_context *sm_ctxt,
       freed_reg = old_model->deref_rvalue (ptr_sval, arg, NULL);
     }
   sm_ctxt->warn (node, call, arg,
-		 new free_of_non_heap (*this, diag_arg, freed_reg,
-				       d->m_name));
+		 make_unique<free_of_non_heap>
+		   (*this, diag_arg, freed_reg, d->m_name));
   sm_ctxt->set_next_state (call, arg, m_stop);
 }
 
@@ -1868,8 +2249,8 @@ malloc_state_machine::on_deallocator_call (sm_context *sm_ctxt,
 
   state_t state = sm_ctxt->get_state (call, arg);
 
-  /* start/unchecked/nonnull -> freed.  */
-  if (state == m_start)
+  /* start/assumed_non_null/unchecked/nonnull -> freed.  */
+  if (state == m_start || assumed_non_null_p (state))
     sm_ctxt->set_next_state (call, arg, d->m_freed);
   else if (unchecked_p (state) || nonnull_p (state))
     {
@@ -1879,11 +2260,11 @@ malloc_state_machine::on_deallocator_call (sm_context *sm_ctxt,
 	{
 	  /* Wrong allocator.  */
 	  tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
-	  pending_diagnostic *pd
-	    = new mismatching_deallocation (*this, diag_arg,
-					    astate->m_deallocators,
-					    d);
-	  sm_ctxt->warn (node, call, arg, pd);
+	  sm_ctxt->warn (node, call, arg,
+			 make_unique<mismatching_deallocation>
+			   (*this, diag_arg,
+			    astate->m_deallocators,
+			    d));
 	}
       sm_ctxt->set_next_state (call, arg, d->m_freed);
     }
@@ -1895,7 +2276,7 @@ malloc_state_machine::on_deallocator_call (sm_context *sm_ctxt,
       /* freed -> stop, with warning.  */
       tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
       sm_ctxt->warn (node, call, arg,
-		     new double_free (*this, diag_arg, d->m_name));
+		     make_unique<double_free> (*this, diag_arg, d->m_name));
       sm_ctxt->set_next_state (call, arg, m_stop);
     }
   else if (state == m_non_heap)
@@ -1909,7 +2290,7 @@ malloc_state_machine::on_deallocator_call (sm_context *sm_ctxt,
    Check for free of non-heap or mismatching allocators,
    transitioning to the "stop" state for such cases.
 
-   Otherwise, region_model::impl_call_realloc will later
+   Otherwise, kf_realloc::impl_call_post will later
    get called (which will handle other sm-state transitions
    when the state is bifurcated).  */
 
@@ -1933,11 +2314,10 @@ malloc_state_machine::on_realloc_call (sm_context *sm_ctxt,
 	{
 	  /* Wrong allocator.  */
 	  tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
-	  pending_diagnostic *pd
-	    = new mismatching_deallocation (*this, diag_arg,
-					    astate->m_deallocators,
-					    d);
-	  sm_ctxt->warn (node, call, arg, pd);
+	  sm_ctxt->warn (node, call, arg,
+			 make_unique<mismatching_deallocation>
+			   (*this, diag_arg,
+			    astate->m_deallocators, d));
 	  sm_ctxt->set_next_state (call, arg, m_stop);
 	  if (path_context *path_ctxt = sm_ctxt->get_path_context ())
 	    path_ctxt->terminate_path ();
@@ -1948,7 +2328,7 @@ malloc_state_machine::on_realloc_call (sm_context *sm_ctxt,
       /* freed -> stop, with warning.  */
       tree diag_arg = sm_ctxt->get_diagnostic_tree (arg);
       sm_ctxt->warn (node, call, arg,
-		     new double_free (*this, diag_arg, "free"));
+		     make_unique<double_free> (*this, diag_arg, "free"));
       sm_ctxt->set_next_state (call, arg, m_stop);
       if (path_context *path_ctxt = sm_ctxt->get_path_context ())
 	path_ctxt->terminate_path ();
@@ -2015,6 +2395,31 @@ malloc_state_machine::on_condition (sm_context *sm_ctxt,
     }
 }
 
+/* Implementation of state_machine::on_pop_frame vfunc for malloc_state_machine.
+   Clear any "assumed-non-null" state where the assumption happened in
+   FRAME_REG.  */
+
+void
+malloc_state_machine::on_pop_frame (sm_state_map *smap,
+				    const frame_region *frame_reg) const
+{
+  hash_set<const svalue *> svals_to_clear;
+  for (auto kv : *smap)
+    {
+      const svalue *sval = kv.first;
+      state_t state = kv.second.m_state;
+      if (assumed_non_null_p (state))
+	{
+	  const assumed_non_null_state *assumed_state
+	    = (const assumed_non_null_state *)state;
+	  if (frame_reg == assumed_state->m_frame)
+	    svals_to_clear.add (sval);
+	}
+    }
+  for (auto sval : svals_to_clear)
+    smap->clear_any_state (sval);
+}
+
 /* Implementation of state_machine::can_purge_p vfunc for malloc_state_machine.
    Don't allow purging of pointers in state 'unchecked' or 'nonnull'
    (to avoid false leak reports).  */
@@ -2030,10 +2435,10 @@ malloc_state_machine::can_purge_p (state_t s) const
    (for complaining about leaks of pointers in state 'unchecked' and
    'nonnull').  */
 
-pending_diagnostic *
+std::unique_ptr<pending_diagnostic>
 malloc_state_machine::on_leak (tree var) const
 {
-  return new malloc_leak (*this, var);
+  return make_unique<malloc_leak> (*this, var);
 }
 
 /* Implementation of state_machine::reset_when_passed_to_unknown_fn_p vfunc
@@ -2050,6 +2455,23 @@ malloc_state_machine::reset_when_passed_to_unknown_fn_p (state_t s,
 
   /* Otherwise, pointers passed as non-const can be freed.  */
   return is_mutable;
+}
+
+/* Implementation of state_machine::maybe_get_merged_states_nonequal vfunc
+   for malloc_state_machine.
+
+   Support discarding "assumed-non-null" states when merging with
+   start state.  */
+
+state_machine::state_t
+malloc_state_machine::maybe_get_merged_states_nonequal (state_t state_a,
+							state_t state_b) const
+{
+  if (assumed_non_null_p (state_a) && state_b == m_start)
+    return m_start;
+  if (state_a == m_start && assumed_non_null_p (state_b))
+    return m_start;
+  return NULL;
 }
 
 /* Return true if calls to FNDECL are known to not affect this sm-state.  */
@@ -2114,6 +2536,17 @@ on_realloc_with_move (region_model *model,
 		   NULL, ext_state);
 }
 
+/*  Hook for get_or_create_region_for_heap_alloc for the case when we want
+   ptr_sval to mark a newly created region as assumed non null on malloc SM.  */
+void
+malloc_state_machine::transition_ptr_sval_non_null (region_model *model,
+    sm_state_map *smap,
+    const svalue *new_ptr_sval,
+    const extrinsic_state &ext_state) const
+{
+  smap->set_state (model, new_ptr_sval, m_free.m_nonnull, NULL, ext_state);
+}
+
 } // anonymous namespace
 
 /* Internal interface to this file. */
@@ -2125,7 +2558,7 @@ make_malloc_state_machine (logger *logger)
 }
 
 /* Specialcase hook for handling realloc, for use by
-   region_model::impl_call_realloc::success_with_move::update_model.  */
+   kf_realloc::impl_call_post::success_with_move::update_model.  */
 
 void
 region_model::on_realloc_with_move (const call_details &cd,
@@ -2156,6 +2589,32 @@ region_model::on_realloc_with_move (const call_details &cd,
 				  old_ptr_sval,
 				  new_ptr_sval,
 				  *ext_state);
+}
+
+/* Moves ptr_sval from start to assumed non-null, for use by
+   region_model::get_or_create_region_for_heap_alloc.  */
+void
+region_model::transition_ptr_sval_non_null (region_model_context *ctxt,
+const svalue *ptr_sval)
+{
+  if (!ctxt)
+    return;
+  const extrinsic_state *ext_state = ctxt->get_ext_state ();
+  if (!ext_state)
+    return;
+
+  sm_state_map *smap;
+  const state_machine *sm;
+  unsigned sm_idx;
+  if (!ctxt->get_malloc_map (&smap, &sm, &sm_idx))
+    return;
+
+  gcc_assert (smap);
+  gcc_assert (sm);
+
+  const malloc_state_machine &malloc_sm = (const malloc_state_machine &)*sm;
+
+  malloc_sm.transition_ptr_sval_non_null (this, smap, ptr_sval, *ext_state);
 }
 
 } // namespace ana

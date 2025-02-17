@@ -1,7 +1,10 @@
-/* { dg-output "3\n" } */
+/* { dg-output "3\r*\n" } */
 extern "C" {
     fn printf(s: *const i8, ...);
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 trait FnLike<A, R> {
     fn call(&self, arg: A) -> R;
