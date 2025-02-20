@@ -1,5 +1,5 @@
 /* intrinsics.cc -- D language compiler intrinsics.
-   Copyright (C) 2006-2022 Free Software Foundation, Inc.
+   Copyright (C) 2006-2024 Free Software Foundation, Inc.
 
 GCC is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -60,12 +60,15 @@ struct intrinsic_decl
 
   /* True if the intrinsic is only handled in CTFE.  */
   bool ctfeonly;
+
+  /* True if the intrinsic has a library implementation.  */
+  bool fallback;
 };
 
 static const intrinsic_decl intrinsic_decls[] =
 {
-#define DEF_D_INTRINSIC(CODE, BUILTIN, NAME, MODULE, DECO, CTFE) \
-    { CODE, BUILTIN, NAME, MODULE, DECO, CTFE },
+#define DEF_D_INTRINSIC(CODE, BUILTIN, NAME, MODULE, DECO, CTFE, FALLBACK) \
+    { CODE, BUILTIN, NAME, MODULE, DECO, CTFE, FALLBACK },
 
 #include "intrinsics.def"
 
@@ -123,7 +126,7 @@ maybe_set_intrinsic (FuncDeclaration *decl)
 	    return;
 
 	  OutBuffer buf;
-	  mangleToBuffer (fd->type, &buf);
+	  dmd::mangleToBuffer (fd->type, buf);
 	  tdeco = buf.extractChars ();
 	}
 
@@ -170,10 +173,6 @@ maybe_set_intrinsic (FuncDeclaration *decl)
 	    case INTRINSIC_SHUFFLEVECTOR:
 	    case INTRINSIC_CONVERTVECTOR:
 	    case INTRINSIC_BLENDVECTOR:
-	    case INTRINSIC_EQUALMASK:
-	    case INTRINSIC_NOTEQUALMASK:
-	    case INTRINSIC_GREATERMASK:
-	    case INTRINSIC_GREATEREQUALMASK:
 	    case INTRINSIC_VLOAD8:
 	    case INTRINSIC_VLOAD16:
 	    case INTRINSIC_VLOAD32:
@@ -275,7 +274,7 @@ build_shuffle_mask_type (tree type)
   gcc_assert (t != NULL);
   unsigned HOST_WIDE_INT nunits = TYPE_VECTOR_SUBPARTS (type).to_constant ();
 
-  return build_ctype (TypeVector::create (t->sarrayOf (nunits)));
+  return build_ctype (TypeVector::create (dmd::sarrayOf (t, nunits)));
 }
 
 /* Checks if call to intrinsic FUNCTION in CALLEXP matches the internal
@@ -415,7 +414,7 @@ maybe_warn_intrinsic_mismatch (tree function, tree callexp)
 	      break;
 
 	    Type *inner = build_frontend_type (TREE_TYPE (vec0));
-	    Type *vector = TypeVector::create (inner->sarrayOf (nunits));
+	    Type *vector = TypeVector::create (dmd::sarrayOf (inner, nunits));
 	    return warn_mismatched_argument (callexp, 1,
 					     build_ctype (vector), true);
 	  }
@@ -480,33 +479,10 @@ maybe_warn_intrinsic_mismatch (tree function, tree callexp)
 	      break;
 
 	    Type *inner = build_frontend_type (TREE_TYPE (arg));
-	    Type *vector = TypeVector::create (inner->sarrayOf (nunits));
+	    Type *vector = TypeVector::create (dmd::sarrayOf (inner, nunits));
 	    return warn_mismatched_argument (callexp, 0,
 					     build_ctype (vector), true);
 	  }
-
-	return false;
-      }
-
-    case INTRINSIC_EQUALMASK:
-    case INTRINSIC_NOTEQUALMASK:
-    case INTRINSIC_GREATERMASK:
-    case INTRINSIC_GREATEREQUALMASK:
-      {
-	/* Expects the signature:
-	   vector(T) equalMask(vector(T), vector(T));
-	   vector(T) notEqualMask(vector(T), vector(T));
-	   vector(T) greaterMask(vector(T), vector(T));
-	   vector(T) greateOrEqualMask(vector(T), vector(T));  */
-	gcc_assert (call_expr_nargs (callexp) == 2);
-
-	tree vec0 = TREE_TYPE (CALL_EXPR_ARG (callexp, 0));
-	tree vec1 = TREE_TYPE (CALL_EXPR_ARG (callexp, 1));
-	if (!VECTOR_TYPE_P (TREE_TYPE (callexp))
-	    || !VECTOR_TYPE_P (vec0)
-	    || !VECTOR_TYPE_P (vec1)
-	    || TYPE_MAIN_VARIANT (vec0) != TYPE_MAIN_VARIANT (vec1))
-	  return warn_mismatched_return_type (callexp, "__vector(T)");
 
 	return false;
       }
@@ -552,7 +528,7 @@ call_builtin_fn (tree callexp, built_in_function code, int n, ...)
 static tree
 expand_intrinsic_bsf (tree callexp)
 {
-  /* The bsr() intrinsic gets turned into __builtin_ctz(arg).
+  /* The bsf() intrinsic gets turned into __builtin_ctz(arg).
      The return value is supposed to be undefined if arg is zero.  */
   tree arg = CALL_EXPR_ARG (callexp, 0);
   int argsize = TYPE_PRECISION (TREE_TYPE (arg));
@@ -581,11 +557,11 @@ expand_intrinsic_bsf (tree callexp)
 static tree
 expand_intrinsic_bsr (tree callexp)
 {
-  /* The bsr() intrinsic gets turned into (size - 1) - __builtin_clz(arg).
+  /* The bsr() intrinsic gets turned into __builtin_clz(arg) ^ (size - 1).
      The return value is supposed to be undefined if arg is zero.  */
   tree arg = CALL_EXPR_ARG (callexp, 0);
-  tree type = TREE_TYPE (arg);
-  int argsize = TYPE_PRECISION (type);
+  tree type = TREE_TYPE (callexp);
+  int argsize = TYPE_PRECISION (TREE_TYPE (arg));
 
   /* Which variant of __builtin_clz* should we call?  */
   built_in_function code = (argsize <= INT_TYPE_SIZE) ? BUILT_IN_CLZ
@@ -597,13 +573,8 @@ expand_intrinsic_bsr (tree callexp)
 
   tree result = call_builtin_fn (callexp, code, 1, arg);
 
-  /* Handle int -> long conversions.  */
-  if (TREE_TYPE (result) != type)
-    result = fold_convert (type, result);
-
-  result = fold_build2 (MINUS_EXPR, type,
-			build_integer_cst (argsize - 1, type), result);
-  return fold_convert (TREE_TYPE (callexp), result);
+  return fold_build2 (BIT_XOR_EXPR, type, result,
+		      build_integer_cst (argsize - 1, type));
 }
 
 /* Expand a front-end intrinsic call to INTRINSIC, which is either a call to
@@ -748,7 +719,7 @@ expand_intrinsic_rotate (intrinsic_code intrinsic, tree callexp)
       TemplateInstance *ti = DECL_LANG_FRONTEND (callee)->isInstantiated ();
       gcc_assert (ti && ti->tiargs && ti->tiargs->length == 2);
 
-      Expression *e = isExpression ((*ti->tiargs)[0]);
+      Expression *e = dmd::isExpression ((*ti->tiargs)[0]);
       gcc_assert (e && e->op == EXP::int64);
       count = build_expr (e, true);
     }
@@ -1039,6 +1010,7 @@ expand_volatile_load (tree callexp)
   tree type = build_qualified_type (TREE_TYPE (ptrtype), TYPE_QUAL_VOLATILE);
   tree result = indirect_ref (type, ptr);
   TREE_THIS_VOLATILE (result) = 1;
+  TREE_SIDE_EFFECTS (result) = 1;
 
   return result;
 }
@@ -1066,36 +1038,11 @@ expand_volatile_store (tree callexp)
   tree type = build_qualified_type (TREE_TYPE (ptrtype), TYPE_QUAL_VOLATILE);
   tree result = indirect_ref (type, ptr);
   TREE_THIS_VOLATILE (result) = 1;
+  TREE_SIDE_EFFECTS (result) = 1;
 
   /* (*(volatile T *) ptr) = value;  */
   tree value = CALL_EXPR_ARG (callexp, 1);
   return modify_expr (result, value);
-}
-
-/* Expand a front-end intrinsic call to a vector comparison intrinsic, which is
-   either a call to equalMask(), notEqualMask(), greaterMask(), or
-   greaterOrEqualMask().  These intrinsics take two arguments, the signature to
-   which can be either:
-
-	vector(T) equalMask(vector(T) vec0, vector(T) vec1);
-	vector(T) notEqualMask(vector(T) vec0, vector(T) vec1);
-	vector(T) greaterMask(vector(T) vec0, vector(T) vec1);
-	vector(T) greaterOrEqualMask(vector(T) vec0, vector(T) vec1);
-
-   This performs an element-wise comparison between two vectors VEC0 and VEC1,
-   returning a vector with signed integral elements.  */
-
-static tree
-expand_intrinsic_vec_cond (tree_code code, tree callexp)
-{
-  tree vec0 = CALL_EXPR_ARG (callexp, 0);
-  tree vec1 = CALL_EXPR_ARG (callexp, 1);
-  tree type = TREE_TYPE (callexp);
-
-  tree cmp = fold_build2_loc (EXPR_LOCATION (callexp), code,
-			      truth_type_for (type), vec0, vec1);
-  return fold_build3_loc (EXPR_LOCATION (callexp), VEC_COND_EXPR, type, cmp,
-			  build_minus_one_cst (type), build_zero_cst (type));
 }
 
 /* Expand a front-end instrinsic call to convertvector().  This takes one
@@ -1488,19 +1435,47 @@ maybe_expand_intrinsic (tree callexp)
     case INTRINSIC_BLENDVECTOR:
       return expand_intrinsic_vec_blend (callexp);
 
-    case INTRINSIC_EQUALMASK:
-      return expand_intrinsic_vec_cond (EQ_EXPR, callexp);
-
-    case INTRINSIC_NOTEQUALMASK:
-      return expand_intrinsic_vec_cond (NE_EXPR, callexp);
-
-    case INTRINSIC_GREATERMASK:
-      return expand_intrinsic_vec_cond (GT_EXPR, callexp);
-
-    case INTRINSIC_GREATEREQUALMASK:
-      return expand_intrinsic_vec_cond (GE_EXPR, callexp);
-
     default:
       gcc_unreachable ();
     }
+}
+
+/* If FNDECL is an intrinsic, return the FUNCTION_DECL that has a library
+   fallback implementation of it, otherwise raise an error.  */
+
+tree
+maybe_reject_intrinsic (tree fndecl)
+{
+  gcc_assert (TREE_CODE (fndecl) == FUNCTION_DECL);
+
+  intrinsic_code intrinsic = DECL_INTRINSIC_CODE (fndecl);
+
+  if (intrinsic == INTRINSIC_NONE)
+    {
+      /* Not an intrinsic, but it still might be a declaration from the
+	 `gcc.builtins' module.  */
+      if (fndecl_built_in_p (fndecl) && DECL_IS_UNDECLARED_BUILTIN (fndecl)
+	  && !DECL_ASSEMBLER_NAME_SET_P (fndecl))
+	error ("built-in function %qE must be directly called", fndecl);
+
+      return fndecl;
+    }
+
+  /* Nothing to do if the intrinsic has a D library implementation.  */
+  if (intrinsic_decls[intrinsic].fallback)
+    return fndecl;
+
+  /* Check the GCC built-in decl if the intrinsic maps to one.  */
+  built_in_function code = intrinsic_decls[intrinsic].built_in;
+  if (code != BUILT_IN_NONE)
+    {
+      tree builtin = builtin_decl_explicit (code);
+      if (!DECL_IS_UNDECLARED_BUILTIN (builtin)
+	  || DECL_ASSEMBLER_NAME_SET_P (builtin))
+	return builtin;
+    }
+
+  /* It's a D language intrinsic with no library implementation.  */
+  error ("intrinsic function %qE must be directly called", fndecl);
+  return fndecl;
 }

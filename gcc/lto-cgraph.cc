@@ -1,7 +1,7 @@
 /* Write and read the cgraph to the memory mapped representation of a
    .o file.
 
-   Copyright (C) 2009-2022 Free Software Foundation, Inc.
+   Copyright (C) 2009-2024 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
 
 This file is part of GCC.
@@ -68,6 +68,7 @@ enum LTO_symtab_tags
   LTO_symtab_edge,
   LTO_symtab_indirect_edge,
   LTO_symtab_variable,
+  LTO_symtab_indirect_function,
   LTO_symtab_last_tag
 };
 
@@ -563,7 +564,8 @@ lto_output_node (struct lto_simple_output_block *ob, struct cgraph_node *node,
 	        LDPR_NUM_KNOWN,
 		/* When doing incremental link, we will get new resolution
 		   info next time we process the file.  */
-		flag_incremental_link ? LDPR_UNKNOWN : node->resolution);
+		flag_incremental_link == INCREMENTAL_LINK_LTO
+		? LDPR_UNKNOWN : node->resolution);
   bp_pack_value (&bp, node->split_part, 1);
   streamer_write_bitpack (&bp);
   streamer_write_data_stream (ob->main_stream, section, strlen (section) + 1);
@@ -797,7 +799,7 @@ add_node_to (lto_symtab_encoder_t encoder, struct cgraph_node *node,
 {
   if (node->clone_of)
     add_node_to (encoder, node->clone_of, include_body);
-  else if (include_body)
+  if (include_body)
     lto_set_symtab_encoder_encode_body (encoder, node);
   lto_symtab_encoder_encode (encoder, node);
 }
@@ -917,7 +919,8 @@ compute_ltrans_boundary (lto_symtab_encoder_t in_encoder)
 	      vec <cgraph_node *>targets
 		= possible_polymorphic_call_targets
 		    (edge, &final, &cache_token);
-	      if (!reachable_call_targets.add (cache_token))
+	      if (cache_token != NULL
+		  && !reachable_call_targets.add (cache_token))
 		{
 		  for (i = 0; i < targets.length (); i++)
 		    {
@@ -1018,7 +1021,7 @@ output_symtab (void)
      When doing WPA we must output every asm just once.  Since we do not partition asm
      nodes at all, output them to first output.  This is kind of hack, but should work
      well.  */
-  if (!asm_nodes_output)
+  if (!asm_nodes_output && !lto_stream_offload_p)
     {
       asm_nodes_output = true;
       lto_output_toplevel_asms ();
@@ -1109,6 +1112,18 @@ output_offload_tables (void)
 			       (*offload_vars)[i]);
     }
 
+  for (unsigned i = 0; i < vec_safe_length (offload_ind_funcs); i++)
+    {
+      symtab_node *node = symtab_node::get ((*offload_ind_funcs)[i]);
+      if (!node)
+	continue;
+      node->force_output = true;
+      streamer_write_enum (ob->main_stream, LTO_symtab_tags,
+			   LTO_symtab_last_tag, LTO_symtab_indirect_function);
+      lto_output_fn_decl_ref (ob->decl_state, ob->main_stream,
+			      (*offload_ind_funcs)[i]);
+    }
+
   if (output_requires)
     {
       HOST_WIDE_INT val = ((HOST_WIDE_INT) omp_requires_mask
@@ -1132,6 +1147,7 @@ output_offload_tables (void)
     {
       vec_free (offload_funcs);
       vec_free (offload_vars);
+      vec_free (offload_ind_funcs);
     }
 }
 
@@ -1861,6 +1877,19 @@ input_offload_tables (bool do_force_output)
 		varpool_node::get (var_decl)->force_output = 1;
 	      tmp_decl = var_decl;
 	    }
+	  else if (tag == LTO_symtab_indirect_function)
+	    {
+	      tree fn_decl
+		= lto_input_fn_decl_ref (ib, file_data);
+	      vec_safe_push (offload_ind_funcs, fn_decl);
+
+	      /* Prevent IPA from removing fn_decl as unreachable, since there
+		 may be no refs from the parent function to child_fn in offload
+		 LTO mode.  */
+	      if (do_force_output)
+		cgraph_node::get (fn_decl)->mark_force_output ();
+	      tmp_decl = fn_decl;
+	    }
 	  else if (tag == LTO_symtab_edge)
 	    {
 	      static bool error_emitted = false;
@@ -2172,7 +2201,7 @@ input_cgraph_opt_section (struct lto_file_decl_data *file_data,
   unsigned int count;
 
   lto_input_block ib_main ((const char *) data + main_offset,
-			   header->main_size, file_data->mode_table);
+			   header->main_size, file_data);
 
   data_in =
     lto_data_in_create (file_data, (const char *) data + string_offset,

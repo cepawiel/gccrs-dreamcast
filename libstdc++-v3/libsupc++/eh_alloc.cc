@@ -1,5 +1,5 @@
 // -*- C++ -*- Allocate exception objects.
-// Copyright (C) 2001-2022 Free Software Foundation, Inc.
+// Copyright (C) 2001-2024 Free Software Foundation, Inc.
 //
 // This file is part of GCC.
 //
@@ -24,6 +24,11 @@
 
 // This is derived from the C++ ABI for IA-64.  Where we diverge
 // for cross-architecture compatibility are noted with "@@@".
+
+#ifndef _GNU_SOURCE
+// Cygwin needs this for secure_getenv
+# define _GNU_SOURCE 1
+#endif
 
 #include <exception>           // std::exception
 #include <new>                 // std::terminate

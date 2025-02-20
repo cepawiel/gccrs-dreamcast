@@ -1,6 +1,6 @@
 // <unordered_map> -*- C++ -*-
 
-// Copyright (C) 2007-2022 Free Software Foundation, Inc.
+// Copyright (C) 2007-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -46,6 +46,14 @@
 # include <debug/unordered_map>
 #endif
 
+#define __glibcxx_want_erase_if
+#define __glibcxx_want_generic_unordered_lookup
+#define __glibcxx_want_node_extract
+#define __glibcxx_want_nonmember_container_access
+#define __glibcxx_want_unordered_map_try_emplace
+#define __glibcxx_want_tuple_like
+#include <bits/version.h>
+
 #if __cplusplus >= 201703L
 #include <bits/memory_resource.h>
 namespace std _GLIBCXX_VISIBILITY(default)
@@ -78,7 +86,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     erase_if(unordered_map<_Key, _Tp, _Hash, _CPred, _Alloc>& __cont,
 	     _Predicate __pred)
     {
-      const _GLIBCXX_STD_C::unordered_map<_Key, _Tp, _Hash, _CPred, _Alloc>&
+      _GLIBCXX_STD_C::unordered_map<_Key, _Tp, _Hash, _CPred, _Alloc>&
 	__ucont = __cont;
       return __detail::__erase_nodes_if(__cont, __ucont, __pred);
     }
@@ -90,7 +98,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     erase_if(unordered_multimap<_Key, _Tp, _Hash, _CPred, _Alloc>& __cont,
 	     _Predicate __pred)
     {
-      const _GLIBCXX_STD_C::unordered_multimap<_Key, _Tp, _Hash, _CPred, _Alloc>&
+      _GLIBCXX_STD_C::unordered_multimap<_Key, _Tp, _Hash, _CPred, _Alloc>&
 	__ucont = __cont;
       return __detail::__erase_nodes_if(__cont, __ucont, __pred);
     }

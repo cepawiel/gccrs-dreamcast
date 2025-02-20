@@ -1,6 +1,6 @@
 // Algorithm implementation -*- C++ -*-
 
-// Copyright (C) 2001-2022 Free Software Foundation, Inc.
+// Copyright (C) 2001-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -140,54 +140,6 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
   // count
   // count_if
   // search
-
-  template<typename _ForwardIterator1, typename _ForwardIterator2,
-	   typename _BinaryPredicate>
-    _GLIBCXX20_CONSTEXPR
-    _ForwardIterator1
-    __search(_ForwardIterator1 __first1, _ForwardIterator1 __last1,
-	     _ForwardIterator2 __first2, _ForwardIterator2 __last2,
-	     _BinaryPredicate  __predicate)
-    {
-      // Test for empty ranges
-      if (__first1 == __last1 || __first2 == __last2)
-	return __first1;
-
-      // Test for a pattern of length 1.
-      _ForwardIterator2 __p1(__first2);
-      if (++__p1 == __last2)
-	return std::__find_if(__first1, __last1,
-		__gnu_cxx::__ops::__iter_comp_iter(__predicate, __first2));
-
-      // General case.
-      _ForwardIterator1 __current = __first1;
-
-      for (;;)
-	{
-	  __first1 =
-	    std::__find_if(__first1, __last1,
-		__gnu_cxx::__ops::__iter_comp_iter(__predicate, __first2));
-
-	  if (__first1 == __last1)
-	    return __last1;
-
-	  _ForwardIterator2 __p = __p1;
-	  __current = __first1;
-	  if (++__current == __last1)
-	    return __last1;
-
-	  while (__predicate(__current, __p))
-	    {
-	      if (++__p == __last2)
-		return __first1;
-	      if (++__current == __last1)
-		return __last1;
-	    }
-	  ++__first1;
-	}
-      return __first1;
-    }
-
   // search_n
 
   /**
@@ -1299,6 +1251,12 @@ _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)
       typedef typename iterator_traits<_RandomAccessIterator>::value_type
 	_ValueType;
 
+#if __cplusplus >= 201103L
+      typedef typename make_unsigned<_Distance>::type _UDistance;
+#else
+      typedef _Distance _UDistance;
+#endif
+
       _Distance __n = __last   - __first;
       _Distance __k = __middle - __first;
 
@@ -1329,7 +1287,7 @@ _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)
 		  ++__p;
 		  ++__q;
 		}
-	      __n %= __k;
+	      __n = static_cast<_UDistance>(__n) % static_cast<_UDistance>(__k);
 	      if (__n == 0)
 		return __ret;
 	      std::swap(__n, __k);
@@ -1353,7 +1311,7 @@ _GLIBCXX_BEGIN_INLINE_ABI_NAMESPACE(_V2)
 		  --__q;
 		  std::iter_swap(__p, __q);
 		}
-	      __n %= __k;
+	      __n = static_cast<_UDistance>(__n) % static_cast<_UDistance>(__k);
 	      if (__n == 0)
 		return __ret;
 	      std::swap(__n, __k);
@@ -2458,13 +2416,14 @@ _GLIBCXX_END_INLINE_ABI_NAMESPACE(_V2)
 
 	  _BidirectionalIterator __new_middle
 	    = std::__rotate_adaptive(__first_cut, __middle, __second_cut,
-				     __len1 - __len11, __len22,
+				     _Distance(__len1 - __len11), __len22,
 				     __buffer, __buffer_size);
 	  std::__merge_adaptive_resize(__first, __first_cut, __new_middle,
 				       __len11, __len22,
 				       __buffer, __buffer_size, __comp);
 	  std::__merge_adaptive_resize(__new_middle, __second_cut, __last,
-				       __len1 - __len11, __len2 - __len22,
+				       _Distance(__len1 - __len11),
+				       _Distance(__len2 - __len22),
 				       __buffer, __buffer_size, __comp);
 	}
     }
@@ -3645,11 +3604,9 @@ _GLIBCXX_END_INLINE_ABI_NAMESPACE(_V2)
       return std::__is_permutation(__first1, __last1, __first2, __last2,
 				   __gnu_cxx::__ops::__iter_comp_iter(__pred));
     }
+#endif // C++14
 
-#if __cplusplus >= 201703L
-
-#define __cpp_lib_clamp 201603L
-
+#ifdef  __glibcxx_clamp // C++ >= 17
   /**
    *  @brief  Returns the value clamped between lo and hi.
    *  @ingroup sorting_algorithms
@@ -3688,10 +3645,8 @@ _GLIBCXX_END_INLINE_ABI_NAMESPACE(_V2)
       __glibcxx_assert(!__comp(__hi, __lo));
       return std::min(std::max(__val, __lo, __comp), __hi, __comp);
     }
-#endif // C++17
-#endif // C++14
+#endif // __glibcxx_clamp
 
-#ifdef _GLIBCXX_USE_C99_STDINT_TR1
   /**
    *  @brief Generate two uniformly distributed integers using a
    *         single distribution invocation.
@@ -3802,8 +3757,6 @@ _GLIBCXX_END_INLINE_ABI_NAMESPACE(_V2)
       for (_RandomAccessIterator __i = __first + 1; __i != __last; ++__i)
 	std::iter_swap(__i, __first + __d(__g, __p_type(0, __i - __first)));
     }
-#endif // USE C99_STDINT
-
 #endif // C++11
 
 _GLIBCXX_BEGIN_NAMESPACE_ALGO
@@ -4147,48 +4100,6 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
 
       return std::__search(__first1, __last1, __first2, __last2,
 			   __gnu_cxx::__ops::__iter_equal_to_iter());
-    }
-
-  /**
-   *  @brief Search a sequence for a matching sub-sequence using a predicate.
-   *  @ingroup non_mutating_algorithms
-   *  @param  __first1     A forward iterator.
-   *  @param  __last1      A forward iterator.
-   *  @param  __first2     A forward iterator.
-   *  @param  __last2      A forward iterator.
-   *  @param  __predicate  A binary predicate.
-   *  @return   The first iterator @c i in the range
-   *  @p [__first1,__last1-(__last2-__first2)) such that
-   *  @p __predicate(*(i+N),*(__first2+N)) is true for each @c N in the range
-   *  @p [0,__last2-__first2), or @p __last1 if no such iterator exists.
-   *
-   *  Searches the range @p [__first1,__last1) for a sub-sequence that
-   *  compares equal value-by-value with the sequence given by @p
-   *  [__first2,__last2), using @p __predicate to determine equality,
-   *  and returns an iterator to the first element of the
-   *  sub-sequence, or @p __last1 if no such iterator exists.
-   *
-   *  @see search(_ForwardIter1, _ForwardIter1, _ForwardIter2, _ForwardIter2)
-  */
-  template<typename _ForwardIterator1, typename _ForwardIterator2,
-	   typename _BinaryPredicate>
-    _GLIBCXX20_CONSTEXPR
-    inline _ForwardIterator1
-    search(_ForwardIterator1 __first1, _ForwardIterator1 __last1,
-	   _ForwardIterator2 __first2, _ForwardIterator2 __last2,
-	   _BinaryPredicate  __predicate)
-    {
-      // concept requirements
-      __glibcxx_function_requires(_ForwardIteratorConcept<_ForwardIterator1>)
-      __glibcxx_function_requires(_ForwardIteratorConcept<_ForwardIterator2>)
-      __glibcxx_function_requires(_BinaryPredicateConcept<_BinaryPredicate,
-	    typename iterator_traits<_ForwardIterator1>::value_type,
-	    typename iterator_traits<_ForwardIterator2>::value_type>)
-      __glibcxx_requires_valid_range(__first1, __last1);
-      __glibcxx_requires_valid_range(__first2, __last2);
-
-      return std::__search(__first1, __last1, __first2, __last2,
-			   __gnu_cxx::__ops::__iter_comp_iter(__predicate));
     }
 
   /**
@@ -4571,7 +4482,7 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
    *  equally likely.
    *
    *  @deprecated
-   *  Since C++14 `std::random_shuffle` is not part of the C++ standard.
+   *  Since C++17, `std::random_shuffle` is not part of the C++ standard.
    *  Use `std::shuffle` instead, which was introduced in C++11.
   */
   template<typename _RandomAccessIterator>
@@ -4610,7 +4521,7 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
    *  range `[0, N)`.
    *
    *  @deprecated
-   *  Since C++14 `std::random_shuffle` is not part of the C++ standard.
+   *  Since C++17, `std::random_shuffle` is not part of the C++ standard.
    *  Use `std::shuffle` instead, which was introduced in C++11.
   */
   template<typename _RandomAccessIterator, typename _RandomNumberGenerator>
@@ -4638,7 +4549,7 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
 	}
     }
 #endif // HOSTED
-#endif // C++11 || USE_DEPRECATED
+#endif // <= C++11 || USE_DEPRECATED
 
   /**
    *  @brief Move elements for which a predicate is true to the beginning
@@ -5904,9 +5815,9 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
 	  }
       return __out;
     }
+#endif // C++14
 
-#if __cplusplus > 201402L
-#define __cpp_lib_sample 201603L
+#ifdef __glibcxx_sample // C++ >= 17
   /// Take a random sample from a population.
   template<typename _PopulationIterator, typename _SampleIterator,
            typename _Distance, typename _UniformRandomBitGenerator>
@@ -5934,8 +5845,7 @@ _GLIBCXX_BEGIN_NAMESPACE_ALGO
 	__sample(__first, __last, __pop_cat{}, __out, __samp_cat{}, __d,
 		 std::forward<_UniformRandomBitGenerator>(__g));
     }
-#endif // C++17
-#endif // C++14
+#endif // __glibcxx_sample
 
 _GLIBCXX_END_NAMESPACE_ALGO
 _GLIBCXX_END_NAMESPACE_VERSION

@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 2001-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 2001-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -61,7 +61,7 @@ package body Exp_Imgv is
 
    procedure Rewrite_Object_Image
      (N         : Node_Id;
-      Pref      : Entity_Id;
+      Pref      : Node_Id;
       Attr_Name : Name_Id;
       Str_Typ   : Entity_Id);
    --  AI12-0124: Rewrite attribute 'Image when it is applied to an object
@@ -762,7 +762,7 @@ package body Exp_Imgv is
    --  Snn (1 .. Pnn) then occurs as in the other cases. A special case is
    --  when pragma Discard_Names applies, in which case we replace expr by:
 
-   --     (rt'Pos (expr))'Img
+   --     (rt'Pos (expr))'Image
 
    --  So that the result is a space followed by the decimal value for the
    --  position of the enumeration value in the enumeration type.
@@ -938,12 +938,12 @@ package body Exp_Imgv is
          --    P3 : constant Natural := call_put_enumN (P1 + 1);
 
          declare
-            Add_Node : constant Node_Id := New_Op_Node (N_Op_Add, Loc);
+            Add_Node : constant Node_Id :=
+              Make_Op_Add (Loc,
+                Left_Opnd  => New_Occurrence_Of (P1_Id, Loc),
+                Right_Opnd => Make_Integer_Literal (Loc, Uint_1));
 
          begin
-            Set_Left_Opnd  (Add_Node, New_Occurrence_Of (P1_Id, Loc));
-            Set_Right_Opnd (Add_Node, Make_Integer_Literal (Loc, 1));
-
             Append_To (Ins_List,
               Make_Object_Declaration (Loc,
                 Defining_Identifier => P3_Id,
@@ -963,12 +963,12 @@ package body Exp_Imgv is
          --    P4 : String renames call_put_enumS (P2 .. P3 - 1);
 
          declare
-            Sub_Node : constant Node_Id := New_Op_Node (N_Op_Subtract, Loc);
+            Sub_Node : constant Node_Id :=
+              Make_Op_Subtract (Loc,
+                Left_Opnd  => New_Occurrence_Of (P3_Id, Loc),
+                Right_Opnd => Make_Integer_Literal (Loc, Uint_1));
 
          begin
-            Set_Left_Opnd  (Sub_Node, New_Occurrence_Of (P3_Id, Loc));
-            Set_Right_Opnd (Sub_Node, Make_Integer_Literal (Loc, 1));
-
             Append_To (Ins_List,
               Make_Object_Renaming_Declaration (Loc,
                 Defining_Identifier => P4_Id,
@@ -988,12 +988,12 @@ package body Exp_Imgv is
          --    subtype S1 is String (1 .. P3 - P2);
 
          declare
-            HB : constant Node_Id := New_Op_Node (N_Op_Subtract, Loc);
+            HB : constant Node_Id :=
+              Make_Op_Subtract (Loc,
+                Left_Opnd  => New_Occurrence_Of (P3_Id, Loc),
+                Right_Opnd => New_Occurrence_Of (P2_Id, Loc));
 
          begin
-            Set_Left_Opnd  (HB, New_Occurrence_Of (P3_Id, Loc));
-            Set_Right_Opnd (HB, New_Occurrence_Of (P2_Id, Loc));
-
             Append_To (Ins_List,
               Make_Subtype_Declaration (Loc,
                 Defining_Identifier => S1_Id,
@@ -1211,8 +1211,8 @@ package body Exp_Imgv is
            or else No (Lit_Strings (Rtyp))
          then
             --  When pragma Discard_Names applies to the first subtype, build
-            --  (Long_Long_Integer (Pref'Pos (Expr)))'Img. The conversion is
-            --  there to avoid applying 'Img directly in Universal_Integer,
+            --  (Long_Long_Integer (Pref'Pos (Expr)))'Image. The conversion is
+            --  there to avoid applying 'Image directly in Universal_Integer,
             --  which can be a very large type. See also the handling of 'Val.
 
             Rewrite (N,
@@ -1223,8 +1223,7 @@ package body Exp_Imgv is
                     Prefix         => Pref,
                     Attribute_Name => Name_Pos,
                     Expressions    => New_List (Expr))),
-                Attribute_Name =>
-                  Name_Img));
+                Attribute_Name => Name_Image));
             Analyze_And_Resolve (N, Standard_String);
             return;
 
@@ -1831,7 +1830,7 @@ package body Exp_Imgv is
 
    procedure Expand_Wide_Image_Attribute (N : Node_Id) is
       Loc  : constant Source_Ptr := Sloc (N);
-      Pref : constant Entity_Id  := Prefix (N);
+      Pref : constant Node_Id    := Prefix (N);
       Rnn  : constant Entity_Id  := Make_Temporary (Loc, 'S');
       Lnn  : constant Entity_Id  := Make_Temporary (Loc, 'P');
       Rtyp : Entity_Id;
@@ -1839,6 +1838,15 @@ package body Exp_Imgv is
    begin
       if Is_Object_Image (Pref) then
          Rewrite_Object_Image (N, Pref, Name_Wide_Image, Standard_Wide_String);
+         return;
+      end if;
+
+      --  If Image should be transformed using Put_Image, then do so. See
+      --  Exp_Put_Image for details.
+
+      if Exp_Put_Image.Image_Should_Call_Put_Image (N) then
+         Rewrite (N, Exp_Put_Image.Build_Image_Call (N));
+         Analyze_And_Resolve (N, Standard_Wide_String, Suppress => All_Checks);
          return;
       end if;
 
@@ -1930,7 +1938,7 @@ package body Exp_Imgv is
 
    procedure Expand_Wide_Wide_Image_Attribute (N : Node_Id) is
       Loc  : constant Source_Ptr := Sloc (N);
-      Pref : constant Entity_Id  := Prefix (N);
+      Pref : constant Node_Id    := Prefix (N);
       Rnn  : constant Entity_Id  := Make_Temporary (Loc, 'S');
       Lnn  : constant Entity_Id  := Make_Temporary (Loc, 'P');
       Rtyp : Entity_Id;
@@ -1939,6 +1947,16 @@ package body Exp_Imgv is
       if Is_Object_Image (Pref) then
          Rewrite_Object_Image
            (N, Pref, Name_Wide_Wide_Image, Standard_Wide_Wide_String);
+         return;
+      end if;
+
+      --  If Image should be transformed using Put_Image, then do so. See
+      --  Exp_Put_Image for details.
+
+      if Exp_Put_Image.Image_Should_Call_Put_Image (N) then
+         Rewrite (N, Exp_Put_Image.Build_Image_Call (N));
+         Analyze_And_Resolve
+           (N, Standard_Wide_Wide_String, Suppress => All_Checks);
          return;
       end if;
 
@@ -2475,16 +2493,35 @@ package body Exp_Imgv is
 
    procedure Rewrite_Object_Image
      (N         : Node_Id;
-      Pref      : Entity_Id;
+      Pref      : Node_Id;
       Attr_Name : Name_Id;
       Str_Typ   : Entity_Id)
    is
+      Ptyp : Entity_Id;
+
    begin
+      Ptyp := Etype (Pref);
+
+      --  If the prefix is a component that depends on a discriminant, then
+      --  create an actual subtype for it.
+
+      if Nkind (Pref) = N_Selected_Component then
+         declare
+            Decl : constant Node_Id :=
+                     Build_Actual_Subtype_Of_Component (Ptyp, Pref);
+         begin
+            if Present (Decl) then
+               Insert_Action (N, Decl);
+               Ptyp := Defining_Identifier (Decl);
+            end if;
+         end;
+      end if;
+
       Rewrite (N,
         Make_Attribute_Reference (Sloc (N),
-          Prefix         => New_Occurrence_Of (Etype (Pref), Sloc (N)),
+          Prefix         => New_Occurrence_Of (Ptyp, Sloc (N)),
           Attribute_Name => Attr_Name,
-          Expressions    => New_List (Relocate_Node (Pref))));
+          Expressions    => New_List (Unchecked_Convert_To (Ptyp, Pref))));
 
       Analyze_And_Resolve (N, Str_Typ);
    end Rewrite_Object_Image;

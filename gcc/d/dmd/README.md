@@ -19,7 +19,7 @@ this license for that file.
 | Folder                                                                   | Purpose                                                                                                                                                                                                       |
 |--------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [dmd/](https://github.com/dlang/dmd/tree/master/compiler/src/dmd)                 | The dmd driver and front-end                                                                                                                                                                                  |
-| [dmd/backend/](https://github.com/dlang/dmd/tree/master/compiler/src/dmd/backend) | Code generation for x86 or x86-64. Shared by the [Digital Mars C compiler](https://github.com/DigitalMars/Compiler/), but not [LDC](https://github.com/ldc-developers/ldc) or [GDC](https://gdcproject.org/). |
+| [dmd/backend/](https://github.com/dlang/dmd/tree/master/compiler/src/dmd/backend) | Code generation for x86 or x86-64. Based on [DMC](https://github.com/DigitalMars/Compiler/)'s backend, but not kept in sync anymore. Not used by [LDC](https://github.com/ldc-developers/ldc) or [GDC](https://gdcproject.org/). |
 | [dmd/common/](https://github.com/dlang/dmd/tree/master/compiler/src/dmd/common)   | Code shared by the front-end and back-end                                                                                                                                                                     |
 | [dmd/root/](https://github.com/dlang/dmd/tree/master/compiler/src/dmd/root)       | Meant as a portable utility library, but ["it wasn't very good and the only project left using it is dmd"](https://github.com/dlang/dmd/pull/9844#issuecomment-498479516).                                    |
 
@@ -31,14 +31,16 @@ Note that these groups have no strict meaning, the category assignments are a bi
 
 | File                                                                        | Purpose                                                               |
 |-----------------------------------------------------------------------------|-----------------------------------------------------------------------|
-| [mars.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/mars.d)           | The entry point. Contains `main`.                                     |
+| [main.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/main.d)           | The entry point. Contains `main`.                                     |
+| [mars.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/mars.d)           | Argument parsing, path manipulation.                                  |
 | [cli.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/cli.d)             | Define the command line interface                                     |
 | [dmdparams.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dmdparams.d) | DMD-specific parameters                                               |
 | [globals.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/globals.d)     | Define a structure storing command line options                       |
 | [dinifile.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dinifile.d)   | Parse settings from .ini file (`sc.ini` / `dmd.conf`)                 |
 | [vsoptions.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/vsoptions.d) | Detect the Microsoft Visual Studio toolchain for linking              |
 | [frontend.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/frontend.d)   | An interface for using DMD as a library                               |
-| [errors.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/errors.d)       | Error reporting functionality                                         |
+| [errors.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/errors.d)       | Error reporting implementation                                        |
+| [errorsink.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/errorsink.d) | Error reporting interface                                             |
 | [target.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/target.d)       | Manage target-specific parameters for cross-compiling (for LDC/GDC)   |
 | [compiler.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/compiler.d)   | Describe a back-end compiler and implements compiler-specific actions |
 
@@ -47,6 +49,7 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | File                                                                  | Purpose                                                              |
 |-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | [lexer.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/lexer.d)   | Convert source code into tokens for the D and ImportC parsers        |
+| [location.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/location.d)| Encapsulate file/line/column info for error messages, etc.        |
 | [entity.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/entity.d) | Define "\\&Entity;" escape sequence for strings / character literals |
 | [tokens.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/tokens.d) | Define lexical tokens.                                               |
 | [parse.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/parse.d)   | D parser, converting tokens into an Abstract Syntax Tree (AST)       |
@@ -81,6 +84,7 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | [astcodegen.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/astcodegen.d)     | Namespace of AST nodes of a AST ready for code generation   |
 | [astenums.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/astenums.d)         | Enums common to DMD and AST                                 |
 | [expression.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/expression.d)     | Define expression AST nodes                                 |
+| [rootobject.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/rootobject.d)     | Define an abstract root class                           |
 | [statement.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/statement.d)       | Define statement AST nodes                                  |
 | [staticassert.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/staticassert.d) | Define a `static assert` AST node                           |
 | [aggregate.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/aggregate.d)       | Define an aggregate (`struct`, `union` or `class`) AST node |
@@ -97,7 +101,7 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | [strictvisitor.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/strictvisitor.d)                       | Visitor that forces derived classes to implement `visit` for every possible node |
 | [visitor.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/visitor.d)                                   | A visitor implementing `visit` for all nodes present in the compiler             |
 | [transitivevisitor.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/transitivevisitor.d)               | Provide a mixin template with visit methods for the parse time AST               |
-| [apply.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/apply.d)                                       | Depth-first expression visitor                                                   |
+| [postordervisitor.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/postordervisitor.d)                                       | Depth-first expression visitor                                                   |
 | [sapply.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/sapply.d)                                     | Depth-first statement visitor                                                    |
 | [statement_rewrite_walker.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/statement_rewrite_walker.d) | Statement visitor that allows replacing the currently visited node               |
 
@@ -106,6 +110,8 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | File                                                                                      | Purpose                                                           |
 |-------------------------------------------------------------------------------------------|-------------------------------------------------------------------|
 | [dsymbolsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dsymbolsem.d)             | Do semantic 1 pass (symbol identifiers/types)                     |
+| [enumsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/enumsem.d)                   | Enum semantics                                                    |
+| [funcsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/funcsem.d)                   | Function semantics                                                |
 | [semantic2.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/semantic2.d)               | Do semantic 2 pass (symbol initializers)                          |
 | [semantic3.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/semantic3.d)               | Do semantic 3 pass (function bodies)                              |
 | [inline.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/inline.d)                     | Do inline pass (optimization pass that dmd does in the front-end) |
@@ -113,6 +119,8 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | [expressionsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/expressionsem.d)       | Do semantic analysis for expressions                              |
 | [statementsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/statementsem.d)         | Do semantic analysis for statements                               |
 | [initsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/initsem.d)                   | Do semantic analysis for initializers                             |
+| [pragmasem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/pragmasem.d)               | Do semantic analysis for pragmas                                  |
+| [templatesem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/templatesem.d)           | Do semantic analysis for templates                                |
 | [templateparamsem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/templateparamsem.d) | Do semantic analysis for template parameters                      |
 | [typesem.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/typesem.d)                   | Do semantic analysis for types                                    |
 
@@ -172,7 +180,6 @@ Note that these groups have no strict meaning, the category assignments are a bi
 | [cond.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/cond.d)              | Evaluate `static if`, `version` `debug `                                                    |
 | [staticcond.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/staticcond.d)  | Lazily evaluate static conditions for `static if`, `static assert` and template constraints |
 | [delegatize.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/delegatize.d)  | Converts expression to delegates for `lazy` parameters                                      |
-| [eh.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/eh.d)                  | Generate tables for exception handling                                                      |
 | [nspace.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/nspace.d)          | Namespace for `extern (C++, Module)`                                                        |
 | [intrange.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/intrange.d)      | [Value range propagation](https://digitalmars.com/articles/b62.html)                        |
 | [dimport.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dimport.d)        | Renamed imports (`import aliasSymbol = pkg1.pkg2.symbol`)                                   |
@@ -227,6 +234,7 @@ Note that these groups have no strict meaning, the category assignments are a bi
 |-----------------------------------------------------------------------------------|------------------------------------------------------------------|
 | [cppmangle.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/cppmangle.d)       | C++ name mangling                                                |
 | [cppmanglewin.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/cppmanglewin.d) | C++ name mangling for Windows                                    |
+| [basicmangle.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/basicmangle.d)   | D name mangling for basic types                                  |
 | [dmangle.d](https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dmangle.d)           | D [name mangling](https://dlang.org/spec/abi.html#name_mangling) |
 
 ### Linking

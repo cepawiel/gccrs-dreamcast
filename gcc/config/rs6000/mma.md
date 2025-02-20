@@ -1,5 +1,5 @@
 ;; Matrix-Multiply Assist (MMA) patterns.
-;; Copyright (C) 2020-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2020-2024 Free Software Foundation, Inc.
 ;; Contributed by Peter Bergner <bergner@linux.ibm.com> and
 ;;		  Michael Meissner <meissner@linux.ibm.com>
 ;;
@@ -285,13 +285,16 @@
 	 expanding to RTL and have seen errors.  It would not cause further ICEs
 	 as the compilation would stop soon after expanding.  */
     }
+  else if (rs6000_opaque_type_invalid_use_p (currently_expanding_gimple_stmt))
+    ;
   else
-    gcc_unreachable ();
+    /* Catch unexpected cases.  */
+    gcc_assert (false);
 })
 
 (define_insn_and_split "*movoo"
-  [(set (match_operand:OO 0 "nonimmediate_operand" "=wa,m,wa")
-	(match_operand:OO 1 "input_operand" "m,wa,wa"))]
+  [(set (match_operand:OO 0 "nonimmediate_operand" "=wa,ZwO,wa")
+	(match_operand:OO 1 "input_operand" "ZwO,wa,wa"))]
   "TARGET_MMA
    && (gpc_reg_operand (operands[0], OOmode)
        || gpc_reg_operand (operands[1], OOmode))"
@@ -329,13 +332,16 @@
 	 some missing required conditions.  So do the same handlings for XOmode
 	 as OOmode here.  */
     }
+  else if (rs6000_opaque_type_invalid_use_p (currently_expanding_gimple_stmt))
+    ;
   else
-    gcc_unreachable ();
+    /* Catch unexpected cases.  */
+    gcc_assert (false);
 })
 
 (define_insn_and_split "*movxo"
-  [(set (match_operand:XO 0 "nonimmediate_operand" "=d,m,d")
-	(match_operand:XO 1 "input_operand" "m,d,d"))]
+  [(set (match_operand:XO 0 "nonimmediate_operand" "=d,ZwO,d")
+	(match_operand:XO 1 "input_operand" "ZwO,d,d"))]
   "TARGET_MMA
    && (gpc_reg_operand (operands[0], XOmode)
        || gpc_reg_operand (operands[1], XOmode))"

@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -99,6 +99,12 @@ package body Exp_Intr is
    --  N_Free_Statement and appropriate context.
 
    procedure Expand_To_Address (N : Node_Id);
+   --  Expand a call to corresponding function from System.Storage_Elements or
+   --  declared in an instance of System.Address_To_Access_Conversions.
+
+   procedure Expand_To_Integer (N : Node_Id);
+   --  Expand a call to corresponding function from System.Storage_Elements
+
    procedure Expand_To_Pointer (N : Node_Id);
    --  Expand a call to corresponding function, declared in an instance of
    --  System.Address_To_Access_Conversions.
@@ -277,6 +283,8 @@ package body Exp_Intr is
       Result_Typ : Entity_Id;
 
    begin
+      pragma Assert (Is_Class_Wide_Type (Etype (Entity (Name (N)))));
+
       --  Remove side effects from tag argument early, before rewriting
       --  the dispatching constructor call, as Remove_Side_Effects relies
       --  on Tag_Arg's Parent link properly attached to the tree (once the
@@ -660,6 +668,9 @@ package body Exp_Intr is
 
       elsif Nam = Name_To_Address then
          Expand_To_Address (N);
+
+      elsif Nam = Name_To_Integer then
+         Expand_To_Integer (N);
 
       elsif Nam = Name_To_Pointer then
          Expand_To_Pointer (N);
@@ -1309,6 +1320,12 @@ package body Exp_Intr is
       Obj : Node_Id;
 
    begin
+      if Is_Modular_Integer_Type (Etype (Arg)) then
+         Rewrite (N, Unchecked_Convert_To (Etype (N), Arg));
+         Analyze (N);
+         return;
+      end if;
+
       Remove_Side_Effects (Arg);
 
       Obj := Make_Explicit_Dereference (Loc, Relocate_Node (Arg));
@@ -1326,6 +1343,18 @@ package body Exp_Intr is
 
       Analyze_And_Resolve (N, RTE (RE_Address));
    end Expand_To_Address;
+
+   -----------------------
+   -- Expand_To_Integer --
+   -----------------------
+
+   procedure Expand_To_Integer (N : Node_Id) is
+      Arg : constant Node_Id := First_Actual (N);
+
+   begin
+      Rewrite (N, Unchecked_Convert_To (Etype (N), Arg));
+      Analyze (N);
+   end Expand_To_Integer;
 
    -----------------------
    -- Expand_To_Pointer --

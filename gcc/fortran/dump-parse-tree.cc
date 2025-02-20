@@ -1,5 +1,5 @@
 /* Parse tree dumper
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
    Contributed by Steven Bosscher
 
 This file is part of GCC.
@@ -55,10 +55,8 @@ static void show_typespec (gfc_typespec *);
 static void show_ref (gfc_ref *);
 static void show_attr (symbol_attribute *, const char *);
 
-/* Allow dumping of an expression in the debugger.  */
-void gfc_debug_expr (gfc_expr *);
-
-void debug (symbol_attribute *attr)
+DEBUG_FUNCTION void
+debug (symbol_attribute *attr)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -67,7 +65,8 @@ void debug (symbol_attribute *attr)
   dumpfile = tmp;
 }
 
-void debug (gfc_formal_arglist *formal)
+DEBUG_FUNCTION void
+debug (gfc_formal_arglist *formal)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -80,12 +79,14 @@ void debug (gfc_formal_arglist *formal)
   dumpfile = tmp;
 }
 
-void debug (symbol_attribute attr)
+DEBUG_FUNCTION void
+debug (symbol_attribute attr)
 {
   debug (&attr);
 }
 
-void debug (gfc_expr *e)
+DEBUG_FUNCTION void
+debug (gfc_expr *e)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -102,7 +103,8 @@ void debug (gfc_expr *e)
   dumpfile = tmp;
 }
 
-void debug (gfc_typespec *ts)
+DEBUG_FUNCTION void
+debug (gfc_typespec *ts)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -111,12 +113,14 @@ void debug (gfc_typespec *ts)
   dumpfile = tmp;
 }
 
-void debug (gfc_typespec ts)
+DEBUG_FUNCTION void
+debug (gfc_typespec ts)
 {
   debug (&ts);
 }
 
-void debug (gfc_ref *p)
+DEBUG_FUNCTION void
+debug (gfc_ref *p)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -125,7 +129,17 @@ void debug (gfc_ref *p)
   dumpfile = tmp;
 }
 
-void
+DEBUG_FUNCTION void
+debug (gfc_namespace *ns)
+{
+  FILE *tmp = dumpfile;
+  dumpfile = stderr;
+  show_namespace (ns);
+  fputc ('\n', dumpfile);
+  dumpfile = tmp;
+}
+
+DEBUG_FUNCTION void
 gfc_debug_expr (gfc_expr *e)
 {
   FILE *tmp = dumpfile;
@@ -136,9 +150,8 @@ gfc_debug_expr (gfc_expr *e)
 }
 
 /* Allow for dumping of a piece of code in the debugger.  */
-void gfc_debug_code (gfc_code *c);
 
-void
+DEBUG_FUNCTION void
 gfc_debug_code (gfc_code *c)
 {
   FILE *tmp = dumpfile;
@@ -148,7 +161,8 @@ gfc_debug_code (gfc_code *c)
   dumpfile = tmp;
 }
 
-void debug (gfc_symbol *sym)
+DEBUG_FUNCTION void
+debug (gfc_symbol *sym)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;
@@ -758,12 +772,13 @@ show_expr (gfc_expr *p)
 static void
 show_attr (symbol_attribute *attr, const char * module)
 {
+  fputc ('(', dumpfile);
   if (attr->flavor != FL_UNKNOWN)
     {
       if (attr->flavor == FL_DERIVED && attr->pdt_template)
-	fputs (" (PDT-TEMPLATE", dumpfile);
+	fputs ("PDT-TEMPLATE ", dumpfile);
       else
-    fprintf (dumpfile, "(%s ", gfc_code2string (flavors, attr->flavor));
+	fprintf (dumpfile, "%s ", gfc_code2string (flavors, attr->flavor));
     }
   if (attr->access != ACCESS_UNKNOWN)
     fprintf (dumpfile, "%s ", gfc_code2string (access_types, attr->access));
@@ -894,11 +909,13 @@ show_attr (symbol_attribute *attr, const char * module)
   if (attr->pdt_string)
     fputs (" PDT-STRING", dumpfile);
   if (attr->omp_udr_artificial_var)
-    fputs (" OMP-UDT-ARTIFICIAL-VAR", dumpfile);
+    fputs (" OMP-UDR-ARTIFICIAL-VAR", dumpfile);
   if (attr->omp_declare_target)
     fputs (" OMP-DECLARE-TARGET", dumpfile);
   if (attr->omp_declare_target_link)
     fputs (" OMP-DECLARE-TARGET-LINK", dumpfile);
+  if (attr->omp_declare_target_indirect)
+    fputs (" OMP-DECLARE-TARGET-INDIRECT", dumpfile);
   if (attr->elemental)
     fputs (" ELEMENTAL", dumpfile);
   if (attr->pure)
@@ -1357,6 +1374,32 @@ show_omp_namelist (int list_type, gfc_omp_namelist *n)
 	    }
 	  ns_iter = n->u2.ns;
 	}
+      if (list_type == OMP_LIST_ALLOCATE)
+	{
+	  if (n->u2.allocator)
+	    {
+	      fputs ("allocator(", dumpfile);
+	      show_expr (n->u2.allocator);
+	      fputc (')', dumpfile);
+	    }
+	  if (n->expr && n->u.align)
+	    fputc (',', dumpfile);
+	  if (n->u.align)
+	    {
+	      fputs ("align(", dumpfile);
+	      show_expr (n->u.align);
+	      fputc (')', dumpfile);
+	    }
+	  if (n->u2.allocator || n->u.align)
+	    fputc (':', dumpfile);
+	  if (n->expr)
+	    show_expr (n->expr);
+	  else
+	    fputs (n->sym->name, dumpfile);
+	  if (n->next)
+	    fputs (") ALLOCATE(", dumpfile);
+	  continue;
+	}
       if (list_type == OMP_LIST_REDUCTION)
 	switch (n->u.reduction_op)
 	  {
@@ -1430,9 +1473,20 @@ show_omp_namelist (int list_type, gfc_omp_namelist *n)
 	  case OMP_MAP_TO: fputs ("to:", dumpfile); break;
 	  case OMP_MAP_FROM: fputs ("from:", dumpfile); break;
 	  case OMP_MAP_TOFROM: fputs ("tofrom:", dumpfile); break;
+	  case OMP_MAP_PRESENT_ALLOC: fputs ("present,alloc:", dumpfile); break;
+	  case OMP_MAP_PRESENT_TO: fputs ("present,to:", dumpfile); break;
+	  case OMP_MAP_PRESENT_FROM: fputs ("present,from:", dumpfile); break;
+	  case OMP_MAP_PRESENT_TOFROM:
+	    fputs ("present,tofrom:", dumpfile); break;
 	  case OMP_MAP_ALWAYS_TO: fputs ("always,to:", dumpfile); break;
 	  case OMP_MAP_ALWAYS_FROM: fputs ("always,from:", dumpfile); break;
 	  case OMP_MAP_ALWAYS_TOFROM: fputs ("always,tofrom:", dumpfile); break;
+	  case OMP_MAP_ALWAYS_PRESENT_TO:
+	    fputs ("always,present,to:", dumpfile); break;
+	  case OMP_MAP_ALWAYS_PRESENT_FROM:
+	    fputs ("always,present,from:", dumpfile); break;
+	  case OMP_MAP_ALWAYS_PRESENT_TOFROM:
+	    fputs ("always,present,tofrom:", dumpfile); break;
 	  case OMP_MAP_DELETE: fputs ("delete:", dumpfile); break;
 	  case OMP_MAP_RELEASE: fputs ("release:", dumpfile); break;
 	  default: break;
@@ -1445,6 +1499,29 @@ show_omp_namelist (int list_type, gfc_omp_namelist *n)
 	  case OMP_LINEAR_UVAL: fputs ("uval(", dumpfile); break;
 	  default: break;
 	  }
+      else if (list_type == OMP_LIST_USES_ALLOCATORS)
+	{
+	  if (n->u.memspace_sym)
+	    {
+	      fputs ("memspace(", dumpfile);
+	      fputs (n->sym->name, dumpfile);
+	      fputc (')', dumpfile);
+	    }
+	  if (n->u.memspace_sym && n->u2.traits_sym)
+	    fputc (',', dumpfile);
+	  if (n->u2.traits_sym)
+	    {
+	      fputs ("traits(", dumpfile);
+	      fputs (n->u2.traits_sym->name, dumpfile);
+	      fputc (')', dumpfile);
+	    }
+	  if (n->u.memspace_sym || n->u2.traits_sym)
+	    fputc (':', dumpfile);
+	  fputs (n->sym->name, dumpfile);
+	  if (n->next)
+	    fputs (", ", dumpfile);
+	  continue;
+	}
       fprintf (dumpfile, "%s", n->sym ? n->sym->name : "omp_all_memory");
       if (list_type == OMP_LIST_LINEAR && n->u.linear.op != OMP_LINEAR_DEFAULT)
 	fputc (')', dumpfile);
@@ -1516,6 +1593,27 @@ show_omp_clauses (gfc_omp_clauses *omp_clauses)
     {
       fputs (" IF(", dumpfile);
       show_expr (omp_clauses->if_expr);
+      fputc (')', dumpfile);
+    }
+  for (i = 0; i < OMP_IF_LAST; i++)
+    if (omp_clauses->if_exprs[i])
+      {
+	static const char *ifs[] = {
+	  "CANCEL",
+	  "PARALLEL",
+	  "SIMD",
+	  "TASK",
+	  "TASKLOOP",
+	  "TARGET",
+	  "TARGET DATA",
+	  "TARGET UPDATE",
+	  "TARGET ENTER DATA",
+	  "TARGET EXIT DATA"
+	};
+      fputs (" IF(", dumpfile);
+      fputs (ifs[i], dumpfile);
+      fputs (": ", dumpfile);
+      show_expr (omp_clauses->if_exprs[i]);
       fputc (')', dumpfile);
     }
   if (omp_clauses->final_expr)
@@ -1747,6 +1845,7 @@ show_omp_clauses (gfc_omp_clauses *omp_clauses)
 	  case OMP_LIST_ALLOCATE: type = "ALLOCATE"; break;
 	  case OMP_LIST_SCAN_IN: type = "INCLUSIVE"; break;
 	  case OMP_LIST_SCAN_EX: type = "EXCLUSIVE"; break;
+	  case OMP_LIST_USES_ALLOCATORS: type = "USES_ALLOCATORS"; break;
 	  default:
 	    gcc_unreachable ();
 	  }
@@ -1755,6 +1854,9 @@ show_omp_clauses (gfc_omp_clauses *omp_clauses)
 	  fputs ("inscan, ", dumpfile);
 	if (list_type == OMP_LIST_REDUCTION_TASK)
 	  fputs ("task, ", dumpfile);
+	if ((list_type == OMP_LIST_TO || list_type == OMP_LIST_FROM)
+	    && omp_clauses->lists[list_type]->u.present_modifier)
+	  fputs ("present:", dumpfile);
 	show_omp_namelist (list_type, omp_clauses->lists[list_type]);
 	fputc (')', dumpfile);
       }
@@ -1920,27 +2022,6 @@ show_omp_clauses (gfc_omp_clauses *omp_clauses)
       show_expr (omp_clauses->detach);
       fputc (')', dumpfile);
     }
-  for (i = 0; i < OMP_IF_LAST; i++)
-    if (omp_clauses->if_exprs[i])
-      {
-	static const char *ifs[] = {
-	  "CANCEL",
-	  "PARALLEL",
-	  "SIMD",
-	  "TASK",
-	  "TASKLOOP",
-	  "TARGET",
-	  "TARGET DATA",
-	  "TARGET UPDATE",
-	  "TARGET ENTER DATA",
-	  "TARGET EXIT DATA"
-	};
-      fputs (" IF(", dumpfile);
-      fputs (ifs[i], dumpfile);
-      fputs (": ", dumpfile);
-      show_expr (omp_clauses->if_exprs[i]);
-      fputc (')', dumpfile);
-    }
   if (omp_clauses->destroy)
     fputs (" DESTROY", dumpfile);
   if (omp_clauses->depend_source)
@@ -2058,6 +2139,8 @@ show_omp_node (int level, gfc_code *c)
     case EXEC_OACC_CACHE: name = "CACHE"; is_oacc = true; break;
     case EXEC_OACC_ENTER_DATA: name = "ENTER DATA"; is_oacc = true; break;
     case EXEC_OACC_EXIT_DATA: name = "EXIT DATA"; is_oacc = true; break;
+    case EXEC_OMP_ALLOCATE: name = "ALLOCATE"; break;
+    case EXEC_OMP_ALLOCATORS: name = "ALLOCATORS"; break;
     case EXEC_OMP_ASSUME: name = "ASSUME"; break;
     case EXEC_OMP_ATOMIC: name = "ATOMIC"; break;
     case EXEC_OMP_BARRIER: name = "BARRIER"; break;
@@ -2160,6 +2243,8 @@ show_omp_node (int level, gfc_code *c)
     case EXEC_OACC_CACHE:
     case EXEC_OACC_ENTER_DATA:
     case EXEC_OACC_EXIT_DATA:
+    case EXEC_OMP_ALLOCATE:
+    case EXEC_OMP_ALLOCATORS:
     case EXEC_OMP_ASSUME:
     case EXEC_OMP_CANCEL:
     case EXEC_OMP_CANCELLATION_POINT:
@@ -2480,7 +2565,7 @@ show_code_node (int level, gfc_code *c)
     case EXEC_SYNC_MEMORY:
       fputs ("SYNC MEMORY ", dumpfile);
       if (c->expr2 != NULL)
- 	{
+	{
 	  fputs (" stat=", dumpfile);
 	  show_expr (c->expr2);
 	}
@@ -3386,6 +3471,8 @@ show_code_node (int level, gfc_code *c)
     case EXEC_OACC_CACHE:
     case EXEC_OACC_ENTER_DATA:
     case EXEC_OACC_EXIT_DATA:
+    case EXEC_OMP_ALLOCATE:
+    case EXEC_OMP_ALLOCATORS:
     case EXEC_OMP_ASSUME:
     case EXEC_OMP_ATOMIC:
     case EXEC_OMP_CANCEL:
@@ -3673,7 +3760,12 @@ get_c_type_name (gfc_typespec *ts, gfc_array_spec *as, const char **pre,
 	  if (c_interop_kinds_table[i].f90_type == ts->type
 	      && c_interop_kinds_table[i].value == ts->kind)
 	    {
+	      /* Skip over 'c_'. */
 	      *type_name = c_interop_kinds_table[i].name + 2;
+	      if (strcmp (*type_name, "long_long") == 0)
+		*type_name = "long long";
+	      if (strcmp (*type_name, "long_double") == 0)
+		*type_name = "long double";
 	      if (strcmp (*type_name, "signed_char") == 0)
 		*type_name = "signed char";
 	      else if (strcmp (*type_name, "size_t") == 0)
@@ -3886,7 +3978,7 @@ write_proc (gfc_symbol *sym, bool bind_c)
       if (sym->formal)
 	fputs (", ", dumpfile);
     }
-      
+
   for (f = sym->formal; f; f = f->next)
     {
       gfc_symbol *s;
@@ -3993,7 +4085,8 @@ gfc_dump_global_symbols (FILE *f)
 
 /* Show an array ref.  */
 
-void debug (gfc_array_ref *ar)
+DEBUG_FUNCTION void
+debug (gfc_array_ref *ar)
 {
   FILE *tmp = dumpfile;
   dumpfile = stderr;

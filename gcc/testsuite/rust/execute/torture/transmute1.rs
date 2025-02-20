@@ -1,8 +1,12 @@
 // { dg-additional-options "-w" }
+#![feature(intrinsics)]
 
 extern "rust-intrinsic" {
     fn transmute<T, U>(value: T) -> U;
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 struct WrapI {
     inner: i32,

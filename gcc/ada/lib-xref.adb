@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1998-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1998-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -29,6 +29,7 @@ with Einfo;          use Einfo;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
 with Errout;         use Errout;
+with Exp_Tss;        use Exp_Tss;
 with Lib.Util;       use Lib.Util;
 with Nlists;         use Nlists;
 with Opt;            use Opt;
@@ -47,6 +48,7 @@ with Snames;         use Snames;
 with Stringt;        use Stringt;
 with Stand;          use Stand;
 with Table;          use Table;
+with Warnsw;         use Warnsw;
 
 with GNAT.Heap_Sort_G;
 with GNAT.HTable;
@@ -705,7 +707,7 @@ package body Lib.Xref is
             Set_Referenced (E);
 
          --  For the case where the entity is on the left hand side of an
-         --  assignment statment, we do nothing here.
+         --  assignment statement, we do nothing here.
 
          --  The processing for Analyze_Assignment_Statement will set the
          --  Referenced_As_LHS flag.
@@ -775,7 +777,7 @@ package body Lib.Xref is
                Set_Referenced_As_LHS (E, False);
 
             --  For OUT parameter not covered by the above cases, we simply
-            --  regard it as a non-reference.
+            --  regard it as a reference.
 
             else
                Set_Referenced_As_Out_Parameter (E);
@@ -788,10 +790,15 @@ package body Lib.Xref is
          elsif Kind = E_In_Out_Parameter
            and then Is_Assignable (E)
          then
-            --  For sure this counts as a normal read reference
+            --  We count it as a read reference unless we're calling a
+            --  type support subprogram such as deep finalize.
 
-            Set_Referenced (E);
-            Set_Last_Assignment (E, Empty);
+            if not Is_Entity_Name (Name (Call))
+              or else Get_TSS_Name (Entity (Name (Call))) = TSS_Null
+            then
+               Set_Referenced (E);
+               Set_Last_Assignment (E, Empty);
+            end if;
 
             --  We count it as being referenced as an out parameter if the
             --  option is set to warn on all out parameters, except that we
@@ -1271,10 +1278,10 @@ package body Lib.Xref is
       XE : Xref_Entry renames Xrefs.Table (F);
       type M is mod 2**32;
 
-      H : constant M := M (XE.Key.Ent) + 2 ** 7 * M (abs XE.Key.Loc);
+      H : constant M := 3 * M (XE.Key.Ent) + 5 * M (abs XE.Key.Loc);
       --  It would be more natural to write:
       --
-      --    H : constant M := M'Mod (XE.Key.Ent) + 2**7 * M'Mod (XE.Key.Loc);
+      --    H : constant M := 3 * M'Mod (XE.Key.Ent) + 5 * M'Mod (XE.Key.Loc);
       --
       --  But we can't use M'Mod, because it prevents bootstrapping with older
       --  compilers. Loc can be negative, so we do "abs" before converting.

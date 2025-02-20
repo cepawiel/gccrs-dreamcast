@@ -20,6 +20,8 @@ along with GCC; see the file COPYING3.  If not see
 #ifndef GCC_ANALYZER_CALL_SUMMARY_H
 #define GCC_ANALYZER_CALL_SUMMARY_H
 
+#include "call-details.h"
+
 namespace ana {
 
 /* A class summarizing one particular outcome of a function that
@@ -66,7 +68,7 @@ class call_summary_replay
 {
 public:
   call_summary_replay (const call_details &cd,
-		       function *called_fn,
+		       const function &called_fn,
 		       call_summary *m_summary,
 		       const extrinsic_state &ext_state);
 

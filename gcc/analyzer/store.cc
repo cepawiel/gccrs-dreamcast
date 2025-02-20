@@ -1,5 +1,5 @@
 /* Classes for modeling the state of memory.
-   Copyright (C) 2020-2022 Free Software Foundation, Inc.
+   Copyright (C) 2020-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -19,6 +19,7 @@ along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
 
 #include "config.h"
+#define INCLUDE_MEMORY
 #include "system.h"
 #include "coretypes.h"
 #include "tree.h"
@@ -37,7 +38,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "fold-const.h"
 #include "tree-pretty-print.h"
 #include "diagnostic-color.h"
-#include "diagnostic-metadata.h"
 #include "bitmap.h"
 #include "selftest.h"
 #include "analyzer/analyzer.h"
@@ -126,8 +126,12 @@ binding_key::make (store_manager *mgr, const region *r)
     {
       bit_size_t bit_size;
       if (r->get_bit_size (&bit_size))
-	return mgr->get_concrete_binding (offset.get_bit_offset (),
-					  bit_size);
+	{
+	  /* Must be non-empty.  */
+	  gcc_assert (bit_size > 0);
+	  return mgr->get_concrete_binding (offset.get_bit_offset (),
+					    bit_size);
+	}
       else
 	return mgr->get_symbolic_binding (r);
     }
@@ -231,8 +235,23 @@ bit_range::dump () const
   pp_flush (&pp);
 }
 
-/* If OTHER is a subset of this, return true and write
-   to *OUT the relative range of OTHER within this.
+/* Generate a JSON value for this bit_range.
+   This is intended for debugging the analyzer rather
+   than serialization.  */
+
+json::object *
+bit_range::to_json () const
+{
+  json::object *obj = new json::object ();
+  obj->set ("start_bit_offset",
+	    bit_offset_to_json (m_start_bit_offset));
+  obj->set ("size_in_bits",
+	    bit_offset_to_json (m_size_in_bits));
+  return obj;
+}
+
+/* If OTHER is a subset of this, return true and, if OUT is
+   non-null, write to *OUT the relative range of OTHER within this.
    Otherwise return false.  */
 
 bool
@@ -241,8 +260,11 @@ bit_range::contains_p (const bit_range &other, bit_range *out) const
   if (contains_p (other.get_start_bit_offset ())
       && contains_p (other.get_last_bit_offset ()))
     {
-      out->m_start_bit_offset = other.m_start_bit_offset - m_start_bit_offset;
-      out->m_size_in_bits = other.m_size_in_bits;
+      if (out)
+	{
+	  out->m_start_bit_offset = other.m_start_bit_offset - m_start_bit_offset;
+	  out->m_size_in_bits = other.m_size_in_bits;
+	}
       return true;
     }
   else
@@ -272,6 +294,77 @@ bit_range::intersects_p (const bit_range &other,
       bit_range abs_overlap_bits (overlap_start, overlap_next - overlap_start);
       *out_this = abs_overlap_bits - get_start_bit_offset ();
       *out_other = abs_overlap_bits - other.get_start_bit_offset ();
+      return true;
+    }
+  else
+    return false;
+}
+
+/* Return true if THIS and OTHER intersect and write the number
+   of bits both buffers overlap to *OUT_NUM_OVERLAP_BITS.
+
+   Otherwise return false.  */
+
+bool
+bit_range::intersects_p (const bit_range &other,
+			 bit_size_t *out_num_overlap_bits) const
+{
+  if (get_start_bit_offset () < other.get_next_bit_offset ()
+      && other.get_start_bit_offset () < get_next_bit_offset ())
+    {
+      bit_offset_t overlap_start = MAX (get_start_bit_offset (),
+					 other.get_start_bit_offset ());
+      bit_offset_t overlap_next = MIN (get_next_bit_offset (),
+					other.get_next_bit_offset ());
+      gcc_assert (overlap_next > overlap_start);
+      *out_num_overlap_bits = overlap_next - overlap_start;
+      return true;
+    }
+  else
+    return false;
+}
+
+/* Return true if THIS exceeds OTHER and write the overhanging
+   bit range to OUT_OVERHANGING_BIT_RANGE.  */
+
+bool
+bit_range::exceeds_p (const bit_range &other,
+		      bit_range *out_overhanging_bit_range) const
+{
+  gcc_assert (!empty_p ());
+
+  if (other.get_next_bit_offset () < get_next_bit_offset ())
+    {
+      /* THIS definitely exceeds OTHER.  */
+      bit_offset_t start = MAX (get_start_bit_offset (),
+				 other.get_next_bit_offset ());
+      bit_offset_t size = get_next_bit_offset () - start;
+      gcc_assert (size > 0);
+      out_overhanging_bit_range->m_start_bit_offset = start;
+      out_overhanging_bit_range->m_size_in_bits = size;
+      return true;
+    }
+  else
+    return false;
+}
+
+/* Return true if THIS falls short of OFFSET and write the
+   bit range fallen short to OUT_FALL_SHORT_BITS.  */
+
+bool
+bit_range::falls_short_of_p (bit_offset_t offset,
+			     bit_range *out_fall_short_bits) const
+{
+  gcc_assert (!empty_p ());
+
+  if (get_start_bit_offset () < offset)
+    {
+      /* THIS falls short of OFFSET.  */
+      bit_offset_t start = get_start_bit_offset ();
+      bit_offset_t size = MIN (offset, get_next_bit_offset ()) - start;
+      gcc_assert (size > 0);
+      out_fall_short_bits->m_start_bit_offset = start;
+      out_fall_short_bits->m_size_in_bits = size;
       return true;
     }
   else
@@ -406,6 +499,21 @@ byte_range::dump () const
   pp_flush (&pp);
 }
 
+/* Generate a JSON value for this byte_range.
+   This is intended for debugging the analyzer rather
+   than serialization.  */
+
+json::object *
+byte_range::to_json () const
+{
+  json::object *obj = new json::object ();
+  obj->set ("start_byte_offset",
+	    byte_offset_to_json (m_start_byte_offset));
+  obj->set ("size_in_bytes",
+	    byte_offset_to_json (m_size_in_bytes));
+  return obj;
+}
+
 /* If OTHER is a subset of this, return true and write
    to *OUT the relative range of OTHER within this.
    Otherwise return false.  */
@@ -418,77 +526,6 @@ byte_range::contains_p (const byte_range &other, byte_range *out) const
     {
       out->m_start_byte_offset = other.m_start_byte_offset - m_start_byte_offset;
       out->m_size_in_bytes = other.m_size_in_bytes;
-      return true;
-    }
-  else
-    return false;
-}
-
-/* Return true if THIS and OTHER intersect and write the number
-   of bytes both buffers overlap to *OUT_NUM_OVERLAP_BYTES.
-
-   Otherwise return false.  */
-
-bool
-byte_range::intersects_p (const byte_range &other,
-			  byte_size_t *out_num_overlap_bytes) const
-{
-  if (get_start_byte_offset () < other.get_next_byte_offset ()
-      && other.get_start_byte_offset () < get_next_byte_offset ())
-    {
-      byte_offset_t overlap_start = MAX (get_start_byte_offset (),
-					 other.get_start_byte_offset ());
-      byte_offset_t overlap_next = MIN (get_next_byte_offset (),
-					other.get_next_byte_offset ());
-      gcc_assert (overlap_next > overlap_start);
-      *out_num_overlap_bytes = overlap_next - overlap_start;
-      return true;
-    }
-  else
-    return false;
-}
-
-/* Return true if THIS exceeds OTHER and write the overhanging
-   byte range to OUT_OVERHANGING_BYTE_RANGE.  */
-
-bool
-byte_range::exceeds_p (const byte_range &other,
-		       byte_range *out_overhanging_byte_range) const
-{
-  gcc_assert (!empty_p ());
-
-  if (other.get_next_byte_offset () < get_next_byte_offset ())
-    {
-      /* THIS definitely exceeds OTHER.  */
-      byte_offset_t start = MAX (get_start_byte_offset (),
-				 other.get_next_byte_offset ());
-      byte_offset_t size = get_next_byte_offset () - start;
-      gcc_assert (size > 0);
-      out_overhanging_byte_range->m_start_byte_offset = start;
-      out_overhanging_byte_range->m_size_in_bytes = size;
-      return true;
-    }
-  else
-    return false;
-}
-
-/* Return true if THIS falls short of OFFSET and write the
-   byte range fallen short to OUT_FALL_SHORT_BYTES.  */
-
-bool
-byte_range::falls_short_of_p (byte_offset_t offset,
-			      byte_range *out_fall_short_bytes) const
-{
-  gcc_assert (!empty_p ());
-
-  if (get_start_byte_offset () < offset)
-    {
-      /* THIS falls short of OFFSET.  */
-      byte_offset_t start = get_start_byte_offset ();
-      byte_offset_t size = MIN (offset, get_next_byte_offset ()) - start;
-      gcc_assert (size > 0);
-      out_fall_short_bytes->m_start_byte_offset = start;
-      out_fall_short_bytes->m_size_in_bytes = size;
       return true;
     }
   else
@@ -528,6 +565,15 @@ concrete_binding::overlaps_p (const concrete_binding &other) const
       && get_next_bit_offset () > other.get_start_bit_offset ())
     return true;
   return false;
+}
+
+/* If this is expressible as a concrete byte range, return true
+   and write it to *OUT.  Otherwise return false.  */
+
+bool
+concrete_binding::get_byte_range (byte_range *out) const
+{
+  return m_bit_range.as_byte_range (out);
 }
 
 /* Comparator for use by vec<const concrete_binding *>::qsort.  */
@@ -906,6 +952,8 @@ binding_map::apply_ctor_val_to_range (const region *parent_reg,
     return false;
   bit_offset_t start_bit_offset = min_offset.get_bit_offset ();
   store_manager *smgr = mgr->get_store_manager ();
+  if (max_element->empty_p ())
+    return false;
   const binding_key *max_element_key = binding_key::make (smgr, max_element);
   if (max_element_key->symbolic_p ())
     return false;
@@ -945,6 +993,8 @@ binding_map::apply_ctor_pair_to_child_region (const region *parent_reg,
   else
     {
       const svalue *sval = get_svalue_for_ctor_val (val, mgr);
+      if (child_reg->empty_p ())
+	return false;
       const binding_key *k
 	= binding_key::make (mgr->get_store_manager (), child_reg);
       /* Handle the case where we have an unknown size for child_reg
@@ -1069,6 +1119,9 @@ binding_map::get_overlapping_bindings (const binding_key *key,
    If UNCERTAINTY is non-NULL, use it to record any svalues that
    were removed, as being maybe-bound.
 
+   If MAYBE_LIVE_VALUES is non-NULL, then use it to record any svalues that
+   were removed as being maybe-live.
+
    If ALWAYS_OVERLAP, then assume that DROP_KEY can overlap anything
    in the map, due to one or both of the underlying clusters being
    symbolic (but not the same symbolic region).  Hence even if DROP_KEY is a
@@ -1080,6 +1133,7 @@ void
 binding_map::remove_overlapping_bindings (store_manager *mgr,
 					  const binding_key *drop_key,
 					  uncertainty_t *uncertainty,
+					  svalue_set *maybe_live_values,
 					  bool always_overlap)
 {
   /* Get the bindings of interest within this map.  */
@@ -1113,6 +1167,11 @@ binding_map::remove_overlapping_bindings (store_manager *mgr,
 	      || iter_binding->symbolic_p ()
 	      || always_overlap))
 	uncertainty->on_maybe_bound_sval (old_sval);
+
+      /* Record any svalues that were removed to *MAYBE_LIVE_VALUES as being
+	 maybe-live. */
+      if (maybe_live_values)
+	maybe_live_values->add (old_sval);
 
       /* Begin by removing the old binding. */
       m_map.remove (iter_binding);
@@ -1342,6 +1401,8 @@ binding_cluster::bind (store_manager *mgr,
       return;
     }
 
+  if (reg->empty_p ())
+    return;
   const binding_key *binding = binding_key::make (mgr, reg);
   bind_key (binding, sval);
 }
@@ -1405,7 +1466,7 @@ binding_cluster::bind_compound_sval (store_manager *mgr,
 void
 binding_cluster::clobber_region (store_manager *mgr, const region *reg)
 {
-  remove_overlapping_bindings (mgr, reg, NULL);
+  remove_overlapping_bindings (mgr, reg, NULL, NULL);
 }
 
 /* Remove any bindings for REG within this cluster.  */
@@ -1414,6 +1475,8 @@ void
 binding_cluster::purge_region (store_manager *mgr, const region *reg)
 {
   gcc_assert (reg->get_kind () == RK_DECL);
+  if (reg->empty_p ())
+    return;
   const binding_key *binding
     = binding_key::make (mgr, const_cast<region *> (reg));
   m_map.remove (binding);
@@ -1451,6 +1514,8 @@ binding_cluster::zero_fill_region (store_manager *mgr, const region *reg)
    Remove any bindings overlapping REG_FOR_OVERLAP.
    If UNCERTAINTY is non-NULL, use it to record any svalues that
    had bindings to them removed, as being maybe-bound.
+   If MAYBE_LIVE_VALUES is non-NULL, use it to record any svalues that
+   had bindings to them removed, as being maybe-live.
 
    REG_TO_BIND and REG_FOR_OVERLAP are the same for
    store::mark_region_as_unknown, but are different in
@@ -1461,9 +1526,14 @@ void
 binding_cluster::mark_region_as_unknown (store_manager *mgr,
 					 const region *reg_to_bind,
 					 const region *reg_for_overlap,
-					 uncertainty_t *uncertainty)
+					 uncertainty_t *uncertainty,
+					 svalue_set *maybe_live_values)
 {
-  remove_overlapping_bindings (mgr, reg_for_overlap, uncertainty);
+  if (reg_to_bind->empty_p ())
+    return;
+
+  remove_overlapping_bindings (mgr, reg_for_overlap, uncertainty,
+			       maybe_live_values);
 
   /* Add a default binding to "unknown".  */
   region_model_manager *sval_mgr = mgr->get_svalue_manager ();
@@ -1515,6 +1585,8 @@ const svalue *
 binding_cluster::get_binding (store_manager *mgr,
 			      const region *reg) const
 {
+  if (reg->empty_p ())
+    return NULL;
   const binding_key *reg_binding = binding_key::make (mgr, reg);
   const svalue *sval = m_map.get (reg_binding);
   if (sval)
@@ -1656,6 +1728,9 @@ binding_cluster::maybe_get_compound_binding (store_manager *mgr,
   if (reg_offset.symbolic_p ())
     return NULL;
 
+  if (reg->empty_p ())
+    return NULL;
+
   region_model_manager *sval_mgr = mgr->get_svalue_manager ();
 
   /* We will a build the result map in two parts:
@@ -1684,7 +1759,16 @@ binding_cluster::maybe_get_compound_binding (store_manager *mgr,
   else
     default_sval = sval_mgr->get_or_create_initial_value (reg);
   const binding_key *default_key = binding_key::make (mgr, reg);
-  default_map.put (default_key, default_sval);
+
+  /* Express the bit-range of the default key for REG relative to REG,
+     rather than to the base region.  */
+  const concrete_binding *concrete_default_key
+    = default_key->dyn_cast_concrete_binding ();
+  if (!concrete_default_key)
+    return nullptr;
+  const concrete_binding *default_key_relative_to_reg
+     = mgr->get_concrete_binding (0, concrete_default_key->get_size_in_bits ());
+  default_map.put (default_key_relative_to_reg, default_sval);
 
   for (map_t::iterator iter = m_map.begin (); iter != m_map.end (); ++iter)
     {
@@ -1727,7 +1811,7 @@ binding_cluster::maybe_get_compound_binding (store_manager *mgr,
 		 it overlaps with offset_concrete_key.  */
 	      default_map.remove_overlapping_bindings (mgr,
 						       offset_concrete_key,
-						       NULL, false);
+						       NULL, NULL, false);
 	    }
 	  else if (bound_range.contains_p (reg_range, &subrange))
 	    {
@@ -1761,7 +1845,7 @@ binding_cluster::maybe_get_compound_binding (store_manager *mgr,
 		 it overlaps with overlap_concrete_key.  */
 	      default_map.remove_overlapping_bindings (mgr,
 						       overlap_concrete_key,
-						       NULL, false);
+						       NULL, NULL, false);
 	    }
 	}
       else
@@ -1792,13 +1876,19 @@ binding_cluster::maybe_get_compound_binding (store_manager *mgr,
    in the map.
 
    If UNCERTAINTY is non-NULL, use it to record any svalues that
-   were removed, as being maybe-bound.  */
+   were removed, as being maybe-bound.
+
+   If MAYBE_LIVE_VALUES is non-NULL, use it to record any svalues that
+   were removed, as being maybe-live.  */
 
 void
 binding_cluster::remove_overlapping_bindings (store_manager *mgr,
 					      const region *reg,
-					      uncertainty_t *uncertainty)
+					      uncertainty_t *uncertainty,
+					      svalue_set *maybe_live_values)
 {
+  if (reg->empty_p ())
+    return;
   const binding_key *reg_binding = binding_key::make (mgr, reg);
 
   const region *cluster_base_reg = get_base_region ();
@@ -1813,6 +1903,7 @@ binding_cluster::remove_overlapping_bindings (store_manager *mgr,
 			 && (cluster_base_reg->get_kind () == RK_SYMBOLIC
 			     || other_base_reg->get_kind () == RK_SYMBOLIC));
   m_map.remove_overlapping_bindings (mgr, reg_binding, uncertainty,
+				     maybe_live_values,
 				     always_overlap);
 }
 
@@ -2006,11 +2097,14 @@ binding_cluster::on_unknown_fncall (const gcall *call,
     {
       m_map.empty ();
 
-      /* Bind it to a new "conjured" value using CALL.  */
-      const svalue *sval
-	= mgr->get_svalue_manager ()->get_or_create_conjured_svalue
+      if (!m_base_region->empty_p ())
+	{
+	  /* Bind it to a new "conjured" value using CALL.  */
+	  const svalue *sval
+	    = mgr->get_svalue_manager ()->get_or_create_conjured_svalue
 	    (m_base_region->get_type (), call, m_base_region, p);
-      bind (mgr, m_base_region, sval);
+	  bind (mgr, m_base_region, sval);
+	}
 
       m_touched = true;
     }
@@ -2033,6 +2127,17 @@ binding_cluster::on_asm (const gasm *stmt,
   bind (mgr, m_base_region, sval);
 
   m_touched = true;
+}
+
+/* Return true if this cluster has escaped.  */
+
+bool
+binding_cluster::escaped_p () const
+{
+  /* Consider the "errno" region to always have escaped.  */
+  if (m_base_region->get_kind () == RK_ERRNO)
+    return true;
+  return m_escaped;
 }
 
 /* Return true if this binding_cluster has no information
@@ -2134,6 +2239,9 @@ binding_cluster::maybe_get_simple_value (store_manager *mgr) const
     return NULL;
 
   if (m_map.elements () != 1)
+    return NULL;
+
+  if (m_base_region->empty_p ())
     return NULL;
 
   const binding_key *key = binding_key::make (mgr, m_base_region);
@@ -2538,6 +2646,8 @@ store::set_value (store_manager *mgr, const region *lhs_reg,
 	  const region *ptr_base_reg = ptr_dst->get_base_region ();
 	  mark_as_escaped (ptr_base_reg);
 	}
+      if (uncertainty)
+	uncertainty->on_maybe_bound_sval (rhs_sval);
     }
   else if (lhs_base_reg->tracked_p ())
     {
@@ -2558,7 +2668,10 @@ store::set_value (store_manager *mgr, const region *lhs_reg,
      Writes to symbolic clusters can affect both concrete and symbolic
      clusters.
      Invalidate our knowledge of other clusters that might have been
-     affected by the write.  */
+     affected by the write.
+     Gather the set of all svalues that might still be live even if
+     the store doesn't refer to them.  */
+  svalue_set maybe_live_values;
   for (cluster_map_t::iterator iter = m_cluster_map.begin ();
        iter != m_cluster_map.end (); ++iter)
     {
@@ -2595,7 +2708,8 @@ store::set_value (store_manager *mgr, const region *lhs_reg,
 		(mgr,
 		 iter_base_reg, /* reg_to_bind */
 		 lhs_reg, /* reg_for_overlap */
-		 uncertainty);
+		 uncertainty,
+		 &maybe_live_values);
 	      break;
 
 	    case tristate::TS_TRUE:
@@ -2609,6 +2723,11 @@ store::set_value (store_manager *mgr, const region *lhs_reg,
 	    }
 	}
     }
+  /* Given the set of svalues that might still be live, process them
+     (e.g. marking regions as escaped).
+     We do this after the iteration to avoid potentially changing
+     m_cluster_map whilst iterating over it.  */
+  on_maybe_live_values (maybe_live_values);
 }
 
 /* Determine if BASE_REG_A could be an alias of BASE_REG_B.  */
@@ -2641,6 +2760,18 @@ tristate
 store::eval_alias_1 (const region *base_reg_a,
 		     const region *base_reg_b) const
 {
+  /* If they're in different memory spaces, they can't alias.  */
+  {
+    enum memory_space memspace_a = base_reg_a->get_memory_space ();
+    if (memspace_a != MEMSPACE_UNKNOWN)
+      {
+	enum memory_space memspace_b = base_reg_b->get_memory_space ();
+	if (memspace_b != MEMSPACE_UNKNOWN
+	    && memspace_a != memspace_b)
+	  return tristate::TS_FALSE;
+      }
+  }
+
   if (const symbolic_region *sym_reg_a
       = base_reg_a->dyn_cast_symbolic_region ())
     {
@@ -2689,6 +2820,21 @@ store::eval_alias_1 (const region *base_reg_a,
   return tristate::TS_UNKNOWN;
 }
 
+/* Record all of the values in MAYBE_LIVE_VALUES as being possibly live.  */
+
+void
+store::on_maybe_live_values (const svalue_set &maybe_live_values)
+{
+  for (auto sval : maybe_live_values)
+    {
+      if (const region_svalue *ptr_sval = sval->dyn_cast_region_svalue ())
+	{
+	  const region *base_reg = ptr_sval->get_pointee ()->get_base_region ();
+	  mark_as_escaped (base_reg);
+	}
+    }
+}
+
 /* Remove all bindings overlapping REG within this store.  */
 
 void
@@ -2730,6 +2876,10 @@ store::purge_region (store_manager *mgr, const region *reg)
 void
 store::fill_region (store_manager *mgr, const region *reg, const svalue *sval)
 {
+  /* Filling an empty region is a no-op.  */
+  if (reg->empty_p ())
+    return;
+
   const region *base_reg = reg->get_base_region ();
   if (base_reg->symbolic_for_unknown_ptr_p ()
       || !base_reg->tracked_p ())
@@ -2752,14 +2902,16 @@ store::zero_fill_region (store_manager *mgr, const region *reg)
 
 void
 store::mark_region_as_unknown (store_manager *mgr, const region *reg,
-			       uncertainty_t *uncertainty)
+			       uncertainty_t *uncertainty,
+			       svalue_set *maybe_live_values)
 {
   const region *base_reg = reg->get_base_region ();
   if (base_reg->symbolic_for_unknown_ptr_p ()
       || !base_reg->tracked_p ())
     return;
   binding_cluster *cluster = get_or_create_cluster (base_reg);
-  cluster->mark_region_as_unknown (mgr, reg, reg, uncertainty);
+  cluster->mark_region_as_unknown (mgr, reg, reg, uncertainty,
+				   maybe_live_values);
 }
 
 /* Purge state involving SVAL.  */
@@ -2945,6 +3097,10 @@ store::escaped_p (const region *base_reg) const
   gcc_assert (base_reg);
   gcc_assert (base_reg->get_base_region () == base_reg);
 
+  /* "errno" can always be modified by external code.  */
+  if (base_reg->get_kind () == RK_ERRNO)
+    return true;
+
   if (binding_cluster **cluster_slot
       = const_cast <cluster_map_t &>(m_cluster_map).get (base_reg))
     return (*cluster_slot)->escaped_p ();
@@ -3002,7 +3158,9 @@ store::remove_overlapping_bindings (store_manager *mgr, const region *reg,
 	  delete cluster;
 	  return;
 	}
-      cluster->remove_overlapping_bindings (mgr, reg, uncertainty);
+      /* Pass NULL for the maybe_live_values here, as we don't want to
+	 record the old svalues as being maybe-bound.  */
+      cluster->remove_overlapping_bindings (mgr, reg, uncertainty, NULL);
     }
 }
 
@@ -3053,6 +3211,15 @@ store::canonicalize (store_manager *mgr)
       binding_cluster *cluster = (*iter).second;
       if (base_reg->get_kind () == RK_HEAP_ALLOCATED)
 	{
+	  /* Don't purge a heap-allocated region that's been marked as
+	     escaping, since this could be recording that a ptr to it
+	     was written to an unknown symbolic region along this
+	     path, and so we don't know whether it's referenced or
+	     not, and hence should report it as leaking
+	     (PR analyzer/106473).  */
+	  if (cluster->escaped_p ())
+	    continue;
+
 	  if (cluster->empty_p ())
 	    if (!s.m_regs.contains (base_reg))
 	      purgeable_regions.add (base_reg);
@@ -3191,6 +3358,7 @@ store::replay_call_summary_cluster (call_summary_replay &r,
     case RK_CODE:
     case RK_STACK:
     case RK_HEAP:
+    case RK_THREAD_LOCAL:
     case RK_ROOT:
     /* Child regions.  */
     case RK_FIELD:
@@ -3241,6 +3409,8 @@ store::replay_call_summary_cluster (call_summary_replay &r,
 
     case RK_HEAP_ALLOCATED:
     case RK_DECL:
+    case RK_ERRNO:
+    case RK_PRIVATE:
       {
 	const region *caller_dest_reg
 	  = r.convert_region_from_summary (summary_base_reg);

@@ -1,7 +1,10 @@
-/* { dg-output "Bar::A = 456\n<Foo as Bar>::A = 456\n" } */
+/* { dg-output "Bar::A = 456\r*\n<Foo as Bar>::A = 456\r*\n" } */
 extern "C" {
     fn printf(s: *const i8, ...);
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 trait Foo {
     const A: i32 = 123;

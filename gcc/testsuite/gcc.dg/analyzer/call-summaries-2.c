@@ -1,4 +1,5 @@
 /* { dg-additional-options "-fanalyzer-call-summaries --param analyzer-min-snodes-for-call-summary=0" } */
+/* { dg-require-effective-target alloca } */
 
 /* There need to be at least two calls to a function for the
    call-summarization code to be used.
@@ -329,7 +330,8 @@ int test_returns_element_ptr (int j)
   __analyzer_eval (*returns_element_ptr (0) == 7); /* { dg-warning "TRUE" } */
   __analyzer_eval (*returns_element_ptr (1) == 8); /* { dg-warning "TRUE" } */
   __analyzer_eval (*returns_element_ptr (2) == 9); /* { dg-warning "TRUE" } */
-  return *returns_element_ptr (3); /* { dg-warning "buffer overread" } */
+  return *returns_element_ptr (3); /* { dg-warning "buffer over-read" } */
+  /* { dg-message "valid subscripts for 'arr' are '\\\[0\\\]' to '\\\[2\\\]'" "valid subscript note" { target *-*-* } .-1 } */
 }
 
 int returns_offset (int arr[3], int i)
@@ -465,7 +467,7 @@ int test_returns_external_result (void)
 
 int uses_alloca (int i)
 {
-  int *p = alloca (sizeof (int));
+  int *p = __builtin_alloca (sizeof (int));
   *p = i;
   return *p;
 }
@@ -605,17 +607,22 @@ void partially_inits (int *p, int v)
   p[1] = v;
 }
 
-void test_partially_inits (int x)
+void test_partially_inits_0 (int x)
 {
   int arr[2];
   partially_inits (arr, x);
   partially_inits (arr, x);
 
-  __analyzer_eval (arr[0]); /* { dg-warning "UNKNOWN" "eval" } */
-  /* { dg-warning "use of uninitialized value 'arr\\\[0\\\]'" "uninit" { target *-*-* } .-1 } */
+  __analyzer_eval (arr[0]); /* { dg-warning "use of uninitialized value 'arr\\\[0\\\]'" } */
+}
 
-  __analyzer_eval (arr[1] == x); /* { dg-warning "UNKNOWN" "eval" } */ 
-  /* { dg-bogus "use of uninitialized value 'arr\\\[1\\\]'" "uninit" { xfail *-*-* } .-1 } */
+void test_partially_inits_1 (int x)
+{
+  int arr[2];
+  partially_inits (arr, x);
+  partially_inits (arr, x);
+
+  __analyzer_eval (arr[1] == x); /* { dg-bogus "use of uninitialized value 'arr\\\[1\\\]'" "uninit" { xfail *-*-* } } */
   // TODO(xfail), and eval should be "TRUE"
 }
 

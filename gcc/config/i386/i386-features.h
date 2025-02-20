@@ -1,4 +1,4 @@
-/* Copyright (C) 1988-2022 Free Software Foundation, Inc.
+/* Copyright (C) 1988-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -148,12 +148,15 @@ class scalar_chain
   /* Registers used in both vector and sclar modes.  */
   bitmap defs_conv;
 
+  /* Limit on chain discovery.  */
+  unsigned max_visits;
+
   bitmap insns_conv;
   hash_map<rtx, rtx> defs_map;
   unsigned n_sse_to_integer;
   unsigned n_integer_to_sse;
 
-  void build (bitmap candidates, unsigned insn_uid);
+  bool build (bitmap candidates, unsigned insn_uid, bitmap disallowed);
   virtual int compute_convert_gain () = 0;
   int convert ();
 
@@ -168,8 +171,9 @@ class scalar_chain
   void convert_registers ();
 
  private:
-  void add_insn (bitmap candidates, unsigned insn_uid);
-  void analyze_register_chain (bitmap candidates, df_ref ref);
+  bool add_insn (bitmap candidates, unsigned insn_uid, bitmap disallowed);
+  bool analyze_register_chain (bitmap candidates, df_ref ref,
+			       bitmap disallowed);
   virtual void convert_insn (rtx_insn *insn) = 0;
   virtual void convert_op (rtx *op, rtx_insn *insn) = 0;
 };
@@ -185,6 +189,7 @@ class general_scalar_chain : public scalar_chain
   void convert_insn (rtx_insn *insn) final override;
   void convert_op (rtx *op, rtx_insn *insn) final override;
   int vector_const_cost (rtx exp);
+  rtx convert_rotate (enum rtx_code, rtx op0, rtx op1, rtx_insn *insn);
 };
 
 class timode_scalar_chain : public scalar_chain

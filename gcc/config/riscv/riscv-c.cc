@@ -1,5 +1,5 @@
 /* RISC-V-specific code for C family languages.
-   Copyright (C) 2011-2022 Free Software Foundation, Inc.
+   Copyright (C) 2011-2024 Free Software Foundation, Inc.
    Contributed by Andrew Waterman (andrew@sifive.com).
 
 This file is part of GCC.
@@ -34,6 +34,12 @@ along with GCC; see the file COPYING3.  If not see
 
 #define builtin_define(TXT) cpp_define (pfile, TXT)
 
+static int
+riscv_ext_version_value (unsigned major, unsigned minor)
+{
+  return (major * RISCV_MAJOR_VERSION_BASE) + (minor * RISCV_MINOR_VERSION_BASE);
+}
+
 /* Implement TARGET_CPU_CPP_BUILTINS.  */
 
 void
@@ -41,11 +47,11 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
 {
   builtin_define ("__riscv");
 
-  if (TARGET_RVC)
+  if (TARGET_RVC || TARGET_ZCA)
     builtin_define ("__riscv_compressed");
 
   if (TARGET_RVE)
-    builtin_define ("__riscv_32e");
+    builtin_define (TARGET_64BIT ? "__riscv_64e" : "__riscv_32e");
 
   if (TARGET_ATOMIC)
     builtin_define ("__riscv_atomic");
@@ -70,6 +76,7 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
   switch (riscv_abi)
     {
     case ABI_ILP32E:
+    case ABI_LP64E:
       builtin_define ("__riscv_abi_rve");
       gcc_fallthrough ();
 
@@ -95,12 +102,23 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
       builtin_define ("__riscv_cmodel_medlow");
       break;
 
+    case CM_LARGE:
+      builtin_define ("__riscv_cmodel_large");
+      break;
+
     case CM_PIC:
     case CM_MEDANY:
       builtin_define ("__riscv_cmodel_medany");
       break;
 
     }
+
+  if (riscv_user_wants_strict_align)
+    builtin_define_with_int_value ("__riscv_misaligned_avoid", 1);
+  else if (riscv_slow_unaligned_access_p)
+    builtin_define_with_int_value ("__riscv_misaligned_slow", 1);
+  else
+    builtin_define_with_int_value ("__riscv_misaligned_fast", 1);
 
   if (TARGET_MIN_VLEN != 0)
     builtin_define_with_int_value ("__riscv_v_min_vlen", TARGET_MIN_VLEN);
@@ -118,7 +136,15 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
     builtin_define_with_int_value ("__riscv_v_elen_fp", 0);
 
   if (TARGET_MIN_VLEN)
-    builtin_define ("__riscv_vector");
+    {
+      builtin_define ("__riscv_vector");
+      builtin_define_with_int_value ("__riscv_v_intrinsic",
+				     riscv_ext_version_value (0, 12));
+    }
+
+   if (TARGET_XTHEADVECTOR)
+     builtin_define_with_int_value ("__riscv_th_v_intrinsic",
+				     riscv_ext_version_value (0, 11));
 
   /* Define architecture extension test macros.  */
   builtin_define_with_int_value ("__riscv_arch_test", 1);
@@ -141,13 +167,13 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
        subset != subset_list->end ();
        subset = subset->next)
     {
-      int version_value = (subset->major_version * 1000000)
-			   + (subset->minor_version * 1000);
+      int version_value = riscv_ext_version_value (subset->major_version,
+						   subset->minor_version);
       /* Special rule for zicsr and zifencei, it's used for ISA spec 2.2 or
 	 earlier.  */
       if ((subset->name == "zicsr" || subset->name == "zifencei")
 	  && version_value == 0)
-	version_value = 2000000;
+	version_value = riscv_ext_version_value (2, 0);
 
       sprintf (buf, "__riscv_%s", subset->name.c_str ());
       builtin_define_with_int_value (buf, version_value);
@@ -169,12 +195,13 @@ riscv_pragma_intrinsic (cpp_reader *)
 
   const char *name = TREE_STRING_POINTER (x);
 
-  if (strcmp (name, "vector") == 0)
+  if (strcmp (name, "vector") == 0
+      || strcmp (name, "xtheadvector") == 0)
     {
       if (!TARGET_VECTOR)
 	{
-	  error ("%<#pragma riscv intrinsic%> option %qs needs 'V' extension "
-		 "enabled",
+	  error ("%<#pragma riscv intrinsic%> option %qs needs 'V' or "
+		 "'XTHEADVECTOR' extension enabled",
 		 name);
 	  return;
 	}
@@ -184,10 +211,65 @@ riscv_pragma_intrinsic (cpp_reader *)
     error ("unknown %<#pragma riscv intrinsic%> option %qs", name);
 }
 
+/* Implement TARGET_CHECK_BUILTIN_CALL.  */
+static bool
+riscv_check_builtin_call (location_t loc, vec<location_t> arg_loc, tree fndecl,
+			  tree, unsigned int nargs, tree *args)
+{
+  unsigned int code = DECL_MD_FUNCTION_CODE (fndecl);
+  unsigned int subcode = code >> RISCV_BUILTIN_SHIFT;
+  switch (code & RISCV_BUILTIN_CLASS)
+    {
+    case RISCV_BUILTIN_GENERAL:
+      return true;
+
+    case RISCV_BUILTIN_VECTOR:
+      return riscv_vector::check_builtin_call (loc, arg_loc, subcode,
+					       fndecl, nargs, args);
+    }
+  gcc_unreachable ();
+}
+
+/* Implement TARGET_RESOLVE_OVERLOADED_BUILTIN.  */
+static tree
+riscv_resolve_overloaded_builtin (unsigned int uncast_location, tree fndecl,
+				  void *uncast_arglist)
+{
+  vec<tree, va_gc> empty = {};
+  location_t loc = (location_t) uncast_location;
+  vec<tree, va_gc> *arglist = (vec<tree, va_gc> *) uncast_arglist;
+  unsigned int code = DECL_MD_FUNCTION_CODE (fndecl);
+  unsigned int subcode = code >> RISCV_BUILTIN_SHIFT;
+  tree new_fndecl = NULL_TREE;
+
+  if (!arglist)
+    arglist = &empty;
+
+  switch (code & RISCV_BUILTIN_CLASS)
+    {
+    case RISCV_BUILTIN_GENERAL:
+      break;
+    case RISCV_BUILTIN_VECTOR:
+      new_fndecl = riscv_vector::resolve_overloaded_builtin (loc, subcode,
+							     fndecl, arglist);
+      break;
+    default:
+      gcc_unreachable ();
+    }
+
+  if (new_fndecl == NULL_TREE)
+    return new_fndecl;
+
+  return build_function_call_vec (loc, vNULL, new_fndecl, arglist, NULL,
+				  fndecl);
+}
+
 /* Implement REGISTER_TARGET_PRAGMAS.  */
 
 void
 riscv_register_pragmas (void)
 {
+  targetm.resolve_overloaded_builtin = riscv_resolve_overloaded_builtin;
+  targetm.check_builtin_call = riscv_check_builtin_call;
   c_register_pragma ("riscv", "intrinsic", riscv_pragma_intrinsic);
 }

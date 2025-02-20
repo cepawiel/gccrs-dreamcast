@@ -1,5 +1,5 @@
 /* Tree switch conversion for GNU compiler.
-   Copyright (C) 2017-2022 Free Software Foundation, Inc.
+   Copyright (C) 2017-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -102,6 +102,10 @@ public:
   /* Probability of reaching subtree rooted at this node.  */
   profile_probability m_subtree_prob;
 
+  /* Probability of default case when reaching the node.
+     It is used by bit-test right now.  */
+  profile_probability m_default_prob;
+
 protected:
   /* Default constructor.  */
   cluster () {}
@@ -110,7 +114,8 @@ protected:
 cluster::cluster (tree case_label_expr, basic_block case_bb,
 		  profile_probability prob, profile_probability subtree_prob):
   m_case_label_expr (case_label_expr), m_case_bb (case_bb), m_prob (prob),
-  m_subtree_prob (subtree_prob)
+  m_subtree_prob (subtree_prob),
+  m_default_prob (profile_probability::uninitialized ())
 {
 }
 
@@ -298,7 +303,7 @@ public:
 /* A GIMPLE switch statement can be expanded to a short sequence of bit-wise
 comparisons.  "switch(x)" is converted into "if ((1 << (x-MINVAL)) & CST)"
 where CST and MINVAL are integer constants.  This is better than a series
-of compare-and-banch insns in some cases,  e.g. we can implement:
+of compare-and-branch insns in some cases,  e.g. we can implement:
 
 	if ((x==4) || (x==6) || (x==9) || (x==11))
 
@@ -545,6 +550,7 @@ public:
   basic_block target_bb;
   tree label;
   int bits;
+  profile_probability prob;
 
   /* Comparison function for qsort to order bit tests by decreasing
      probability of execution.  */
@@ -908,7 +914,7 @@ switch_decision_tree::reset_out_edges_aux (gswitch *swtch)
 
 /* Release CLUSTERS vector and destruct all dynamically allocated items.  */
 
-static inline void
+inline void
 release_clusters (vec<cluster *> &clusters)
 {
   for (unsigned i = 0; i < clusters.length (); i++)

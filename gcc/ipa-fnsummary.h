@@ -1,5 +1,5 @@
 /* IPA function body analysis.
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -126,8 +126,8 @@ public:
   ipa_fn_summary ()
     : min_size (0),
       inlinable (false), single_caller (false),
-      fp_expressions (false), target_info (0),
-      estimated_stack_size (false),
+      fp_expressions (false), safe_to_inline_to_always_inline (0),
+      target_info (0), estimated_stack_size (false),
       time (0), conds (NULL),
       size_time_table (), call_size_time_table (vNULL),
       loop_iterations (NULL), loop_strides (NULL),
@@ -165,6 +165,8 @@ public:
   unsigned int single_caller : 1;
   /* True if function contains any floating point expressions.  */
   unsigned int fp_expressions : 1;
+  /* Cache for analysis of can_early_inline_edge_p.  */
+  unsigned int safe_to_inline_to_always_inline : 2;
   /* Like fp_expressions field above, but it's to hold some target specific
      information, such as some target specific isa flags.  Note that for
      offloading target compilers, this field isn't streamed.  */
@@ -435,7 +437,7 @@ void ipa_remove_from_growth_caches (struct cgraph_edge *edge);
 
 /* Return true if EDGE is a cross module call.  */
 
-static inline bool
+inline bool
 cross_module_call_p (struct cgraph_edge *edge)
 {
   /* Here we do not want to walk to alias target becuase ICF may create

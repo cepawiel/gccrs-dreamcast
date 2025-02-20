@@ -1,6 +1,6 @@
 // Pointer Traits -*- C++ -*-
 
-// Copyright (C) 2011-2022 Free Software Foundation, Inc.
+// Copyright (C) 2011-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -36,10 +36,6 @@
 
 #if __cplusplus > 201703L
 #include <concepts>
-# ifndef __cpp_lib_constexpr_memory
-// Defined to a newer value in bits/unique_ptr.h for C++23
-#  define __cpp_lib_constexpr_memory 201811L
-# endif
 namespace __gnu_debug { struct _Safe_iterator_base; }
 #endif
 
@@ -104,17 +100,17 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       /**
        *  @brief  Obtain a pointer to an object
        *  @param  __r  A reference to an object of type `element_type`
-       *  @return `pointer::pointer_to(__e)`
-       *  @pre `pointer::pointer_to(__e)` is a valid expression.
+       *  @return `pointer::pointer_to(__r)`
+       *  @pre `pointer::pointer_to(__r)` is a valid expression.
       */
       static pointer
-      pointer_to(element_type& __e)
+      pointer_to(element_type& __r)
 #if __cpp_lib_concepts
       requires requires {
-	{ pointer::pointer_to(__e) } -> convertible_to<pointer>;
+	{ pointer::pointer_to(__r) } -> convertible_to<pointer>;
       }
 #endif
-      { return pointer::pointer_to(__e); }
+      { return pointer::pointer_to(__r); }
     };
 
   // Do not define pointer_traits<P>::pointer_to if element type is void.
@@ -212,7 +208,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       return __ptr;
     }
 
-#if __cplusplus <= 201703L
+#ifndef __glibcxx_to_address // C++ < 20
   template<typename _Ptr>
     constexpr typename std::pointer_traits<_Ptr>::element_type*
     __to_address(const _Ptr& __ptr)
@@ -233,8 +229,6 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       else
 	return std::__to_address(__ptr.operator->());
     }
-
-#define __cpp_lib_to_address 201711L
 
   /**
    * @brief Obtain address referenced by a pointer to an object
@@ -258,7 +252,7 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
     constexpr auto
     to_address(const _Ptr& __ptr) noexcept
     { return std::__to_address(__ptr); }
-#endif // C++2a
+#endif // __glibcxx_to_address
 
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace std

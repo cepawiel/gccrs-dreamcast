@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---             Copyright (C) 2020-2022, Free Software Foundation, Inc.      --
+--             Copyright (C) 2020-2024, Free Software Foundation, Inc.      --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -39,7 +39,7 @@ package Exp_Put_Image is
    --  are calls to T'Put_Image in different units, there will be duplicates;
    --  each unit will get a copy of the T'Put_Image procedure.
 
-   function Enable_Put_Image (Typ : Entity_Id) return Boolean;
+   function Put_Image_Enabled (Typ : Entity_Id) return Boolean;
    --  True if the predefined Put_Image should be enabled for type T. Put_Image
    --  is always enabled if there is a user-specified one.
 
@@ -91,9 +91,9 @@ package Exp_Put_Image is
    --  T'Image.
 
    function Build_Image_Call (N : Node_Id) return Node_Id;
-   --  N is a call to T'Image, and this translates it into the appropriate code
-   --  to call T'Put_Image into a buffer and then extract the string from the
-   --  buffer.
+   --  N is a call to T'[[Wide_]Wide_]Image, and this translates it into the
+   --  appropriate code to call T'Put_Image into a buffer and then extract the
+   --  [[wide] wide] string from the buffer.
 
    procedure Preload_Root_Buffer_Type (Compilation_Unit : Node_Id);
    --  Call RTE (RE_Root_Buffer_Type) if necessary, to load the packages

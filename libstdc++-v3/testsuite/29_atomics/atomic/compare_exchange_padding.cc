@@ -1,8 +1,9 @@
-// { dg-options "-std=gnu++20" }
 // { dg-do run { target c++20 } }
+// { dg-require-atomic-cmpxchg-word "" }
 // { dg-add-options libatomic }
 
 #include <atomic>
+#include <cstring>
 
 #include <testsuite_hooks.h>
 
@@ -10,11 +11,11 @@ struct S { char c; short s; };
 
 void __attribute__((noinline,noipa))
 fill_struct(S& s)
-{ __builtin_memset(&s, 0xff, sizeof(S)); }
+{ std::memset(&s, 0xff, sizeof(S)); }
 
 bool
 compare_struct(const S& a, const S& b)
-{ return __builtin_memcmp(&a, &b, sizeof(S)) == 0; }
+{ return std::memcmp(&a, &b, sizeof(S)) == 0; }
 
 int
 main ()

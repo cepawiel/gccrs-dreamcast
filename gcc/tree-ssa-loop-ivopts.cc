@@ -1,5 +1,5 @@
 /* Induction variable optimizations.
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -131,6 +131,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "builtins.h"
 #include "tree-vectorizer.h"
 #include "dbgcnt.h"
+#include "cfganal.h"
 
 /* For lang_hooks.types.type_for_mode.  */
 #include "langhooks.h"
@@ -411,7 +412,7 @@ struct iv_use
   tree *op_p;		/* The place where it occurs.  */
 
   tree addr_base;	/* Base address with const offset stripped.  */
-  poly_uint64_pod addr_offset;
+  poly_uint64 addr_offset;
 			/* Const offset stripped from base address.  */
 };
 
@@ -936,7 +937,7 @@ stmt_after_ip_normal_pos (class loop *loop, gimple *stmt)
   if (sbb != bb)
     return false;
 
-  return stmt == last_stmt (bb);
+  return stmt == last_nondebug_stmt (bb);
 }
 
 /* Returns true if STMT if after the place where the original induction
@@ -1035,10 +1036,12 @@ niter_for_exit (struct ivopts_data *data, edge exit)
 	 names that appear in phi nodes on abnormal edges, so that we do not
 	 create overlapping life ranges for them (PR 27283).  */
       desc = XNEW (class tree_niter_desc);
+      ::new (static_cast<void*> (desc)) tree_niter_desc ();
       if (!number_of_iterations_exit (data->current_loop,
 				      exit, desc, true)
      	  || contains_abnormal_ssa_name_p (desc->niter))
 	{
+	  desc->~tree_niter_desc ();
 	  XDELETE (desc);
 	  desc = NULL;
 	}
@@ -1605,7 +1608,10 @@ record_group_use (struct ivopts_data *data, tree *use_p,
     {
       unsigned int i;
 
-      addr_base = strip_offset (iv->base, &addr_offset);
+      gcc_assert (POINTER_TYPE_P (TREE_TYPE (iv->base)));
+      tree addr_toffset;
+      split_constant_offset (iv->base, &addr_base, &addr_toffset);
+      addr_offset = int_cst_value (addr_toffset);
       for (i = 0; i < data->vgroups.length (); i++)
 	{
 	  struct iv_use *use;
@@ -2437,17 +2443,27 @@ get_mem_type_for_internal_fn (gcall *call, tree *op_p)
     {
     case IFN_MASK_LOAD:
     case IFN_MASK_LOAD_LANES:
+    case IFN_MASK_LEN_LOAD_LANES:
     case IFN_LEN_LOAD:
+    case IFN_MASK_LEN_LOAD:
       if (op_p == gimple_call_arg_ptr (call, 0))
 	return TREE_TYPE (gimple_call_lhs (call));
       return NULL_TREE;
 
     case IFN_MASK_STORE:
     case IFN_MASK_STORE_LANES:
+    case IFN_MASK_LEN_STORE_LANES:
     case IFN_LEN_STORE:
-      if (op_p == gimple_call_arg_ptr (call, 0))
-	return TREE_TYPE (gimple_call_arg (call, 3));
-      return NULL_TREE;
+    case IFN_MASK_LEN_STORE:
+      {
+	if (op_p == gimple_call_arg_ptr (call, 0))
+	  {
+	    internal_fn ifn = gimple_call_internal_fn (call);
+	    int index = internal_fn_stored_value_index (ifn);
+	    return TREE_TYPE (gimple_call_arg (call, index));
+	  }
+	return NULL_TREE;
+      }
 
     default:
       return NULL_TREE;
@@ -2813,12 +2829,29 @@ strip_offset_1 (tree expr, bool inside_addr, bool top_compref,
       else if (integer_zerop (op0))
 	{
 	  if (code == MINUS_EXPR)
-	    expr = fold_build1 (NEGATE_EXPR, type, op1);
+	    {
+	      if (TYPE_OVERFLOW_UNDEFINED (type))
+		{
+		  type = unsigned_type_for (type);
+		  op1 = fold_convert (type, op1);
+		}
+	      expr = fold_build1 (NEGATE_EXPR, type, op1);
+	    }
 	  else
 	    expr = op1;
 	}
       else
-	expr = fold_build2 (code, type, op0, op1);
+	{
+	  if (TYPE_OVERFLOW_UNDEFINED (type))
+	    {
+	      type = unsigned_type_for (type);
+	      if (code == POINTER_PLUS_EXPR)
+		code = PLUS_EXPR;
+	      op0 = fold_convert (type, op0);
+	      op1 = fold_convert (type, op1);
+	    }
+	  expr = fold_build2 (code, type, op0, op1);
+	}
 
       return fold_convert (orig_type, expr);
 
@@ -2836,7 +2869,15 @@ strip_offset_1 (tree expr, bool inside_addr, bool top_compref,
       if (integer_zerop (op0))
 	expr = op0;
       else
-	expr = fold_build2 (MULT_EXPR, type, op0, op1);
+	{
+	  if (TYPE_OVERFLOW_UNDEFINED (type))
+	    {
+	      type = unsigned_type_for (type);
+	      op0 = fold_convert (type, op0);
+	      op1 = fold_convert (type, op1);
+	    }
+	  expr = fold_build2 (MULT_EXPR, type, op0, op1);
+	}
 
       return fold_convert (orig_type, expr);
 
@@ -2941,8 +2982,8 @@ strip_offset_1 (tree expr, bool inside_addr, bool top_compref,
 
 /* Strips constant offsets from EXPR and stores them to OFFSET.  */
 
-tree
-strip_offset (tree expr, poly_uint64_pod *offset)
+static tree
+strip_offset (tree expr, poly_uint64 *offset)
 {
   poly_int64 off;
   tree core = strip_offset_1 (expr, false, false, &off);
@@ -3071,117 +3112,6 @@ get_loop_invariant_expr (struct ivopts_data *data, tree inv_expr)
   return *slot;
 }
 
-/* Return TRUE iff VAR is marked as maybe-undefined.  See
-   mark_ssa_maybe_undefs.  */
-
-static inline bool
-ssa_name_maybe_undef_p (tree var)
-{
-  gcc_checking_assert (TREE_CODE (var) == SSA_NAME);
-  return TREE_VISITED (var);
-}
-
-/* Set (or clear, depending on VALUE) VAR's maybe-undefined mark.  */
-
-static inline void
-ssa_name_set_maybe_undef (tree var, bool value = true)
-{
-  gcc_checking_assert (TREE_CODE (var) == SSA_NAME);
-  TREE_VISITED (var) = value;
-}
-
-/* Return TRUE iff there are any non-PHI uses of VAR that dominate the
-   end of BB.  If we return TRUE and BB is a loop header, then VAR we
-   be assumed to be defined within the loop, even if it is marked as
-   maybe-undefined.  */
-
-static inline bool
-ssa_name_any_use_dominates_bb_p (tree var, basic_block bb)
-{
-  imm_use_iterator iter;
-  use_operand_p use_p;
-  FOR_EACH_IMM_USE_FAST (use_p, iter, var)
-    {
-      if (is_a <gphi *> (USE_STMT (use_p))
-	  || is_gimple_debug (USE_STMT (use_p)))
-	continue;
-      basic_block dombb = gimple_bb (USE_STMT (use_p));
-      if (dominated_by_p (CDI_DOMINATORS, bb, dombb))
-	return true;
-    }
-
-  return false;
-}
-
-/* Mark as maybe_undef any SSA_NAMEs that are unsuitable as ivopts
-   candidates for potentially involving undefined behavior.  */
-
-static void
-mark_ssa_maybe_undefs (void)
-{
-  auto_vec<tree> queue;
-
-  /* Scan all SSA_NAMEs, marking the definitely-undefined ones as
-     maybe-undefined and queuing them for propagation, while clearing
-     the mark on others.  */
-  unsigned int i;
-  tree var;
-  FOR_EACH_SSA_NAME (i, var, cfun)
-    {
-      if (SSA_NAME_IS_VIRTUAL_OPERAND (var)
-	  || !ssa_undefined_value_p (var, false))
-	ssa_name_set_maybe_undef (var, false);
-      else
-	{
-	  ssa_name_set_maybe_undef (var);
-	  queue.safe_push (var);
-	  if (dump_file && (dump_flags & TDF_DETAILS))
-	    fprintf (dump_file, "marking _%i as maybe-undef\n",
-		     SSA_NAME_VERSION (var));
-	}
-    }
-
-  /* Now propagate maybe-undefined from a DEF to any other PHI that
-     uses it, as long as there isn't any intervening use of DEF.  */
-  while (!queue.is_empty ())
-    {
-      var = queue.pop ();
-      imm_use_iterator iter;
-      use_operand_p use_p;
-      FOR_EACH_IMM_USE_FAST (use_p, iter, var)
-	{
-	  /* Any uses of VAR that aren't PHI args imply VAR must be
-	     defined, otherwise undefined behavior would have been
-	     definitely invoked.  Only PHI args may hold
-	     maybe-undefined values without invoking undefined
-	     behavior for that reason alone.  */
-	  if (!is_a <gphi *> (USE_STMT (use_p)))
-	    continue;
-	  gphi *phi = as_a <gphi *> (USE_STMT (use_p));
-
-	  tree def = gimple_phi_result (phi);
-	  if (ssa_name_maybe_undef_p (def))
-	    continue;
-
-	  /* Look for any uses of the maybe-unused SSA_NAME that
-	     dominates the block that reaches the incoming block
-	     corresponding to the PHI arg in which it is mentioned.
-	     That means we can assume the SSA_NAME is defined in that
-	     path, so we only mark a PHI result as maybe-undef if we
-	     find an unused reaching SSA_NAME.  */
-	  int idx = phi_arg_index_from_use (use_p);
-	  basic_block bb = gimple_phi_arg_edge (phi, idx)->src;
-	  if (ssa_name_any_use_dominates_bb_p (var, bb))
-	    continue;
-
-	  ssa_name_set_maybe_undef (def);
-	  queue.safe_push (def);
-	  if (dump_file && (dump_flags & TDF_DETAILS))
-	    fprintf (dump_file, "marking _%i as maybe-undef because of _%i\n",
-		     SSA_NAME_VERSION (def), SSA_NAME_VERSION (var));
-	}
-    }
-}
 
 /* Return *TP if it is an SSA_NAME marked with TREE_VISITED, i.e., as
    unsuitable as ivopts candidates for potentially involving undefined
@@ -3692,9 +3622,10 @@ add_iv_candidate_for_use (struct ivopts_data *data, struct iv_use *use)
       step = fold_convert (sizetype, step);
       record_common_cand (data, base, step, use);
       /* Also record common candidate with offset stripped.  */
-      base = strip_offset (base, &offset);
-      if (maybe_ne (offset, 0U))
-	record_common_cand (data, base, step, use);
+      tree alt_base, alt_offset;
+      split_constant_offset (base, &alt_base, &alt_offset);
+      if (!integer_zerop (alt_offset))
+	record_common_cand (data, alt_base, step, use);
     }
 
   /* At last, add auto-incremental candidates.  Make such variables
@@ -4802,17 +4733,25 @@ get_address_cost (struct ivopts_data *data, struct iv_use *use,
   /* Only true if ratio != 1.  */
   bool ok_with_ratio_p = false;
   bool ok_without_ratio_p = false;
+  code_helper code = ERROR_MARK;
+
+  if (use->type == USE_PTR_ADDRESS)
+    {
+      gcall *call = as_a<gcall *> (use->stmt);
+      gcc_assert (gimple_call_internal_p (call));
+      code = gimple_call_internal_fn (call);
+    }
 
   if (!aff_combination_const_p (aff_inv))
     {
       parts.index = integer_one_node;
       /* Addressing mode "base + index".  */
-      ok_without_ratio_p = valid_mem_ref_p (mem_mode, as, &parts);
+      ok_without_ratio_p = valid_mem_ref_p (mem_mode, as, &parts, code);
       if (ratio != 1)
 	{
 	  parts.step = wide_int_to_tree (type, ratio);
 	  /* Addressing mode "base + index << scale".  */
-	  ok_with_ratio_p = valid_mem_ref_p (mem_mode, as, &parts);
+	  ok_with_ratio_p = valid_mem_ref_p (mem_mode, as, &parts, code);
 	  if (!ok_with_ratio_p)
 	    parts.step = NULL_TREE;
 	}
@@ -4822,7 +4761,7 @@ get_address_cost (struct ivopts_data *data, struct iv_use *use,
 	    {
 	      parts.offset = wide_int_to_tree (sizetype, aff_inv->offset);
 	      /* Addressing mode "base + index [<< scale] + offset".  */
-	      if (!valid_mem_ref_p (mem_mode, as, &parts))
+	      if (!valid_mem_ref_p (mem_mode, as, &parts, code))
 		parts.offset = NULL_TREE;
 	      else
 		aff_inv->offset = 0;
@@ -4835,7 +4774,7 @@ get_address_cost (struct ivopts_data *data, struct iv_use *use,
 
 	  /* Addressing mode "symbol + base + index [<< scale] [+ offset]".  */
 	  if (parts.symbol != NULL_TREE
-	      && !valid_mem_ref_p (mem_mode, as, &parts))
+	      && !valid_mem_ref_p (mem_mode, as, &parts, code))
 	    {
 	      aff_combination_add_elt (aff_inv, parts.symbol, 1);
 	      parts.symbol = NULL_TREE;
@@ -4873,7 +4812,7 @@ get_address_cost (struct ivopts_data *data, struct iv_use *use,
 	{
 	  parts.offset = wide_int_to_tree (sizetype, aff_inv->offset);
 	  /* Addressing mode "base + offset".  */
-	  if (!valid_mem_ref_p (mem_mode, as, &parts))
+	  if (!valid_mem_ref_p (mem_mode, as, &parts, code))
 	    parts.offset = NULL_TREE;
 	  else
 	    aff_inv->offset = 0;
@@ -5507,7 +5446,7 @@ may_eliminate_iv (struct ivopts_data *data,
   /* For now works only for exits that dominate the loop latch.
      TODO: extend to other conditions inside loop body.  */
   ex_bb = gimple_bb (use->stmt);
-  if (use->stmt != last_stmt (ex_bb)
+  if (use->stmt != last_nondebug_stmt (ex_bb)
       || gimple_code (use->stmt) != GIMPLE_COND
       || !dominated_by_p (CDI_DOMINATORS, loop->latch, ex_bb))
     return false;
@@ -5588,7 +5527,8 @@ may_eliminate_iv (struct ivopts_data *data,
 
   /* It is unlikely that computing the number of iterations using division
      would be more profitable than keeping the original induction variable.  */
-  if (expression_expensive_p (*bound))
+  bool cond_overflow_p;
+  if (expression_expensive_p (*bound, &cond_overflow_p))
     return false;
 
   /* Sometimes, it is possible to handle the situation that the number of
@@ -7346,6 +7286,12 @@ create_new_iv (struct ivopts_data *data, struct iv_cand *cand)
     case IP_END:
       incr_pos = gsi_last_bb (ip_end_pos (data->current_loop));
       after = true;
+      if (!gsi_end_p (incr_pos) && stmt_ends_bb_p (gsi_stmt (incr_pos)))
+	{
+	  edge e = find_edge (gsi_bb (incr_pos), data->current_loop->header);
+	  incr_pos = gsi_after_labels (split_edge (e));
+	  after = false;
+	}
       break;
 
     case IP_AFTER_USE:
@@ -7371,7 +7317,7 @@ create_new_iv (struct ivopts_data *data, struct iv_cand *cand)
 
   base = unshare_expr (cand->iv->base);
 
-  create_iv (base, unshare_expr (cand->iv->step),
+  create_iv (base, PLUS_EXPR, unshare_expr (cand->iv->step),
 	     cand->var_before, data->current_loop,
 	     &incr_pos, after, &cand->var_before, &cand->var_after);
 }
@@ -7657,8 +7603,12 @@ get_alias_ptr_type_for_ptr_address (iv_use *use)
     case IFN_MASK_STORE:
     case IFN_MASK_LOAD_LANES:
     case IFN_MASK_STORE_LANES:
+    case IFN_MASK_LEN_LOAD_LANES:
+    case IFN_MASK_LEN_STORE_LANES:
     case IFN_LEN_LOAD:
     case IFN_LEN_STORE:
+    case IFN_MASK_LEN_LOAD:
+    case IFN_MASK_LEN_STORE:
       /* The second argument contains the correct alias type.  */
       gcc_assert (use->op_p = gimple_call_arg_ptr (call, 0));
       return TREE_TYPE (gimple_call_arg (call, 1));
@@ -7720,7 +7670,22 @@ rewrite_use_address (struct ivopts_data *data,
 				      true, GSI_SAME_STMT);
     }
   else
-    copy_ref_info (ref, *use->op_p);
+    {
+      /* When we end up confused enough and have no suitable base but
+	 stuffed everything to index2 use a LEA for the address and
+	 create a plain MEM_REF to avoid basing a memory reference
+	 on address zero which create_mem_ref_raw does as fallback.  */
+      if (TREE_CODE (ref) == TARGET_MEM_REF
+	  && TMR_INDEX2 (ref) != NULL_TREE
+	  && integer_zerop (TREE_OPERAND (ref, 0)))
+	{
+	  ref = fold_build1 (ADDR_EXPR, TREE_TYPE (TREE_OPERAND (ref, 0)), ref);
+	  ref = force_gimple_operand_gsi (&bsi, ref, true, NULL_TREE,
+					  true, GSI_SAME_STMT);
+	  ref = build2 (MEM_REF, type, ref, build_zero_cst (alias_ptr_type));
+	}
+      copy_ref_info (ref, *use->op_p);
+    }
 
   *use->op_p = ref;
 }
@@ -7957,7 +7922,11 @@ remove_unused_ivs (struct ivopts_data *data, bitmap toremove)
 bool
 free_tree_niter_desc (edge const &, tree_niter_desc *const &value, void *)
 {
-  free (value);
+  if (value)
+    {
+      value->~tree_niter_desc ();
+      free (value);
+    }
   return true;
 }
 
@@ -8235,7 +8204,8 @@ tree_ssa_iv_optimize_loop (struct ivopts_data *data, class loop *loop,
 	{
 	  fprintf (dump_file, "  single exit %d -> %d, exit condition ",
 		   exit->src->index, exit->dest->index);
-	  print_gimple_stmt (dump_file, last_stmt (exit->src), 0, TDF_SLIM);
+	  print_gimple_stmt (dump_file, *gsi_last_bb (exit->src),
+			     0, TDF_SLIM);
 	  fprintf (dump_file, "\n");
 	}
 

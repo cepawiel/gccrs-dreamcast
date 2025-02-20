@@ -1,5 +1,5 @@
 /* Support routines for value queries.
-   Copyright (C) 2020-2022 Free Software Foundation, Inc.
+   Copyright (C) 2020-2024 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com> and
    Andrew MacLeod <amacleod@redhat.com>.
 
@@ -28,32 +28,10 @@ along with GCC; see the file COPYING3.  If not see
 #include "ssa.h"
 #include "tree-pretty-print.h"
 #include "fold-const.h"
-#include "value-range-equiv.h"
 #include "value-query.h"
 #include "alloc-pool.h"
 #include "gimple-range.h"
 #include "value-range-storage.h"
-
-// value_query default methods.
-
-tree
-value_query::value_on_edge (edge, tree expr)
-{
-  return value_of_expr (expr);
-}
-
-tree
-value_query::value_of_stmt (gimple *stmt, tree name)
-{
-  if (!name)
-    name = gimple_get_lhs (stmt);
-
-  gcc_checking_assert (!name || name == gimple_get_lhs (stmt));
-
-  if (name)
-    return value_of_expr (name);
-  return NULL_TREE;
-}
 
 // range_query default methods.
 
@@ -88,7 +66,7 @@ range_query::value_of_expr (tree expr, gimple *stmt)
 
   if (range_of_expr (r, expr, stmt))
     {
-      // A constant used in an unreachable block oftens returns as UNDEFINED.
+      // A constant used in an unreachable block often returns as UNDEFINED.
       // If the result is undefined, check the global value for a constant.
       if (r.undefined_p ())
 	range_of_expr (r, expr);
@@ -108,7 +86,7 @@ range_query::value_on_edge (edge e, tree expr)
   Value_Range r (TREE_TYPE (expr));
   if (range_on_edge (r, e, expr))
     {
-      // A constant used in an unreachable block oftens returns as UNDEFINED.
+      // A constant used in an unreachable block often returns as UNDEFINED.
       // If the result is undefined, check the global value for a constant.
       if (r.undefined_p ())
 	range_of_expr (r, expr);
@@ -143,46 +121,13 @@ range_query::dump (FILE *)
 {
 }
 
-// valuation_query support routines for value_range_equiv's.
-
-class equiv_allocator : public object_allocator<value_range_equiv>
-{
-public:
-  equiv_allocator ()
-    : object_allocator<value_range_equiv> ("equiv_allocator pool") { }
-};
-
-value_range_equiv *
-range_query::allocate_value_range_equiv ()
-{
-  return new (equiv_alloc->allocate ()) value_range_equiv;
-}
-
-void
-range_query::free_value_range_equiv (value_range_equiv *v)
-{
-  equiv_alloc->remove (v);
-}
-
-const class value_range_equiv *
-range_query::get_value_range (const_tree expr, gimple *stmt)
-{
-  int_range_max r;
-  if (range_of_expr (r, const_cast<tree> (expr), stmt))
-    return new (equiv_alloc->allocate ()) value_range_equiv (r);
-  return new (equiv_alloc->allocate ()) value_range_equiv (TREE_TYPE (expr));
-}
-
 range_query::range_query ()
 {
-  equiv_alloc = new equiv_allocator;
   m_oracle = NULL;
 }
 
 range_query::~range_query ()
 {
-  equiv_alloc->release ();
-  delete equiv_alloc;
 }
 
 // Return a range in R for the tree EXPR.  Return true if a range is
@@ -210,17 +155,29 @@ range_query::get_tree_range (vrange &r, tree expr, gimple *stmt)
   switch (TREE_CODE (expr))
     {
     case INTEGER_CST:
-      if (TREE_OVERFLOW_P (expr))
-	expr = drop_tree_overflow (expr);
-      r.set (expr, expr);
-      return true;
+      {
+	irange &i = as_a <irange> (r);
+	if (TREE_OVERFLOW_P (expr))
+	  expr = drop_tree_overflow (expr);
+	wide_int w = wi::to_wide (expr);
+	i.set (TREE_TYPE (expr), w, w);
+	return true;
+      }
 
     case REAL_CST:
       {
 	frange &f = as_a <frange> (r);
-	f.set (expr, expr);
-	if (!real_isnan (TREE_REAL_CST_PTR (expr)))
-	  f.clear_nan ();
+	REAL_VALUE_TYPE *rv = TREE_REAL_CST_PTR (expr);
+	if (real_isnan (rv))
+	  {
+	    bool sign = real_isneg (rv);
+	    f.set_nan (TREE_TYPE (expr), sign);
+	  }
+	else
+	  {
+	    nan_state nan (false);
+	    f.set (TREE_TYPE (expr), *rv, *rv, nan);
+	  }
 	return true;
       }
 
@@ -243,15 +200,20 @@ range_query::get_tree_range (vrange &r, tree expr, gimple *stmt)
     default:
       break;
     }
-  if (BINARY_CLASS_P (expr))
+  if (BINARY_CLASS_P (expr) || COMPARISON_CLASS_P (expr))
     {
-      range_op_handler op (TREE_CODE (expr), type);
+      tree op0 = TREE_OPERAND (expr, 0);
+      tree op1 = TREE_OPERAND (expr, 1);
+      if (COMPARISON_CLASS_P (expr)
+	  && !Value_Range::supports_type_p (TREE_TYPE (op0)))
+	return false;
+      range_op_handler op (TREE_CODE (expr));
       if (op)
 	{
-	  Value_Range r0 (TREE_TYPE (TREE_OPERAND (expr, 0)));
-	  Value_Range r1 (TREE_TYPE (TREE_OPERAND (expr, 1)));
-	  range_of_expr (r0, TREE_OPERAND (expr, 0), stmt);
-	  range_of_expr (r1, TREE_OPERAND (expr, 1), stmt);
+	  Value_Range r0 (TREE_TYPE (op0));
+	  Value_Range r1 (TREE_TYPE (op1));
+	  range_of_expr (r0, op0, stmt);
+	  range_of_expr (r1, op1, stmt);
 	  if (!op.fold_range (r, type, r0, r1))
 	    r.set_varying (type);
 	}
@@ -261,7 +223,7 @@ range_query::get_tree_range (vrange &r, tree expr, gimple *stmt)
     }
   if (UNARY_CLASS_P (expr))
     {
-      range_op_handler op (TREE_CODE (expr), type);
+      range_op_handler op (TREE_CODE (expr));
       tree op0_type = TREE_TYPE (TREE_OPERAND (expr, 0));
       if (op && Value_Range::supports_type_p (op0_type))
 	{
@@ -289,13 +251,10 @@ get_ssa_name_range_info (vrange &r, const_tree name)
   gcc_checking_assert (!POINTER_TYPE_P (type));
   gcc_checking_assert (TREE_CODE (name) == SSA_NAME);
 
-  void *ri = SSA_NAME_RANGE_INFO (name);
+  vrange_storage *ri = SSA_NAME_RANGE_INFO (name);
 
   if (ri)
-    {
-      vrange_storage vstore (NULL);
-      vstore.get_vrange (ri, r, TREE_TYPE (name));
-    }
+    ri->get_vrange (r, TREE_TYPE (name));
   else
     r.set_varying (type);
 }
@@ -325,7 +284,7 @@ get_ssa_name_ptr_info_nonnull (const_tree name)
 // return VARYING.
 
 static void
-get_range_global (vrange &r, tree name)
+get_range_global (vrange &r, tree name, struct function *fun = cfun)
 {
   tree type = TREE_TYPE (name);
 
@@ -340,7 +299,7 @@ get_range_global (vrange &r, tree name)
 	  // anti-ranges for pointers.  Note that this is only valid with
 	  // default definitions of PARM_DECLs.
 	  if (POINTER_TYPE_P (type)
-	      && ((cfun && nonnull_arg_p (sym))
+	      && ((cfun && fun == cfun && nonnull_arg_p (sym))
 		  || get_ssa_name_ptr_info_nonnull (name)))
 	    r.set_nonzero (type);
 	  else if (!POINTER_TYPE_P (type))
@@ -391,15 +350,15 @@ get_range_global (vrange &r, tree name)
 // https://gcc.gnu.org/pipermail/gcc-patches/2021-June/571709.html
 
 void
-gimple_range_global (vrange &r, tree name)
+gimple_range_global (vrange &r, tree name, struct function *fun)
 {
   tree type = TREE_TYPE (name);
   gcc_checking_assert (TREE_CODE (name) == SSA_NAME);
 
-  if (SSA_NAME_IS_DEFAULT_DEF (name) || (cfun && cfun->after_inlining)
+  if (SSA_NAME_IS_DEFAULT_DEF (name) || (fun && fun->after_inlining)
       || is_a<gphi *> (SSA_NAME_DEF_STMT (name)))
     {
-      get_range_global (r, name);
+      get_range_global (r, name, fun);
       return;
     }
   r.set_varying (type);
@@ -423,7 +382,7 @@ global_range_query::range_of_expr (vrange &r, tree expr, gimple *stmt)
 
 // Return any known relation between SSA1 and SSA2 before stmt S is executed.
 // If GET_RANGE is true, query the range of both operands first to ensure
-// the defintions have been processed and any relations have be created.
+// the definitions have been processed and any relations have be created.
 
 relation_kind
 range_query::query_relation (gimple *s, tree ssa1, tree ssa2, bool get_range)
@@ -444,7 +403,7 @@ range_query::query_relation (gimple *s, tree ssa1, tree ssa2, bool get_range)
 
 // Return any known relation between SSA1 and SSA2 on edge E.
 // If GET_RANGE is true, query the range of both operands first to ensure
-// the defintions have been processed and any relations have be created.
+// the definitions have been processed and any relations have be created.
 
 relation_kind
 range_query::query_relation (edge e, tree ssa1, tree ssa2, bool get_range)

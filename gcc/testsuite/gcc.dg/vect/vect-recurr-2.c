@@ -1,5 +1,5 @@
-/* { dg-do run } */
 /* { dg-require-effective-target vect_int } */
+/* { dg-require-effective-target vect_perm } */
 
 #include "tree-vect.h"
 
@@ -28,6 +28,7 @@ main ()
     }
   int c = 7;
   foo (a, b, &c);
+#pragma GCC novector
   for (int i = 1; i < 64; ++i)
     if (b[i] != a[i] - a[i-1])
       abort ();

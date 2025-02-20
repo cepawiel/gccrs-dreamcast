@@ -1,5 +1,5 @@
 /* CFG cleanup for trees.
-   Copyright (C) 2001-2022 Free Software Foundation, Inc.
+   Copyright (C) 2001-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -450,7 +450,7 @@ tree_forwarder_block_p (basic_block bb, bool phi_wanted)
    those alternatives are equal in each of the PHI nodes, then return
    true, else return false.  */
 
-static bool
+bool
 phi_alternatives_equal (basic_block dest, edge e1, edge e2)
 {
   int n1 = e1->dest_idx;
@@ -610,17 +610,9 @@ remove_forwarder_block (basic_block bb)
 
       if (s == e)
 	{
-	  /* Create arguments for the phi nodes, since the edge was not
+	  /* Copy arguments for the phi nodes, since the edge was not
 	     here before.  */
-	  for (gphi_iterator psi = gsi_start_phis (dest);
-	       !gsi_end_p (psi);
-	       gsi_next (&psi))
-	    {
-	      gphi *phi = psi.phi ();
-	      location_t l = gimple_phi_arg_location_from_edge (phi, succ);
-	      tree def = gimple_phi_arg_def (phi, succ->dest_idx);
-	      add_phi_arg (phi, unshare_expr (def), s, l);
-	    }
+	  copy_phi_arg_into_existing_phi (succ, s);
 	}
     }
 
@@ -1106,9 +1098,11 @@ cleanup_tree_cfg_noloop (unsigned ssa_update_flags)
       timevar_push (TV_TREE_CLEANUP_CFG);
     }
 
-  /* Compute dominator info which we need for the iterative process below.  */
+  /* Compute dominator info which we need for the iterative process below.
+     Avoid computing the fast query DFS numbers since any block merging
+     done will invalidate them anyway.  */
   if (!dom_info_available_p (CDI_DOMINATORS))
-    calculate_dominance_info (CDI_DOMINATORS);
+    calculate_dominance_info (CDI_DOMINATORS, false);
   else
     checking_verify_dominators (CDI_DOMINATORS);
 
@@ -1131,8 +1125,7 @@ cleanup_tree_cfg_noloop (unsigned ssa_update_flags)
   /* Now process the altered blocks, as long as any are available.  */
   while (!bitmap_empty_p (cfgcleanup_altered_bbs))
     {
-      unsigned i = bitmap_first_set_bit (cfgcleanup_altered_bbs);
-      bitmap_clear_bit (cfgcleanup_altered_bbs, i);
+      unsigned i = bitmap_clear_first_set_bit (cfgcleanup_altered_bbs);
       if (i < NUM_FIXED_BLOCKS)
 	continue;
 

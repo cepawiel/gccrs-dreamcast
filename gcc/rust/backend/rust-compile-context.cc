@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -22,8 +22,8 @@
 namespace Rust {
 namespace Compile {
 
-Context::Context (::Backend *backend)
-  : backend (backend), resolver (Resolver::Resolver::get ()),
+Context::Context ()
+  : resolver (Resolver::Resolver::get ()),
     tyctx (Resolver::TypeCheckContext::get ()),
     mappings (Analysis::Mappings::get ()), mangler (Mangler ())
 {
@@ -33,19 +33,8 @@ Context::Context (::Backend *backend)
 void
 Context::setup_builtins ()
 {
-  auto builtins = resolver->get_builtin_types ();
-  for (auto it = builtins.begin (); it != builtins.end (); it++)
-    {
-      HirId ref;
-      bool ok = tyctx->lookup_type_by_node_id ((*it)->get_node_id (), &ref);
-      rust_assert (ok);
-
-      TyTy::BaseType *lookup;
-      ok = tyctx->lookup_type (ref, &lookup);
-      rust_assert (ok);
-
-      TyTyResolveCompile::compile (this, lookup);
-    }
+  for (auto &builtin : tyctx->get_builtins ())
+    TyTyResolveCompile::compile (this, builtin.get ());
 }
 
 hashval_t
@@ -140,6 +129,53 @@ Context::type_hasher (tree type)
     }
 
   return hstate.end ();
+}
+
+void
+Context::push_closure_context (HirId id)
+{
+  auto it = closure_bindings.find (id);
+  rust_assert (it == closure_bindings.end ());
+
+  closure_bindings.insert ({id, {}});
+  closure_scope_bindings.push_back (id);
+}
+
+void
+Context::pop_closure_context ()
+{
+  rust_assert (!closure_scope_bindings.empty ());
+
+  HirId ref = closure_scope_bindings.back ();
+  closure_scope_bindings.pop_back ();
+  closure_bindings.erase (ref);
+}
+
+void
+Context::insert_closure_binding (HirId id, tree expr)
+{
+  rust_assert (!closure_scope_bindings.empty ());
+
+  HirId ref = closure_scope_bindings.back ();
+  closure_bindings[ref].insert ({id, expr});
+}
+
+bool
+Context::lookup_closure_binding (HirId id, tree *expr)
+{
+  if (closure_scope_bindings.empty ())
+    return false;
+
+  HirId ref = closure_scope_bindings.back ();
+  auto it = closure_bindings.find (ref);
+  rust_assert (it != closure_bindings.end ());
+
+  auto iy = it->second.find (id);
+  if (iy == it->second.end ())
+    return false;
+
+  *expr = iy->second;
+  return true;
 }
 
 } // namespace Compile

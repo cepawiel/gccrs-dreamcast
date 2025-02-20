@@ -1,5 +1,5 @@
 /* Definitions for the Blackfin port.
-   Copyright (C) 2005-2022 Free Software Foundation, Inc.
+   Copyright (C) 2005-2024 Free Software Foundation, Inc.
    Contributed by Analog Devices.
 
    This file is part of GCC.
@@ -810,7 +810,6 @@ typedef struct {
    subsequent accesses occur to other fields in the same word of the
    structure, but to different bytes.  */
 #define SLOW_BYTE_ACCESS  0
-#define SLOW_SHORT_ACCESS 0
 
 /* Define this if most significant bit is lowest numbered
    in instructions that operate on numbered bit-fields. */
@@ -996,14 +995,14 @@ typedef enum directives {
         fputc ('\n',FILE);			\
       } while (0)
 
-#define ASM_DECLARE_FUNCTION_NAME(FILE,NAME,DECL) \
-  do {					\
-    fputs (".type ", FILE);           	\
-    assemble_name (FILE, NAME);         \
-    fputs (", STT_FUNC", FILE);         \
-    fputc (';',FILE);                   \
-    fputc ('\n',FILE);			\
-    ASM_OUTPUT_LABEL(FILE, NAME);	\
+#define ASM_DECLARE_FUNCTION_NAME(FILE, NAME, DECL)	\
+  do {							\
+    fputs (".type ", FILE);				\
+    assemble_name (FILE, NAME);				\
+    fputs (", STT_FUNC", FILE);				\
+    fputc (';', FILE);					\
+    fputc ('\n', FILE);					\
+    ASM_OUTPUT_FUNCTION_LABEL (FILE, NAME, DECL);	\
   } while (0)
 
 #define ASM_OUTPUT_LABEL(FILE, NAME)    \

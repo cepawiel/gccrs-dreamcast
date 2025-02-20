@@ -1,4 +1,4 @@
-// Copyright (C) 2021-2022 Free Software Foundation, Inc.
+// Copyright (C) 2021-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -19,9 +19,8 @@
 #ifndef RUST_HIR_TRAIT_RESOLVE_H
 #define RUST_HIR_TRAIT_RESOLVE_H
 
-#include "rust-hir-type-check-base.h"
 #include "rust-hir-type-check-type.h"
-#include "rust-hir-trait-ref.h"
+#include "rust-hir-visitor.h"
 
 namespace Rust {
 namespace Resolver {
@@ -32,12 +31,7 @@ class ResolveTraitItemToRef : public TypeCheckBase,
 public:
   static TraitItemReference
   Resolve (HIR::TraitItem &item, TyTy::BaseType *self,
-	   std::vector<TyTy::SubstitutionParamMapping> substitutions)
-  {
-    ResolveTraitItemToRef resolver (self, std::move (substitutions));
-    item.accept_vis (resolver);
-    return std::move (resolver.resolved);
-  }
+	   std::vector<TyTy::SubstitutionParamMapping> substitutions);
 
   void visit (HIR::TraitItemType &type) override;
 

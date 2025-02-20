@@ -1,5 +1,5 @@
 /* Classes for representing locations within the program.
-   Copyright (C) 2019-2022 Free Software Foundation, Inc.
+   Copyright (C) 2019-2024 Free Software Foundation, Inc.
    Contributed by David Malcolm <dmalcolm@redhat.com>.
 
 This file is part of GCC.
@@ -112,7 +112,7 @@ public:
   /* Factory functions for making various kinds of program_point.  */
 
   static function_point from_function_entry (const supergraph &sg,
-					     function *fun);
+					     const function &fun);
 
   static function_point before_supernode (const supernode *supernode,
 					  const superedge *from_edge);
@@ -252,7 +252,7 @@ public:
   static program_point origin (const region_model_manager &mgr);
   static program_point from_function_entry (const region_model_manager &mgr,
 					    const supergraph &sg,
-					    function *fun);
+					    const function &fun);
 
   static program_point before_supernode (const supernode *supernode,
 					 const superedge *from_edge,
@@ -298,6 +298,9 @@ public:
   void next_stmt () { m_function_point.next_stmt (); }
 
   program_point get_next () const;
+
+  static bool effectively_intraprocedural_p (const program_point &point_a,
+					     const program_point &point_b);
 
  private:
   program_point (const function_point &fn_point)

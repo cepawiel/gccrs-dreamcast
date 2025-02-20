@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -23,6 +23,7 @@
 --                                                                          --
 ------------------------------------------------------------------------------
 
+with Accessibility;  use Accessibility;
 with Atree;          use Atree;
 with Checks;         use Checks;
 with Debug;          use Debug;
@@ -536,7 +537,7 @@ package body Exp_Disp is
             then
                Target_List := Priv_Decls;
 
-            elsif not Present (Vis_Decls) then
+            elsif No (Vis_Decls) then
                Target_List := New_List;
                Set_Private_Declarations (Spec, Target_List);
             else
@@ -1039,10 +1040,11 @@ package body Exp_Disp is
 
       --  Ada 2005 (AI-251): Abstract interface class-wide type
 
-      elsif Is_Interface (Ctrl_Typ)
-        and then Is_Class_Wide_Type (Ctrl_Typ)
-      then
-         Controlling_Tag := Duplicate_Subexpr (Ctrl_Arg);
+      elsif Is_Interface (Ctrl_Typ) and then Is_Class_Wide_Type (Ctrl_Typ) then
+         Controlling_Tag :=
+           Make_Attribute_Reference (Loc,
+             Prefix         => Duplicate_Subexpr (Ctrl_Arg),
+             Attribute_Name => Name_Tag);
 
       elsif Is_Access_Type (Ctrl_Typ) then
          Controlling_Tag :=
@@ -1131,18 +1133,36 @@ package body Exp_Disp is
             Set_SCIL_Controlling_Tag (SCIL_Node,
               Parent (Entity (Prefix (Controlling_Tag))));
 
-         --  For a direct reference of the tag of the type the SCIL node
-         --  references the internal object declaration containing the tag
-         --  of the type.
+         --  Depending on whether a dereference is involved, the SCIL node
+         --  references the corresponding object/parameter declaration or
+         --  the internal object declaration containing the tag of the type.
 
          elsif Nkind (Controlling_Tag) = N_Attribute_Reference
             and then Attribute_Name (Controlling_Tag) = Name_Tag
          then
-            Set_SCIL_Controlling_Tag (SCIL_Node,
-              Parent
-                (Node
-                  (First_Elmt
-                    (Access_Disp_Table (Entity (Prefix (Controlling_Tag)))))));
+            declare
+               Prefix_Node : constant Node_Id   := Prefix (Controlling_Tag);
+               Ent         : constant Entity_Id := Entity
+                 (if Nkind (Prefix_Node) = N_Explicit_Dereference then
+                    Prefix (Prefix_Node)
+                  else
+                    Prefix_Node);
+
+            begin
+               if Ekind (Ent) in E_Record_Type
+                               | E_Record_Subtype
+                               | E_Record_Type_With_Private
+               then
+                  Set_SCIL_Controlling_Tag (SCIL_Node,
+                    Parent
+                      (Node
+                        (First_Elmt
+                          (Access_Disp_Table (Ent)))));
+
+               else
+                  Set_SCIL_Controlling_Tag (SCIL_Node, Parent (Ent));
+               end if;
+            end;
 
          --  Interfaces are not supported. For now we leave the SCIL node
          --  decorated with the Controlling_Tag. More work needed here???
@@ -1221,6 +1241,7 @@ package body Exp_Disp is
    ---------------------------------
 
    procedure Expand_Interface_Conversion (N : Node_Id) is
+
       function Underlying_Record_Type (Typ : Entity_Id) return Entity_Id;
       --  Return the underlying record type of Typ
 
@@ -1304,29 +1325,36 @@ package body Exp_Disp is
            and then Is_Ancestor (Iface_Typ, Opnd, Use_Full_View => True)
          then
             return;
-         end if;
 
-         --  When the type of the operand and the target interface type match,
-         --  it is generally safe to skip generating code to displace the
-         --  pointer to the object to reference the secondary dispatch table
-         --  associated with the target interface type. The exception to this
-         --  general rule is when the underlying object of the type conversion
-         --  is an object built by means of a dispatching constructor (since in
-         --  such case the expansion of the constructor call is a direct call
-         --  to an object primitive, i.e. without thunks, and the expansion of
-         --  the constructor call adds an explicit conversion to the target
+         --  When the target type is an interface type that is an ancestor of
+         --  the operand type, it is generally safe to skip generating code to
+         --  displace the pointer to the object to reference the secondary
+         --  dispatch table of the target interface type. Two scenarios are
+         --  possible here:
+         --    1) The operand type is a regular tagged type
+         --    2) The operand type is an interface type
+         --  In the former case the target interface and the regular tagged
+         --  type share the primary dispatch table of the object; in the latter
+         --  case the operand interface has all the primitives of the ancestor
+         --  interface type (and exactly in the same dispatch table slots).
+         --
+         --  The exception to this general rule is when the underlying object
+         --  is built by means of a dispatching constructor (since in such case
+         --  the expansion of the constructor call is a direct call to an
+         --  object primitive, i.e. without thunks, and the expansion of
+         --  the constructor call adds this explicit conversion to the target
          --  interface type to force the displacement of the pointer to the
          --  object to reference the corresponding secondary dispatch table
          --  (cf. Make_DT and Expand_Dispatching_Constructor_Call)).
 
-         --  At this stage we cannot identify whether the underlying object is
-         --  a BIP object and hence we cannot skip generating the code to try
-         --  displacing the pointer to the object. However, under configurable
-         --  runtime it is safe to skip generating code to displace the pointer
-         --  to the object, because generic dispatching constructors are not
-         --  supported.
+         --  Under configurable runtime it is safe to skip generating code to
+         --  displace the pointer to the object, because generic dispatching
+         --  constructors are not supported.
 
-         if Opnd = Iface_Typ and then not RTE_Available (RE_Displace) then
+         elsif Is_Interface (Iface_Typ)
+           and then Is_Ancestor (Iface_Typ, Opnd, Use_Full_View => True)
+           and then not RTE_Available (RE_Displace)
+         then
             return;
          end if;
       end;
@@ -1935,8 +1963,8 @@ package body Exp_Disp is
          then
             --  Generate:
             --     type T is access all <<type of the target formal>>
-            --     S : Storage_Offset := Storage_Offset!(Formal)
-            --                            + Offset_To_Top (address!(Formal))
+            --     S : constant Address := Address!(Formal)
+            --                               + Offset_To_Top (Address!(Formal))
 
             Decl_2 :=
               Make_Full_Type_Declaration (Loc,
@@ -1968,16 +1996,20 @@ package body Exp_Disp is
                 Defining_Identifier => Make_Temporary (Loc, 'S'),
                 Constant_Present    => True,
                 Object_Definition   =>
-                  New_Occurrence_Of (RTE (RE_Storage_Offset), Loc),
+                  New_Occurrence_Of (RTE (RE_Address), Loc),
                 Expression          =>
-                  Make_Op_Add (Loc,
-                    Left_Opnd  =>
-                      Unchecked_Convert_To
-                        (RTE (RE_Storage_Offset),
-                         New_Occurrence_Of
-                           (Defining_Identifier (Formal), Loc)),
-                     Right_Opnd =>
-                       Offset_To_Top));
+                  Make_Function_Call (Loc,
+                    Name =>
+                      Make_Expanded_Name (Loc,
+                        Chars => Name_Op_Add,
+                        Prefix =>
+                          New_Occurrence_Of
+                            (RTU_Entity (System_Storage_Elements), Loc),
+                        Selector_Name =>
+                          Make_Identifier (Loc, Name_Op_Add)),
+                    Parameter_Associations => New_List (
+                      New_Copy_Tree (New_Arg),
+                      Offset_To_Top)));
 
             Append_To (Decl, Decl_2);
             Append_To (Decl, Decl_1);
@@ -1993,16 +2025,15 @@ package body Exp_Disp is
          elsif Is_Controlling_Formal (Target_Formal) then
 
             --  Generate:
-            --     S1 : Storage_Offset := Storage_Offset!(Formal'Address)
-            --                             + Offset_To_Top (Formal'Address)
-            --     S2 : Addr_Ptr := Addr_Ptr!(S1)
+            --     S1 : constant Address := Formal'Address
+            --                                + Offset_To_Top (Formal'Address)
+            --     S2 : constant Addr_Ptr := Addr_Ptr!(S1)
 
             New_Arg :=
               Make_Attribute_Reference (Loc,
                 Prefix =>
                   New_Occurrence_Of (Defining_Identifier (Formal), Loc),
-                Attribute_Name =>
-                  Name_Address);
+                Attribute_Name => Name_Address);
 
             if not RTE_Available (RE_Offset_To_Top) then
                Offset_To_Top :=
@@ -2019,19 +2050,20 @@ package body Exp_Disp is
                 Defining_Identifier => Make_Temporary (Loc, 'S'),
                 Constant_Present    => True,
                 Object_Definition   =>
-                  New_Occurrence_Of (RTE (RE_Storage_Offset), Loc),
+                  New_Occurrence_Of (RTE (RE_Address), Loc),
                 Expression          =>
-                  Make_Op_Add (Loc,
-                    Left_Opnd =>
-                      Unchecked_Convert_To
-                        (RTE (RE_Storage_Offset),
-                         Make_Attribute_Reference (Loc,
-                           Prefix =>
-                             New_Occurrence_Of
-                               (Defining_Identifier (Formal), Loc),
-                           Attribute_Name => Name_Address)),
-                    Right_Opnd =>
-                      Offset_To_Top));
+                  Make_Function_Call (Loc,
+                    Name =>
+                      Make_Expanded_Name (Loc,
+                        Chars => Name_Op_Add,
+                        Prefix =>
+                          New_Occurrence_Of
+                            (RTU_Entity (System_Storage_Elements), Loc),
+                        Selector_Name =>
+                          Make_Identifier (Loc, Name_Op_Add)),
+                    Parameter_Associations => New_List (
+                      New_Copy_Tree (New_Arg),
+                      Offset_To_Top)));
 
             Decl_2 :=
               Make_Object_Declaration (Loc,
@@ -2637,7 +2669,7 @@ package body Exp_Disp is
       Def_Id : constant Entity_Id  :=
                  Make_Defining_Identifier (Loc,
                    Name_uDisp_Asynchronous_Select);
-      Params : constant List_Id    := New_List;
+      Params : List_Id;
 
    begin
       pragma Assert (not Restriction_Active (No_Dispatching_Calls));
@@ -2652,7 +2684,7 @@ package body Exp_Disp is
 
       Set_Warnings_Off (B_Id);
 
-      Append_List_To (Params, New_List (
+      Params := New_List (
 
         Make_Parameter_Specification (Loc,
           Defining_Identifier => Make_Defining_Identifier (Loc, Name_uT),
@@ -2677,7 +2709,7 @@ package body Exp_Disp is
         Make_Parameter_Specification (Loc,
           Defining_Identifier => Make_Defining_Identifier (Loc, Name_uF),
           Parameter_Type      => New_Occurrence_Of (Standard_Boolean, Loc),
-          Out_Present         => True)));
+          Out_Present         => True));
 
       return
         Make_Procedure_Specification (Loc,
@@ -4052,8 +4084,7 @@ package body Exp_Disp is
                     and then not Is_Abstract_Subprogram (Prim)
                     and then not Is_Eliminated (Prim)
                     and then not Generate_SCIL
-                    and then not
-                      Present (Prim_Table (UI_To_Int (DT_Position (Prim))))
+                    and then No (Prim_Table (UI_To_Int (DT_Position (Prim))))
                   then
                      if not Build_Thunks then
                         E := Ultimate_Alias (Prim);
@@ -5269,7 +5300,7 @@ package body Exp_Disp is
             E       : Entity_Id;
 
          begin
-            if not Present (Def)
+            if No (Def)
               or else Entity (Name (Def)) /= First_Subtype (Typ)
             then
                New_Node :=
@@ -5872,8 +5903,7 @@ package body Exp_Disp is
                     and then not Is_Abstract_Subprogram (Prim)
                     and then not Is_Eliminated (Prim)
                     and then not Generate_SCIL
-                    and then not Present (Prim_Table
-                                           (UI_To_Int (DT_Position (Prim))))
+                    and then No (Prim_Table (UI_To_Int (DT_Position (Prim))))
                   then
                      E := Ultimate_Alias (Prim);
                      pragma Assert (not Is_Abstract_Subprogram (E));
@@ -6038,7 +6068,7 @@ package body Exp_Disp is
                     --  those are only required to build secondary dispatch
                     --  tables.
 
-                    and then not Present (Interface_Alias (Prim))
+                    and then No (Interface_Alias (Prim))
 
                     --  Skip abstract and eliminated primitives
 
@@ -7496,7 +7526,7 @@ package body Exp_Disp is
 
       --  Primitive associated with a tagged type
 
-      if not Present (Interface_Alias (Prim)) then
+      if No (Interface_Alias (Prim)) then
          Tag_Typ := Scope (DTC_Entity (Prim));
          Pos     := DT_Position (Prim);
          Tag     := First_Tag_Component (Tag_Typ);
@@ -8023,7 +8053,7 @@ package body Exp_Disp is
             --  same dispatch table slot, but if it renames an operation in a
             --  nested package it's a new primitive and will have its own slot.
 
-            elsif not Present (Interface_Alias (Prim))
+            elsif No (Interface_Alias (Prim))
               and then Present (Alias (Prim))
               and then Chars (Prim) = Chars (Alias (Prim))
               and then Nkind (Unit_Declaration_Node (Prim)) /=
@@ -8191,7 +8221,7 @@ package body Exp_Disp is
            and then Present (Alias (Prim))
            and then not Is_Interface
                           (Find_Dispatching_Type (Ultimate_Alias (Prim)))
-           and then not Present (Interface_Alias (Prim))
+           and then No (Interface_Alias (Prim))
            and then Is_Derived_Type (Typ)
            and then In_Private_Part (Current_Scope)
            and then

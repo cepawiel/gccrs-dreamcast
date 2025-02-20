@@ -1,5 +1,5 @@
 /* UndefinedBehaviorSanitizer, undefined behavior detector.
-   Copyright (C) 2013-2022 Free Software Foundation, Inc.
+   Copyright (C) 2013-2024 Free Software Foundation, Inc.
    Contributed by Marek Polacek <polacek@redhat.com>
 
 This file is part of GCC.
@@ -53,11 +53,11 @@ ubsan_instrument_division (location_t loc, tree op0, tree op1)
   op0 = unshare_expr (op0);
   op1 = unshare_expr (op1);
 
-  if (TREE_CODE (type) == INTEGER_TYPE
+  if (INTEGRAL_TYPE_P (type)
       && sanitize_flags_p (SANITIZE_DIVIDE))
     t = fold_build2 (EQ_EXPR, boolean_type_node,
 		     op1, build_int_cst (type, 0));
-  else if (TREE_CODE (type) == REAL_TYPE
+  else if (SCALAR_FLOAT_TYPE_P (type)
 	   && sanitize_flags_p (SANITIZE_FLOAT_DIVIDE))
     {
       t = fold_build2 (EQ_EXPR, boolean_type_node,
@@ -68,7 +68,7 @@ ubsan_instrument_division (location_t loc, tree op0, tree op1)
     t = NULL_TREE;
 
   /* We check INT_MIN / -1 only for signed types.  */
-  if (TREE_CODE (type) == INTEGER_TYPE
+  if (INTEGRAL_TYPE_P (type)
       && sanitize_flags_p (SANITIZE_SI_OVERFLOW)
       && !TYPE_UNSIGNED (type))
     {
@@ -256,8 +256,34 @@ ubsan_instrument_shift (location_t loc, enum tree_code code,
     tt = build_call_expr_loc (loc, builtin_decl_explicit (BUILT_IN_TRAP), 0);
   else
     {
-      tree data = ubsan_create_data ("__ubsan_shift_data", 1, &loc,
-				     ubsan_type_descriptor (type0),
+      if (TREE_CODE (type1) == BITINT_TYPE
+	  && TYPE_PRECISION (type1) > MAX_FIXED_MODE_SIZE)
+	{
+	  /* Workaround for missing _BitInt support in libsanitizer.
+	     Instead of crashing in the library, pretend values above
+	     maximum value of normal integral type or below minimum value
+	     of that type are those extremes.  */
+	  tree type2 = build_nonstandard_integer_type (MAX_FIXED_MODE_SIZE,
+						       TYPE_UNSIGNED (type1));
+	  tree op2 = op1;
+	  if (!TYPE_UNSIGNED (type1))
+	    {
+	      op2 = fold_build2 (LT_EXPR, boolean_type_node, unshare_expr (op1),
+				 fold_convert (type1, TYPE_MIN_VALUE (type2)));
+	      op2 = fold_build3 (COND_EXPR, type2, op2, TYPE_MIN_VALUE (type2),
+				 fold_convert (type2, unshare_expr (op1)));
+	    }
+	  else
+	    op2 = fold_convert (type2, op1);
+	  tree op3
+	    = fold_build2 (GT_EXPR, boolean_type_node, unshare_expr (op1),
+			   fold_convert (type1, TYPE_MAX_VALUE (type2)));
+	  op1 = fold_build3 (COND_EXPR, type2, op3, TYPE_MAX_VALUE (type2),
+			     op2);
+	  type1 = type2;
+	}
+      tree utd0 = ubsan_type_descriptor (type0, UBSAN_PRINT_FORCE_INT);
+      tree data = ubsan_create_data ("__ubsan_shift_data", 1, &loc, utd0,
 				     ubsan_type_descriptor (type1), NULL_TREE,
 				     NULL_TREE);
       data = build_fold_addr_expr_loc (loc, data);
@@ -354,7 +380,7 @@ ubsan_instrument_return (location_t loc)
    that gets expanded in the sanopt pass, and make an array dimension
    of it.  ARRAY is the array, *INDEX is an index to the array.
    Return NULL_TREE if no instrumentation is emitted.
-   IGNORE_OFF_BY_ONE is true if the ARRAY_REF is inside a ADDR_EXPR.  */
+   IGNORE_OFF_BY_ONE is true if the ARRAY_REF is inside an ADDR_EXPR.  */
 
 tree
 ubsan_instrument_bounds (location_t loc, tree array, tree *index,
@@ -363,13 +389,25 @@ ubsan_instrument_bounds (location_t loc, tree array, tree *index,
   tree type = TREE_TYPE (array);
   tree domain = TYPE_DOMAIN (type);
 
-  if (domain == NULL_TREE || TYPE_MAX_VALUE (domain) == NULL_TREE)
+  if (domain == NULL_TREE)
     return NULL_TREE;
 
   tree bound = TYPE_MAX_VALUE (domain);
-  if (ignore_off_by_one)
-    bound = fold_build2 (PLUS_EXPR, TREE_TYPE (bound), bound,
-			 build_int_cst (TREE_TYPE (bound), 1));
+  if (!bound)
+    {
+      /* Handle C [0] arrays, which have TYPE_MAX_VALUE NULL, like
+	 C++ [0] arrays which have TYPE_MIN_VALUE 0 TYPE_MAX_VALUE -1.  */
+      if (!c_dialect_cxx ()
+	  && COMPLETE_TYPE_P (type)
+	  && integer_zerop (TYPE_SIZE (type)))
+	bound = build_int_cst (TREE_TYPE (TYPE_MIN_VALUE (domain)), -1);
+      else
+	return NULL_TREE;
+    }
+
+  bound = fold_build2 (PLUS_EXPR, TREE_TYPE (bound), bound,
+		       build_int_cst (TREE_TYPE (bound),
+		       1 + ignore_off_by_one));
 
   /* Detect flexible array members and suchlike, unless
      -fsanitize=bounds-strict.  */
@@ -392,6 +430,45 @@ ubsan_instrument_bounds (location_t loc, tree array, tree *index,
 	  if (next)
 	    /* Not a last element.  Instrument it.  */
 	    break;
+	  if (TREE_CODE (TREE_TYPE (TREE_OPERAND (cref, 1))) == ARRAY_TYPE
+	      && !c_dialect_cxx ())
+	    {
+	      unsigned l
+		= c_strict_flex_array_level_of (TREE_OPERAND (cref, 1));
+	      tree type2 = TREE_TYPE (TREE_OPERAND (cref, 1));
+	      if (TYPE_DOMAIN (type2) != NULL_TREE)
+		{
+		  tree max = TYPE_MAX_VALUE (TYPE_DOMAIN (type2));
+		  if (max == NULL_TREE)
+		    {
+		      /* C [0] */
+		      if (COMPLETE_TYPE_P (type2)
+			  && integer_zerop (TYPE_SIZE (type2))
+			  && l == 3)
+			next = TREE_OPERAND (cref, 1);
+		    }
+		  else if (TREE_CODE (max) == INTEGER_CST)
+		    {
+		      if (c_dialect_cxx ()
+			  && integer_all_onesp (max))
+			{
+			  /* C++ [0] */
+			  if (l == 3)
+			    next = TREE_OPERAND (cref, 1);
+			}
+		      else if (integer_zerop (max))
+			{
+			  /* C/C++ [1] */
+			  if (l >= 2)
+			    next = TREE_OPERAND (cref, 1);
+			}
+		      else if (l >= 1)
+			next = TREE_OPERAND (cref, 1);
+		    }
+		}
+	      if (next)
+		break;
+	    }
 	  /* Ok, this is the last field of the structure/union.  But the
 	     aggregate containing the field must be the last field too,
 	     recursively.  */
@@ -413,7 +490,7 @@ ubsan_instrument_bounds (location_t loc, tree array, tree *index,
   if (idx
       && TREE_CODE (bound) == INTEGER_CST
       && tree_int_cst_sgn (idx) >= 0
-      && tree_int_cst_le (idx, bound))
+      && tree_int_cst_lt (idx, bound))
     return NULL_TREE;
 
   *index = save_expr (*index);
@@ -454,12 +531,8 @@ ubsan_maybe_instrument_array_ref (tree *expr_p, bool ignore_off_by_one)
       tree e = ubsan_instrument_bounds (EXPR_LOCATION (*expr_p), op0, &op1,
 					ignore_off_by_one);
       if (e != NULL_TREE)
-	{
-	  tree t = copy_node (*expr_p);
-	  TREE_OPERAND (t, 1) = build2 (COMPOUND_EXPR, TREE_TYPE (op1),
-					e, op1);
-	  *expr_p = t;
-	}
+	TREE_OPERAND (*expr_p, 1) = build2 (COMPOUND_EXPR, TREE_TYPE (op1),
+					    e, op1);
     }
 }
 

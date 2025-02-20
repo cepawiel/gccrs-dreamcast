@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 2015-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 2015-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -30,7 +30,6 @@ with Einfo.Entities; use Einfo.Entities;
 with Einfo.Utils;    use Einfo.Utils;
 with Elists;         use Elists;
 with Errout;         use Errout;
-with Exp_Ch6;        use Exp_Ch6;
 with Exp_Prag;       use Exp_Prag;
 with Exp_Tss;        use Exp_Tss;
 with Exp_Util;       use Exp_Util;
@@ -42,13 +41,13 @@ with Nmake;          use Nmake;
 with Opt;            use Opt;
 with Sem;            use Sem;
 with Sem_Aux;        use Sem_Aux;
+with Sem_Ch3;        use Sem_Ch3;
 with Sem_Ch6;        use Sem_Ch6;
 with Sem_Ch8;        use Sem_Ch8;
 with Sem_Ch12;       use Sem_Ch12;
 with Sem_Ch13;       use Sem_Ch13;
 with Sem_Disp;       use Sem_Disp;
 with Sem_Prag;       use Sem_Prag;
-with Sem_Res;        use Sem_Res;
 with Sem_Type;       use Sem_Type;
 with Sem_Util;       use Sem_Util;
 with Sinfo;          use Sinfo;
@@ -59,8 +58,14 @@ with Snames;         use Snames;
 with Stand;          use Stand;
 with Stringt;        use Stringt;
 with Tbuild;         use Tbuild;
+with Warnsw;         use Warnsw;
 
 package body Contracts is
+
+   Contract_Error : exception;
+   --  This exception is raised by Add_Contract_Item when it is invoked on an
+   --  invalid pragma. Note that clients of the package must filter them out
+   --  before invoking Add_Contract_Item, so it should not escape the package.
 
    procedure Analyze_Package_Instantiation_Contract (Inst_Id : Entity_Id);
    --  Analyze all delayed pragmas chained on the contract of package
@@ -104,8 +109,14 @@ package body Contracts is
    procedure Expand_Subprogram_Contract (Body_Id : Entity_Id);
    --  Expand the contracts of a subprogram body and its correspoding spec (if
    --  any). This routine processes all [refined] pre- and postconditions as
-   --  well as Contract_Cases, Subprogram_Variant, invariants and predicates.
-   --  Body_Id denotes the entity of the subprogram body.
+   --  well as Always_Terminates, Contract_Cases, Exceptional_Cases,
+   --  Subprogram_Variant, invariants and predicates. Body_Id denotes the
+   --  entity of the subprogram body.
+
+   procedure Preanalyze_Condition
+     (Subp : Entity_Id;
+      Expr : Node_Id);
+   --  Preanalyze the class-wide condition Expr of Subp
 
    procedure Set_Class_Condition
      (Kind : Condition_Kind;
@@ -192,7 +203,7 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Entry bodies, the applicable pragmas are:
@@ -210,18 +221,22 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Entry or subprogram declarations, the applicable pragmas are:
+      --    Always_Terminates
       --    Attach_Handler
       --    Contract_Cases
       --    Depends
+      --    Exceptional_Cases
       --    Extensions_Visible
       --    Global
       --    Interrupt_Handler
       --    Postcondition
       --    Precondition
+      --    Side_Effects
+      --    Subprogram_Variant
       --    Test_Case
       --    Volatile_Function
 
@@ -239,6 +254,7 @@ package body Contracts is
          elsif Prag_Nam in Name_Depends
                          | Name_Extensions_Visible
                          | Name_Global
+                         | Name_Side_Effects
          then
             Add_Classification;
 
@@ -247,7 +263,9 @@ package body Contracts is
          then
             Add_Classification;
 
-         elsif Prag_Nam in Name_Contract_Cases
+         elsif Prag_Nam in Name_Always_Terminates
+                         | Name_Contract_Cases
+                         | Name_Exceptional_Cases
                          | Name_Subprogram_Variant
                          | Name_Test_Case
          then
@@ -259,7 +277,7 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Packages or instantiations, the applicable pragmas are:
@@ -280,10 +298,13 @@ package body Contracts is
          elsif Prag_Nam = Name_Part_Of and then Is_Generic_Instance (Id) then
             Add_Classification;
 
+         elsif Prag_Nam = Name_Always_Terminates then
+            Add_Contract_Test_Case;
+
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Package bodies, the applicable pragmas are:
@@ -296,34 +317,45 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  The four volatility refinement pragmas are ok for all types.
       --  Part_Of is ok for task types and protected types.
       --  Depends and Global are ok for task types.
+      --
+      --  Precondition and Postcondition are added separately; they are allowed
+      --  for access-to-subprogram types.
 
       elsif Is_Type (Id) then
          declare
-            Is_OK : constant Boolean :=
+            Is_OK_Classification : constant Boolean :=
               Prag_Nam in Name_Async_Readers
                         | Name_Async_Writers
                         | Name_Effective_Reads
                         | Name_Effective_Writes
+                        | Name_No_Caching
               or else (Ekind (Id) = E_Task_Type
                          and Prag_Nam in Name_Part_Of
                                        | Name_Depends
                                        | Name_Global)
               or else (Ekind (Id) = E_Protected_Type
                          and Prag_Nam = Name_Part_Of);
+
          begin
-            if Is_OK then
+            if Is_OK_Classification then
                Add_Classification;
+
+            elsif Ekind (Id) = E_Subprogram_Type
+                and then Prag_Nam in Name_Precondition
+                                   | Name_Postcondition
+            then
+               Add_Pre_Post_Condition;
             else
 
                --  The pragma is not a proper contract item
 
-               raise Program_Error;
+               raise Contract_Error;
             end if;
          end;
 
@@ -347,7 +379,7 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Task bodies, the applicable pragmas are:
@@ -361,7 +393,7 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       --  Task units, the applicable pragmas are:
@@ -396,11 +428,11 @@ package body Contracts is
          --  The pragma is not a proper contract item
 
          else
-            raise Program_Error;
+            raise Contract_Error;
          end if;
 
       else
-         raise Program_Error;
+         raise Contract_Error;
       end if;
    end Add_Contract_Item;
 
@@ -558,10 +590,6 @@ package body Contracts is
       Items     : constant Node_Id   := Contract (Body_Id);
       Spec_Id   : constant Entity_Id := Unique_Defining_Entity (Body_Decl);
 
-      Saved_SM  : constant SPARK_Mode_Type := SPARK_Mode;
-      Saved_SMP : constant Node_Id         := SPARK_Mode_Pragma;
-      --  Save the SPARK_Mode-related data to restore on exit
-
    begin
       --  When a subprogram body declaration is illegal, its defining entity is
       --  left unanalyzed. There is nothing left to do in this case because the
@@ -578,40 +606,28 @@ package body Contracts is
          else
             Set_Analyzed (Items);
          end if;
+
+      --  When this is a subprogram body not coming from source, for example an
+      --  expression function, it does not cause freezing of previous contracts
+      --  (see Analyze_Subprogram_Body_Helper), in particular not of those on
+      --  its spec if it exists. In this case make sure they have been properly
+      --  analyzed before being expanded below, as we may be invoked during the
+      --  freezing of the subprogram in the middle of its enclosing declarative
+      --  part because the declarative part contains e.g. the declaration of a
+      --  variable initialized by means of a call to the subprogram.
+
+      elsif Nkind (Body_Decl) = N_Subprogram_Body
+        and then not Comes_From_Source (Original_Node (Body_Decl))
+        and then Present (Corresponding_Spec (Body_Decl))
+        and then Present (Contract (Corresponding_Spec (Body_Decl)))
+      then
+         Analyze_Entry_Or_Subprogram_Contract (Corresponding_Spec (Body_Decl));
       end if;
-
-      --  Due to the timing of contract analysis, delayed pragmas may be
-      --  subject to the wrong SPARK_Mode, usually that of the enclosing
-      --  context. To remedy this, restore the original SPARK_Mode of the
-      --  related subprogram body.
-
-      Set_SPARK_Mode (Body_Id);
 
       --  Ensure that the contract cases or postconditions mention 'Result or
       --  define a post-state.
 
       Check_Result_And_Post_State (Body_Id);
-
-      --  A stand-alone nonvolatile function body cannot have an effectively
-      --  volatile formal parameter or return type (SPARK RM 7.1.3(9)). This
-      --  check is relevant only when SPARK_Mode is on, as it is not a standard
-      --  legality rule. The check is performed here because Volatile_Function
-      --  is processed after the analysis of the related subprogram body. The
-      --  check only applies to source subprograms and not to generated TSS
-      --  subprograms.
-
-      if SPARK_Mode = On
-        and then Ekind (Body_Id) in E_Function | E_Generic_Function
-        and then Comes_From_Source (Spec_Id)
-        and then not Is_Volatile_Function (Body_Id)
-      then
-         Check_Nonvolatile_Function_Profile (Body_Id);
-      end if;
-
-      --  Restore the SPARK_Mode of the enclosing context after all delayed
-      --  pragmas have been analyzed.
-
-      Restore_SPARK_Mode (Saved_SM, Saved_SMP);
 
       --  Capture all global references in a generic subprogram body now that
       --  the contract has been analyzed.
@@ -622,9 +638,10 @@ package body Contracts is
             Gen_Id => Spec_Id);
       end if;
 
-      --  Deal with preconditions, [refined] postconditions, Contract_Cases,
-      --  Subprogram_Variant, invariants and predicates associated with body
-      --  and its spec. Do not expand the contract of subprogram body stubs.
+      --  Deal with preconditions, [refined] postconditions, Always_Terminates,
+      --  Contract_Cases, Exceptional_Cases, Subprogram_Variant, invariants and
+      --  predicates associated with body and its spec. Do not expand the
+      --  contract of subprogram body stubs.
 
       if Nkind (Body_Decl) = N_Subprogram_Body then
          Expand_Subprogram_Contract (Body_Id);
@@ -644,7 +661,10 @@ package body Contracts is
       Freeze_Id : Entity_Id := Empty)
    is
       Items     : constant Node_Id := Contract (Subp_Id);
-      Subp_Decl : constant Node_Id := Unit_Declaration_Node (Subp_Id);
+      Subp_Decl : constant Node_Id :=
+        (if Ekind (Subp_Id) = E_Subprogram_Type
+         then Associated_Node_For_Itype (Subp_Id)
+         else Unit_Declaration_Node (Subp_Id));
 
       Saved_SM  : constant SPARK_Mode_Type := SPARK_Mode;
       Saved_SMP : constant Node_Id         := SPARK_Mode_Pragma;
@@ -744,7 +764,10 @@ package body Contracts is
          while Present (Prag) loop
             Prag_Nam := Pragma_Name (Prag);
 
-            if Prag_Nam = Name_Contract_Cases then
+            if Prag_Nam = Name_Always_Terminates then
+               Analyze_Always_Terminates_In_Decl_Part (Prag);
+
+            elsif Prag_Nam = Name_Contract_Cases then
 
                --  Do not analyze the contract cases of an entry declaration
                --  unless annotating the original tree for GNATprove.
@@ -759,6 +782,9 @@ package body Contracts is
                else
                   Analyze_Contract_Cases_In_Decl_Part (Prag, Freeze_Id);
                end if;
+
+            elsif Prag_Nam = Name_Exceptional_Cases then
+               Analyze_Exceptional_Cases_In_Decl_Part (Prag);
 
             elsif Prag_Nam = Name_Subprogram_Variant then
                Analyze_Subprogram_Variant_In_Decl_Part (Prag);
@@ -807,20 +833,6 @@ package body Contracts is
          Check_Result_And_Post_State (Subp_Id);
       end if;
 
-      --  A nonvolatile function cannot have an effectively volatile formal
-      --  parameter or return type (SPARK RM 7.1.3(9)). This check is relevant
-      --  only when SPARK_Mode is on, as it is not a standard legality rule.
-      --  The check is performed here because pragma Volatile_Function is
-      --  processed after the analysis of the related subprogram declaration.
-
-      if SPARK_Mode = On
-        and then Ekind (Subp_Id) in E_Function | E_Generic_Function
-        and then Comes_From_Source (Subp_Id)
-        and then not Is_Volatile_Function (Subp_Id)
-      then
-         Check_Nonvolatile_Function_Profile (Subp_Id);
-      end if;
-
       --  Restore the SPARK_Mode of the enclosing context after all delayed
       --  pragmas have been analyzed.
 
@@ -844,18 +856,16 @@ package body Contracts is
      (Type_Or_Obj_Id : Entity_Id)
    is
       Is_Type_Id : constant Boolean := Is_Type (Type_Or_Obj_Id);
-      Decl_Kind  : constant String :=
-        (if Is_Type_Id then "type" else "object");
 
       --  Local variables
 
-      AR_Val  : Boolean := False;
-      AW_Val  : Boolean := False;
-      ER_Val  : Boolean := False;
-      EW_Val  : Boolean := False;
-      Seen    : Boolean := False;
-      Prag    : Node_Id;
-      Obj_Typ : Entity_Id;
+      AR_Val : Boolean := False;
+      AW_Val : Boolean := False;
+      ER_Val : Boolean := False;
+      EW_Val : Boolean := False;
+      NC_Val : Boolean;
+      Seen   : Boolean := False;
+      Prag   : Node_Id;
 
    --  Start of processing for Check_Type_Or_Object_External_Properties
 
@@ -863,8 +873,6 @@ package body Contracts is
       --  Analyze all external properties
 
       if Is_Type_Id then
-         Obj_Typ := Type_Or_Obj_Id;
-
          --  If the parent type of a derived type is volatile
          --  then the derived type inherits volatility-related flags.
 
@@ -881,8 +889,6 @@ package body Contracts is
                end if;
             end;
          end if;
-      else
-         Obj_Typ := Etype (Type_Or_Obj_Id);
       end if;
 
       Prag := Get_Pragma (Type_Or_Obj_Id, Pragma_Async_Readers);
@@ -950,105 +956,23 @@ package body Contracts is
       end if;
 
       --  Verify the mutual interaction of the various external properties.
-      --  For variables for which No_Caching is enabled, it has been checked
-      --  already that only False values for other external properties are
-      --  allowed.
+      --  For types and variables for which No_Caching is enabled, it has been
+      --  checked already that only False values for other external properties
+      --  are allowed.
 
       if Seen
-        and then (Ekind (Type_Or_Obj_Id) /= E_Variable
-                   or else not No_Caching_Enabled (Type_Or_Obj_Id))
+        and then not No_Caching_Enabled (Type_Or_Obj_Id)
       then
          Check_External_Properties
            (Type_Or_Obj_Id, AR_Val, AW_Val, ER_Val, EW_Val);
       end if;
 
-      --  The following checks are relevant only when SPARK_Mode is on, as
-      --  they are not standard Ada legality rules. Internally generated
-      --  temporaries are ignored, as well as return objects.
+      --  Analyze the non-external volatility property No_Caching
 
-      if SPARK_Mode = On
-        and then Comes_From_Source (Type_Or_Obj_Id)
-        and then not Is_Return_Object (Type_Or_Obj_Id)
-      then
-         if Is_Effectively_Volatile (Type_Or_Obj_Id) then
+      Prag := Get_Pragma (Type_Or_Obj_Id, Pragma_No_Caching);
 
-            --  The declaration of an effectively volatile object or type must
-            --  appear at the library level (SPARK RM 7.1.3(3), C.6(6)).
-
-            if not Is_Library_Level_Entity (Type_Or_Obj_Id) then
-               Error_Msg_N
-                 ("effectively volatile "
-                    & Decl_Kind
-                    & " & must be declared at library level "
-                    & "(SPARK RM 7.1.3(3))", Type_Or_Obj_Id);
-
-            --  An object of a discriminated type cannot be effectively
-            --  volatile except for protected objects (SPARK RM 7.1.3(5)).
-
-            elsif Has_Discriminants (Obj_Typ)
-              and then not Is_Protected_Type (Obj_Typ)
-            then
-               Error_Msg_N
-                ("discriminated " & Decl_Kind & " & cannot be volatile",
-                 Type_Or_Obj_Id);
-            end if;
-
-            --  An object decl shall be compatible with respect to volatility
-            --  with its type (SPARK RM 7.1.3(2)).
-
-            if not Is_Type_Id then
-               if Is_Effectively_Volatile (Obj_Typ) then
-                  Check_Volatility_Compatibility
-                    (Type_Or_Obj_Id, Obj_Typ,
-                     "volatile object", "its type",
-                     Srcpos_Bearer => Type_Or_Obj_Id);
-               end if;
-
-            --  A component of a composite type (in this case, the composite
-            --  type is an array type) shall be compatible with respect to
-            --  volatility with the composite type (SPARK RM 7.1.3(6)).
-
-            elsif Is_Array_Type (Obj_Typ) then
-               Check_Volatility_Compatibility
-                 (Component_Type (Obj_Typ), Obj_Typ,
-                  "component type", "its enclosing array type",
-                  Srcpos_Bearer => Obj_Typ);
-
-            --  A component of a composite type (in this case, the composite
-            --  type is a record type) shall be compatible with respect to
-            --  volatility with the composite type (SPARK RM 7.1.3(6)).
-
-            elsif Is_Record_Type (Obj_Typ) then
-               declare
-                  Comp : Entity_Id := First_Component (Obj_Typ);
-               begin
-                  while Present (Comp) loop
-                     Check_Volatility_Compatibility
-                       (Etype (Comp), Obj_Typ,
-                        "record component " & Get_Name_String (Chars (Comp)),
-                        "its enclosing record type",
-                        Srcpos_Bearer => Comp);
-                     Next_Component (Comp);
-                  end loop;
-               end;
-            end if;
-
-         --  The type or object is not effectively volatile
-
-         else
-            --  A non-effectively volatile type cannot have effectively
-            --  volatile components (SPARK RM 7.1.3(6)).
-
-            if Is_Type_Id
-              and then not Is_Effectively_Volatile (Type_Or_Obj_Id)
-              and then Has_Volatile_Component (Type_Or_Obj_Id)
-            then
-               Error_Msg_N
-                 ("non-volatile type & cannot have volatile"
-                    & " components",
-                  Type_Or_Obj_Id);
-            end if;
-         end if;
+      if Present (Prag) then
+         Analyze_External_Property_In_Decl_Part (Prag, NC_Val);
       end if;
    end Check_Type_Or_Object_External_Properties;
 
@@ -1070,7 +994,6 @@ package body Contracts is
       Saved_SMP : constant Node_Id         := SPARK_Mode_Pragma;
       --  Save the SPARK_Mode-related data to restore on exit
 
-      NC_Val   : Boolean;
       Items    : Node_Id;
       Prag     : Node_Id;
       Ref_Elmt : Elmt_Id;
@@ -1111,14 +1034,6 @@ package body Contracts is
       --  variables.
 
       Check_Type_Or_Object_External_Properties (Type_Or_Obj_Id => Obj_Id);
-
-      --  Analyze the non-external volatility property No_Caching
-
-      Prag := Get_Pragma (Obj_Id, Pragma_No_Caching);
-
-      if Present (Prag) then
-         Analyze_External_Property_In_Decl_Part (Prag, NC_Val);
-      end if;
 
       --  Constant-related checks
 
@@ -1204,12 +1119,6 @@ package body Contracts is
 
          if Yields_Synchronized_Object (Obj_Typ) then
             Error_Msg_N ("ghost object & cannot be synchronized", Obj_Id);
-
-         --  A Ghost object cannot be effectively volatile (SPARK RM 6.9(7) and
-         --  SPARK RM 6.9(19)).
-
-         elsif SPARK_Mode = On and then Is_Effectively_Volatile (Obj_Id) then
-            Error_Msg_N ("ghost object & cannot be volatile", Obj_Id);
 
          --  A Ghost object cannot be imported or exported (SPARK RM 6.9(7)).
          --  One exception to this is the object that represents the dispatch
@@ -1486,8 +1395,10 @@ package body Contracts is
          Analyze_Entry_Or_Subprogram_Body_Contract (Stub_Id);
 
       --  The stub acts as its own spec, the applicable pragmas are:
+      --    Always_Terminates
       --    Contract_Cases
       --    Depends
+      --    Exceptional_Cases
       --    Global
       --    Postcondition
       --    Precondition
@@ -1566,6 +1477,13 @@ package body Contracts is
    begin
       Check_Type_Or_Object_External_Properties
         (Type_Or_Obj_Id => Type_Id);
+
+      --  Analyze Pre/Post on access-to-subprogram type
+
+      if Ekind (Type_Id) in Access_Subprogram_Kind then
+         Analyze_Entry_Or_Subprogram_Contract
+           (Directly_Designated_Type (Type_Id));
+      end if;
    end Analyze_Type_Contract;
 
    ---------------------------------------
@@ -1610,40 +1528,8 @@ package body Contracts is
       --  preserving the result for the purpose of evaluating postconditions,
       --  contracts, type invariants, etc.
 
-      --  In the case of a regular function, generate:
+      --  In the case of a function, generate:
       --
-      --  function Original_Func (X : in out Integer) return Typ is
-      --     <prologue renamings>
-      --     <preconditions>
-      --
-      --     function _Wrapped_Statements return Typ is
-      --        <original declarations>
-      --     begin
-      --        <original statements>
-      --     end;
-      --
-      --  begin
-      --     declare
-      --        type Axx is access all Typ;
-      --        Rxx : constant Axx := _Wrapped_Statements'reference;
-      --        Result_Obj : Typ renames Rxx.all;
-      --
-      --     begin
-      --        <postconditions statments>
-      --        return Rxx.all;
-      --     end;
-      --  end;
-      --
-      --  This sequence is recognized by Expand_Simple_Function_Return as a
-      --  tail call, in other words equivalent to "return _Wrapped_Statements;"
-      --  and thus the copy to the anonymous return object is elided, including
-      --  a pair of calls to Adjust/Finalize for types requiring finalization.
-
-      --  Note that an extended return statement does not yield the same result
-      --  because the copy of the return object is not elided by GNAT for now.
-
-      --  Or else, in the case of a BIP function, generate:
-
       --  function Original_Func (X : in out Integer) return Typ is
       --     <prologue renamings>
       --     <preconditions>
@@ -1658,7 +1544,7 @@ package body Contracts is
       --     return
       --        Result_Obj : constant Typ := _Wrapped_Statements
       --     do
-      --        <postconditions statments>
+      --        <postconditions statements>
       --     end return;
       --  end;
 
@@ -1676,7 +1562,7 @@ package body Contracts is
       --
       --  begin
       --     _Wrapped_Statements;
-      --     <postconditions statments>
+      --     <postconditions statements>
       --  end;
 
       --  Create Identifier
@@ -1684,6 +1570,10 @@ package body Contracts is
       Wrapper_Id := Make_Defining_Identifier (Loc, Name_uWrapped_Statements);
       Set_Debug_Info_Needed  (Wrapper_Id);
       Set_Wrapped_Statements (Subp_Id, Wrapper_Id);
+
+      Set_Has_Pragma_Inline (Wrapper_Id, Has_Pragma_Inline (Subp_Id));
+      Set_Has_Pragma_Inline_Always
+        (Wrapper_Id, Has_Pragma_Inline_Always (Subp_Id));
 
       --  Create specification and declaration for the wrapper
 
@@ -1713,20 +1603,6 @@ package body Contracts is
         Make_Handled_Sequence_Of_Statements (Loc,
           End_Label  => Make_Identifier (Loc, Chars (Wrapper_Id))));
 
-      --  Move certain flags which are relevant to the body
-
-      --  Wouldn't a better way be to perform some sort of copy of Body_Decl
-      --  for Wrapper_Body be less error-prone ???
-
-      if Was_Expression_Function (Body_Decl) then
-         Set_Was_Expression_Function (Body_Decl, False);
-         Set_Was_Expression_Function (Wrapper_Body);
-      end if;
-
-      Set_Has_Pragma_Inline (Wrapper_Id, Has_Pragma_Inline (Subp_Id));
-      Set_Has_Pragma_Inline_Always
-        (Wrapper_Id, Has_Pragma_Inline_Always (Subp_Id));
-
       --  Prepend a call to the wrapper when the subprogram is a procedure
 
       if No (Ret_Type) or else Ret_Type = Standard_Void_Type then
@@ -1737,9 +1613,9 @@ package body Contracts is
            (Handled_Statement_Sequence (Body_Decl), Stmts);
 
       --  Generate the post-execution statements and the extended return
-      --  when the subprogram being wrapped is a BIP function.
+      --  when the subprogram being wrapped is a function.
 
-      elsif Is_Build_In_Place_Result_Type (Ret_Type) then
+      else
          Set_Statements (Handled_Statement_Sequence (Body_Decl), New_List (
            Make_Extended_Return_Statement (Loc,
              Return_Object_Declarations => New_List (
@@ -1755,65 +1631,6 @@ package body Contracts is
              Handled_Statement_Sequence =>
                Make_Handled_Sequence_Of_Statements (Loc,
                  Statements => Stmts))));
-
-      --  Declare a renaming of the result of the call to the wrapper and
-      --  append a return of the result of the call when the subprogram is
-      --  a function, after manually removing the side effects. Note that
-      --  we cannot call Remove_Side_Effects here because nothing has been
-      --  analyzed yet and we cannot return the renaming itself because
-      --  Expand_Simple_Function_Return expects an explicit dereference.
-
-      else
-         declare
-            A_Id : constant Node_Id := Make_Temporary (Loc, 'A');
-            R_Id : constant Node_Id := Make_Temporary (Loc, 'R');
-
-         begin
-            Set_Statements (Handled_Statement_Sequence (Body_Decl), New_List (
-              Make_Block_Statement (Loc,
-
-                Declarations => New_List (
-                  Make_Full_Type_Declaration (Loc,
-                    Defining_Identifier => A_Id,
-                    Type_Definition     =>
-                      Make_Access_To_Object_Definition (Loc,
-                        All_Present        => True,
-                        Null_Exclusion_Present => True,
-                        Subtype_Indication =>
-                          New_Occurrence_Of (Ret_Type, Loc))),
-
-                  Make_Object_Declaration (Loc,
-                    Defining_Identifier => R_Id,
-                    Object_Definition   => New_Occurrence_Of (A_Id, Loc),
-                    Constant_Present    => True,
-                    Expression          =>
-                      Make_Reference (Loc,
-                        Make_Function_Call (Loc,
-                          Name => New_Occurrence_Of (Wrapper_Id, Loc)))),
-
-                  Make_Object_Renaming_Declaration (Loc,
-                    Defining_Identifier => Result,
-                    Subtype_Mark        => New_Occurrence_Of (Ret_Type, Loc),
-                    Name                =>
-                      Make_Explicit_Dereference (Loc,
-                        New_Occurrence_Of (R_Id, Loc)))),
-
-                Handled_Statement_Sequence =>
-                  Make_Handled_Sequence_Of_Statements (Loc,
-                    Statements => Stmts))));
-
-            Append_To (Stmts,
-              Make_Simple_Return_Statement (Loc,
-                Expression =>
-                  Make_Explicit_Dereference (Loc,
-                    New_Occurrence_Of (R_Id, Loc))));
-
-            --  It is required for Is_Related_To_Func_Return to return True
-            --  that the temporary Rxx be related to the expression of the
-            --  simple return statement built just above.
-
-            Set_Related_Expression (R_Id, Expression (Last (Stmts)));
-         end;
       end if;
    end Build_Subprogram_Contract_Wrapper;
 
@@ -2276,6 +2093,12 @@ package body Contracts is
          else
             Add_Contract_Item (Prag, Templ_Id);
          end if;
+
+      exception
+         --  We do not stop the compilation at this point in the case of an
+         --  invalid pragma because it will be properly diagnosed afterward.
+
+         when Contract_Error => null;
       end Add_Generic_Contract_Pragma;
 
       --  Local variables
@@ -2514,7 +2337,7 @@ package body Contracts is
                --  declarations of the package containing the type, or in the
                --  visible declaration of a child unit of that package.
 
-               else
+               elsif Is_List_Member (Subp_Decl) then
                   declare
                      Decls      : constant List_Id   :=
                                     List_Containing (Subp_Decl);
@@ -2537,6 +2360,29 @@ package body Contracts is
                                Decls = Visible_Declarations
                                  (Specification
                                    (Unit_Declaration_Node (Subp_Scope))));
+                  end;
+
+               --  Determine whether the subprogram is a child subprogram of
+               --  of the package containing the type.
+
+               else
+                  pragma Assert
+                    (Nkind (Parent (Subp_Decl)) = N_Compilation_Unit);
+
+                  declare
+                     Subp_Scope : constant Entity_Id :=
+                                    Scope (Defining_Entity (Subp_Decl));
+                     Typ_Scope  : constant Entity_Id := Scope (Typ);
+
+                  begin
+                     return
+                       Ekind (Subp_Scope) = E_Package
+                         and then
+                           (Typ_Scope = Subp_Scope
+                              or else
+                                (Is_Child_Unit (Subp_Scope)
+                                   and then Is_Ancestor_Package
+                                              (Typ_Scope, Subp_Scope)));
                   end;
                end if;
             end Has_Public_Visibility_Of_Subprogram;
@@ -2683,17 +2529,9 @@ package body Contracts is
                 Pragma_Argument_Associations => Args,
                 Class_Present                => Class_Present);
 
-            Subp_Decl : Node_Id := Subp_Id;
+            Subp_Decl : constant Node_Id := Enclosing_Declaration (Subp_Id);
+            pragma Assert (Is_Declaration (Subp_Decl));
          begin
-            --  Enclosing_Declaration may return, for example,
-            --  a N_Procedure_Specification node. Cope with this.
-            loop
-               Subp_Decl := Enclosing_Declaration (Subp_Decl);
-               exit when Is_Declaration (Subp_Decl);
-               Subp_Decl := Parent (Subp_Decl);
-               pragma Assert (Present (Subp_Decl));
-            end loop;
-
             Insert_After_And_Analyze (Subp_Decl, Prag);
          end Insert_Stable_Property_Check;
 
@@ -2919,12 +2757,18 @@ package body Contracts is
                Prag := Contract_Test_Cases (Items);
                while Present (Prag) loop
                   if Is_Checked (Prag) then
-                     if Pragma_Name (Prag) = Name_Contract_Cases then
+                     if Pragma_Name (Prag) = Name_Always_Terminates then
+                        Expand_Pragma_Always_Terminates (Prag);
+
+                     elsif Pragma_Name (Prag) = Name_Contract_Cases then
                         Expand_Pragma_Contract_Cases
                           (CCs     => Prag,
                            Subp_Id => Subp_Id,
                            Decls   => Decls,
                            Stmts   => Stmts);
+
+                     elsif Pragma_Name (Prag) = Name_Exceptional_Cases then
+                        Expand_Pragma_Exceptional_Cases (Prag);
 
                      elsif Pragma_Name (Prag) = Name_Subprogram_Variant then
                         Expand_Pragma_Subprogram_Variant
@@ -3483,9 +3327,7 @@ package body Contracts is
       --       end _Wrapped_Statements;
 
       --    begin
-      --       declare
-      --          Result : ... renames _Wrapped_Statements;
-      --       begin
+      --       return Result : constant ... := _Wrapped_Statements do
       --          <refined postconditions from body>
       --          <postconditions from body>
       --          <postconditions from spec>
@@ -3493,8 +3335,7 @@ package body Contracts is
       --          <contract case consequences>
       --          <invariant check of function result>
       --          <invariant and predicate checks of parameters
-      --          return Result;
-      --       end;
+      --       end return;
       --    end Original_Code;
 
       --  Step 1: augment contracts list with postconditions associated with
@@ -3790,6 +3631,7 @@ package body Contracts is
         and then Present (Contract (From_Subp))
       then
          Inherit_Pragma (Pragma_Extensions_Visible);
+         Inherit_Pragma (Pragma_Side_Effects);
       end if;
    end Inherit_Subprogram_Contract;
 
@@ -4548,241 +4390,9 @@ package body Contracts is
 
    procedure Merge_Class_Conditions (Spec_Id : Entity_Id) is
 
-      procedure Preanalyze_Condition
-        (Subp : Entity_Id;
-         Expr : Node_Id);
-      --  Preanalyze the class-wide condition Expr of Subp
-
       procedure Process_Inherited_Conditions (Kind : Condition_Kind);
       --  Collect all inherited class-wide conditions of Spec_Id and merge
       --  them into one big condition.
-
-      --------------------------
-      -- Preanalyze_Condition --
-      --------------------------
-
-      procedure Preanalyze_Condition
-        (Subp : Entity_Id;
-         Expr : Node_Id)
-      is
-         procedure Clear_Unset_References;
-         --  Clear unset references on formals of Subp since preanalysis
-         --  occurs in a place unrelated to the actual code.
-
-         procedure Remove_Controlling_Arguments;
-         --  Traverse Expr and clear the Controlling_Argument of calls to
-         --  nonabstract functions.
-
-         procedure Remove_Formals (Id : Entity_Id);
-         --  Remove formals from homonym chains and make them not visible
-
-         procedure Restore_Original_Selected_Component;
-         --  Traverse Expr searching for dispatching calls to functions whose
-         --  original node was a selected component, and replace them with
-         --  their original node.
-
-         ----------------------------
-         -- Clear_Unset_References --
-         ----------------------------
-
-         procedure Clear_Unset_References is
-            F : Entity_Id := First_Formal (Subp);
-
-         begin
-            while Present (F) loop
-               Set_Unset_Reference (F, Empty);
-               Next_Formal (F);
-            end loop;
-         end Clear_Unset_References;
-
-         ----------------------------------
-         -- Remove_Controlling_Arguments --
-         ----------------------------------
-
-         procedure Remove_Controlling_Arguments is
-            function Remove_Ctrl_Arg (N : Node_Id) return Traverse_Result;
-            --  Reset the Controlling_Argument of calls to nonabstract
-            --  function calls.
-
-            ---------------------
-            -- Remove_Ctrl_Arg --
-            ---------------------
-
-            function Remove_Ctrl_Arg (N : Node_Id) return Traverse_Result is
-            begin
-               if Nkind (N) = N_Function_Call
-                 and then Present (Controlling_Argument (N))
-                 and then not Is_Abstract_Subprogram (Entity (Name (N)))
-               then
-                  Set_Controlling_Argument (N, Empty);
-               end if;
-
-               return OK;
-            end Remove_Ctrl_Arg;
-
-            procedure Remove_Ctrl_Args is new Traverse_Proc (Remove_Ctrl_Arg);
-         begin
-            Remove_Ctrl_Args (Expr);
-         end Remove_Controlling_Arguments;
-
-         --------------------
-         -- Remove_Formals --
-         --------------------
-
-         procedure Remove_Formals (Id : Entity_Id) is
-            F : Entity_Id := First_Formal (Id);
-
-         begin
-            while Present (F) loop
-               Set_Is_Immediately_Visible (F, False);
-               Remove_Homonym (F);
-               Next_Formal (F);
-            end loop;
-         end Remove_Formals;
-
-         -----------------------------------------
-         -- Restore_Original_Selected_Component --
-         -----------------------------------------
-
-         procedure Restore_Original_Selected_Component is
-            Restored_Nodes_List : Elist_Id := No_Elist;
-
-            procedure Fix_Parents (N : Node_Id);
-            --  Traverse the subtree of N fixing the Parent field of all the
-            --  nodes.
-
-            function Restore_Node (N : Node_Id) return Traverse_Result;
-            --  Process dispatching calls to functions whose original node was
-            --  a selected component, and replace them with their original
-            --  node. Restored nodes are stored in the Restored_Nodes_List
-            --  to fix the parent fields of their subtrees in a separate
-            --  tree traversal.
-
-            -----------------
-            -- Fix_Parents --
-            -----------------
-
-            procedure Fix_Parents (N : Node_Id) is
-
-               function Fix_Parent
-                 (Parent_Node : Node_Id;
-                  Node        : Node_Id) return Traverse_Result;
-               --  Process a single node
-
-               ----------------
-               -- Fix_Parent --
-               ----------------
-
-               function Fix_Parent
-                 (Parent_Node : Node_Id;
-                  Node        : Node_Id) return Traverse_Result
-               is
-                  Par : constant Node_Id := Parent (Node);
-
-               begin
-                  if Par /= Parent_Node then
-                     pragma Assert (not Is_List_Member (Node));
-                     Set_Parent (Node, Parent_Node);
-                  end if;
-
-                  return OK;
-               end Fix_Parent;
-
-               procedure Fix_Parents is
-                  new Traverse_Proc_With_Parent (Fix_Parent);
-
-            begin
-               Fix_Parents (N);
-            end Fix_Parents;
-
-            ------------------
-            -- Restore_Node --
-            ------------------
-
-            function Restore_Node (N : Node_Id) return Traverse_Result is
-            begin
-               if Nkind (N) = N_Function_Call
-                 and then Nkind (Original_Node (N)) = N_Selected_Component
-                 and then Is_Dispatching_Operation (Entity (Name (N)))
-               then
-                  Rewrite (N, Original_Node (N));
-                  Set_Original_Node (N, N);
-
-                  --  Save the restored node in the Restored_Nodes_List to fix
-                  --  the parent fields of their subtrees in a separate tree
-                  --  traversal.
-
-                  Append_New_Elmt (N, Restored_Nodes_List);
-               end if;
-
-               return OK;
-            end Restore_Node;
-
-            procedure Restore_Nodes is new Traverse_Proc (Restore_Node);
-
-         --  Start of processing for Restore_Original_Selected_Component
-
-         begin
-            Restore_Nodes (Expr);
-
-            --  After restoring the original node we must fix the decoration
-            --  of the Parent attribute to ensure tree consistency; required
-            --  because when the class-wide condition is inherited, calls to
-            --  New_Copy_Tree will perform copies of this subtree, and formal
-            --  occurrences with wrong Parent field cannot be mapped to the
-            --  new formals.
-
-            if Present (Restored_Nodes_List) then
-               declare
-                  Elmt : Elmt_Id := First_Elmt (Restored_Nodes_List);
-
-               begin
-                  while Present (Elmt) loop
-                     Fix_Parents (Node (Elmt));
-                     Next_Elmt (Elmt);
-                  end loop;
-               end;
-            end if;
-         end Restore_Original_Selected_Component;
-
-      --  Start of processing for Preanalyze_Condition
-
-      begin
-         pragma Assert (Present (Expr));
-         pragma Assert (Inside_Class_Condition_Preanalysis = False);
-
-         Push_Scope (Subp);
-         Install_Formals (Subp);
-         Inside_Class_Condition_Preanalysis := True;
-
-         Preanalyze_And_Resolve (Expr, Standard_Boolean);
-
-         Inside_Class_Condition_Preanalysis := False;
-         Remove_Formals (Subp);
-         Pop_Scope;
-
-         --  If this preanalyzed condition has occurrences of dispatching calls
-         --  using the Object.Operation notation, during preanalysis such calls
-         --  are rewritten as dispatching function calls; if at later stages
-         --  this condition is inherited we must have restored the original
-         --  selected-component node to ensure that the preanalysis of the
-         --  inherited condition rewrites these dispatching calls in the
-         --  correct context to avoid reporting spurious errors.
-
-         Restore_Original_Selected_Component;
-
-         --  Traverse Expr and clear the Controlling_Argument of calls to
-         --  nonabstract functions. Required since the preanalyzed condition
-         --  is not yet installed on its definite context and will be cloned
-         --  and extended in derivations with additional conditions.
-
-         Remove_Controlling_Arguments;
-
-         --  Clear also attribute Unset_Reference; again because preanalysis
-         --  occurs in a place unrelated to the actual code.
-
-         Clear_Unset_References;
-      end Preanalyze_Condition;
 
       ----------------------------------
       -- Process_Inherited_Conditions --
@@ -5115,6 +4725,234 @@ package body Contracts is
          end if;
       end loop;
    end Merge_Class_Conditions;
+
+   ---------------------------------
+   -- Preanalyze_Class_Conditions --
+   ---------------------------------
+
+   procedure Preanalyze_Class_Conditions (Spec_Id : Entity_Id) is
+      Cond : Node_Id;
+
+   begin
+      for Kind in Condition_Kind loop
+         Cond := Class_Condition (Kind, Spec_Id);
+
+         if Present (Cond) then
+            Preanalyze_Condition (Spec_Id, Cond);
+         end if;
+      end loop;
+   end Preanalyze_Class_Conditions;
+
+   --------------------------
+   -- Preanalyze_Condition --
+   --------------------------
+
+   procedure Preanalyze_Condition
+     (Subp : Entity_Id;
+      Expr : Node_Id)
+   is
+      procedure Clear_Unset_References;
+      --  Clear unset references on formals of Subp since preanalysis
+      --  occurs in a place unrelated to the actual code.
+
+      procedure Remove_Controlling_Arguments;
+      --  Traverse Expr and clear the Controlling_Argument of calls to
+      --  nonabstract functions.
+
+      procedure Restore_Original_Selected_Component;
+      --  Traverse Expr searching for dispatching calls to functions whose
+      --  original node was a selected component, and replace them with
+      --  their original node.
+
+      ----------------------------
+      -- Clear_Unset_References --
+      ----------------------------
+
+      procedure Clear_Unset_References is
+         F : Entity_Id := First_Formal (Subp);
+
+      begin
+         while Present (F) loop
+            Set_Unset_Reference (F, Empty);
+            Next_Formal (F);
+         end loop;
+      end Clear_Unset_References;
+
+      ----------------------------------
+      -- Remove_Controlling_Arguments --
+      ----------------------------------
+
+      procedure Remove_Controlling_Arguments is
+         function Remove_Ctrl_Arg (N : Node_Id) return Traverse_Result;
+         --  Reset the Controlling_Argument of calls to nonabstract
+         --  function calls.
+
+         ---------------------
+         -- Remove_Ctrl_Arg --
+         ---------------------
+
+         function Remove_Ctrl_Arg (N : Node_Id) return Traverse_Result is
+         begin
+            if Nkind (N) = N_Function_Call
+              and then Present (Controlling_Argument (N))
+              and then not Is_Abstract_Subprogram (Entity (Name (N)))
+            then
+               Set_Controlling_Argument (N, Empty);
+            end if;
+
+            return OK;
+         end Remove_Ctrl_Arg;
+
+         procedure Remove_Ctrl_Args is new Traverse_Proc (Remove_Ctrl_Arg);
+      begin
+         Remove_Ctrl_Args (Expr);
+      end Remove_Controlling_Arguments;
+
+      -----------------------------------------
+      -- Restore_Original_Selected_Component --
+      -----------------------------------------
+
+      procedure Restore_Original_Selected_Component is
+         Restored_Nodes_List : Elist_Id := No_Elist;
+
+         procedure Fix_Parents (N : Node_Id);
+         --  Traverse the subtree of N fixing the Parent field of all the
+         --  nodes.
+
+         function Restore_Node (N : Node_Id) return Traverse_Result;
+         --  Process dispatching calls to functions whose original node was
+         --  a selected component, and replace them with their original
+         --  node. Restored nodes are stored in the Restored_Nodes_List
+         --  to fix the parent fields of their subtrees in a separate
+         --  tree traversal.
+
+         -----------------
+         -- Fix_Parents --
+         -----------------
+
+         procedure Fix_Parents (N : Node_Id) is
+
+            function Fix_Parent
+              (Parent_Node : Node_Id;
+               Node        : Node_Id) return Traverse_Result;
+            --  Process a single node
+
+            ----------------
+            -- Fix_Parent --
+            ----------------
+
+            function Fix_Parent
+              (Parent_Node : Node_Id;
+               Node        : Node_Id) return Traverse_Result
+            is
+               Par : constant Node_Id := Parent (Node);
+
+            begin
+               if Par /= Parent_Node then
+                  if Is_List_Member (Node) then
+                     Set_List_Parent (List_Containing (Node), Parent_Node);
+                  else
+                     Set_Parent (Node, Parent_Node);
+                  end if;
+               end if;
+
+               return OK;
+            end Fix_Parent;
+
+            procedure Fix_Parents is
+               new Traverse_Proc_With_Parent (Fix_Parent);
+
+         begin
+            Fix_Parents (N);
+         end Fix_Parents;
+
+         ------------------
+         -- Restore_Node --
+         ------------------
+
+         function Restore_Node (N : Node_Id) return Traverse_Result is
+         begin
+            if Nkind (N) = N_Function_Call
+              and then Nkind (Original_Node (N)) = N_Selected_Component
+              and then Is_Dispatching_Operation (Entity (Name (N)))
+            then
+               Rewrite (N, Original_Node (N));
+               Set_Original_Node (N, N);
+
+               --  Save the restored node in the Restored_Nodes_List to fix
+               --  the parent fields of their subtrees in a separate tree
+               --  traversal.
+
+               Append_New_Elmt (N, Restored_Nodes_List);
+            end if;
+
+            return OK;
+         end Restore_Node;
+
+         procedure Restore_Nodes is new Traverse_Proc (Restore_Node);
+
+      --  Start of processing for Restore_Original_Selected_Component
+
+      begin
+         Restore_Nodes (Expr);
+
+         --  After restoring the original node we must fix the decoration
+         --  of the Parent attribute to ensure tree consistency; required
+         --  because when the class-wide condition is inherited, calls to
+         --  New_Copy_Tree will perform copies of this subtree, and formal
+         --  occurrences with wrong Parent field cannot be mapped to the
+         --  new formals.
+
+         if Present (Restored_Nodes_List) then
+            declare
+               Elmt : Elmt_Id := First_Elmt (Restored_Nodes_List);
+
+            begin
+               while Present (Elmt) loop
+                  Fix_Parents (Node (Elmt));
+                  Next_Elmt (Elmt);
+               end loop;
+            end;
+         end if;
+      end Restore_Original_Selected_Component;
+
+   --  Start of processing for Preanalyze_Condition
+
+   begin
+      pragma Assert (Present (Expr));
+      pragma Assert (Inside_Class_Condition_Preanalysis = False);
+
+      Push_Scope (Subp);
+      Install_Formals (Subp);
+      Inside_Class_Condition_Preanalysis := True;
+
+      Preanalyze_Spec_Expression (Expr, Standard_Boolean);
+
+      Inside_Class_Condition_Preanalysis := False;
+      End_Scope;
+
+      --  If this preanalyzed condition has occurrences of dispatching calls
+      --  using the Object.Operation notation, during preanalysis such calls
+      --  are rewritten as dispatching function calls; if at later stages
+      --  this condition is inherited we must have restored the original
+      --  selected-component node to ensure that the preanalysis of the
+      --  inherited condition rewrites these dispatching calls in the
+      --  correct context to avoid reporting spurious errors.
+
+      Restore_Original_Selected_Component;
+
+      --  Traverse Expr and clear the Controlling_Argument of calls to
+      --  nonabstract functions. Required since the preanalyzed condition
+      --  is not yet installed on its definite context and will be cloned
+      --  and extended in derivations with additional conditions.
+
+      Remove_Controlling_Arguments;
+
+      --  Clear also attribute Unset_Reference; again because preanalysis
+      --  occurs in a place unrelated to the actual code.
+
+      Clear_Unset_References;
+   end Preanalyze_Condition;
 
    ----------------------------------------
    -- Save_Global_References_In_Contract --

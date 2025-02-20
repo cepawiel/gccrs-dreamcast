@@ -1,6 +1,7 @@
 /* Proof-of-concept of a -fanalyzer plugin for the Linux kernel.  */
 /* { dg-options "-g" } */
 
+#define INCLUDE_MEMORY
 #include "gcc-plugin.h"
 #include "config.h"
 #include "system.h"
@@ -40,7 +41,9 @@
 #include "analyzer/program-point.h"
 #include "analyzer/store.h"
 #include "analyzer/region-model.h"
+#include "analyzer/call-details.h"
 #include "analyzer/call-info.h"
+#include "make-unique.h"
 
 int plugin_is_GPL_compatible;
 
@@ -55,6 +58,11 @@ class copy_across_boundary_fn : public known_function
  public:
   virtual bool untrusted_source_p () const = 0;
   virtual bool untrusted_destination_p () const = 0;
+
+  bool matches_call_types_p (const call_details &cd) const final override
+  {
+    return cd.num_args () == 3;
+  }
 
   void impl_call_pre (const call_details &cd) const final override
   {
@@ -78,8 +86,11 @@ class copy_across_boundary_fn : public known_function
 
     if (tree cst = num_bytes_sval->maybe_get_constant ())
       if (zerop (cst))
-	/* No-op.  */
-	return;
+	{
+	  /* No-op.  */
+	  model->update_for_zero_return (cd, true);
+	  return;
+	}
 
     const region *sized_src_reg = mgr->get_sized_region (src_reg,
 							 NULL_TREE,
@@ -94,7 +105,7 @@ class copy_across_boundary_fn : public known_function
     if (ctxt)
       {
 	/* Bifurcate state, creating a "failure" out-edge.  */
-	ctxt->bifurcate (new copy_failure (cd));
+	ctxt->bifurcate (make_unique<copy_failure> (cd));
 
 	/* The "unbifurcated" state is the "success" case.  */
 	copy_success success (cd,
@@ -198,6 +209,22 @@ public:
   }
 };
 
+/* Implementation of "__check_object_size".  */
+  
+class known_function___check_object_size : public known_function
+{
+ public:
+  bool matches_call_types_p (const call_details &cd) const final override
+  {
+    return cd.num_args () == 2;
+  }
+
+  void impl_call_pre (const call_details &) const final override
+  {
+    /* No-op.  */
+  }
+};
+
 /* Callback handler for the PLUGIN_ANALYZER_INIT event.  */
 
 static void
@@ -208,10 +235,13 @@ kernel_analyzer_init_cb (void *gcc_data, void */*user_data*/)
   LOG_SCOPE (iface->get_logger ());
   if (0)
     inform (input_location, "got here: kernel_analyzer_init_cb");
-  iface->register_known_function ("copy_from_user",
-				  new known_function_copy_from_user ());
+  iface->register_known_function
+    ("copy_from_user",
+     make_unique<known_function_copy_from_user> ());
   iface->register_known_function ("copy_to_user",
-				  new known_function_copy_to_user ());
+				  make_unique<known_function_copy_to_user> ());
+  iface->register_known_function ("__check_object_size",
+				  make_unique<known_function___check_object_size> ());
 }
 
 } // namespace ana

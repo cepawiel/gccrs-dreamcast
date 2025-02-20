@@ -1,5 +1,5 @@
 /* Common hooks for AArch64.
-   Copyright (C) 2012-2022 Free Software Foundation, Inc.
+   Copyright (C) 2012-2024 Free Software Foundation, Inc.
    Contributed by ARM Ltd.
 
    This file is part of GCC.
@@ -31,6 +31,7 @@
 #include "flags.h"
 #include "diagnostic.h"
 #include "config/aarch64/aarch64-feature-deps.h"
+#include "config/arm/aarch-common.h"
 
 #ifdef  TARGET_BIG_ENDIAN_DEFAULT
 #undef  TARGET_DEFAULT_TARGET_FLAGS
@@ -54,6 +55,7 @@ static const struct default_options aarch_option_optimization_table[] =
     { OPT_LEVELS_1_PLUS, OPT_fsched_pressure, NULL, 1 },
     /* Enable redundant extension instructions removal at -O2 and higher.  */
     { OPT_LEVELS_2_PLUS, OPT_free, NULL, 1 },
+    { OPT_LEVELS_2_PLUS, OPT_mearly_ra_, NULL, AARCH64_EARLY_RA_ALL },
 #if (TARGET_DEFAULT_ASYNC_UNWIND_TABLES == 1)
     { OPT_LEVELS_ALL, OPT_fasynchronous_unwind_tables, NULL, 1 },
     { OPT_LEVELS_ALL, OPT_funwind_tables, NULL, 1},
@@ -139,16 +141,20 @@ aarch64_handle_option (struct gcc_options *opts,
 /* An ISA extension in the co-processor and main instruction set space.  */
 struct aarch64_option_extension
 {
+  /* The extension name to pass on to the assembler.  */
   const char *name;
+  /* The smallest set of feature bits to toggle to enable this option.  */
   aarch64_feature_flags flag_canonical;
+  /* If this feature is turned on, these bits also need to be turned on.  */
   aarch64_feature_flags flags_on;
+  /* If this feature is turned off, these bits also need to be turned off.  */
   aarch64_feature_flags flags_off;
 };
 
 /* ISA extensions in AArch64.  */
 static constexpr aarch64_option_extension all_extensions[] =
 {
-#define AARCH64_OPT_EXTENSION(NAME, IDENT, C, D, E, F) \
+#define AARCH64_OPT_EXTENSION(NAME, IDENT, C, D, E, FEATURE_STRING) \
   {NAME, AARCH64_FL_##IDENT, feature_deps::IDENT ().explicit_on, \
    feature_deps::get_flags_off (feature_deps::root_off_##IDENT)},
 #include "config/aarch64/aarch64-option-extensions.def"
@@ -191,13 +197,13 @@ static constexpr arch_to_arch_name all_architectures[] =
 
 /* Parse the architecture extension string STR and update ISA_FLAGS
    with the architecture features turned on or off.  Return a
-   aarch64_parse_opt_result describing the result.
+   aarch_parse_opt_result describing the result.
    When the STR string contains an invalid extension,
    a copy of the string is created and stored to INVALID_EXTENSION.  */
 
-enum aarch64_parse_opt_result
+enum aarch_parse_opt_result
 aarch64_parse_extension (const char *str, aarch64_feature_flags *isa_flags,
-			 std::string *invalid_extension)
+                         std::string *invalid_extension)
 {
   /* The extension string is parsed left to right.  */
   const struct aarch64_option_extension *opt = NULL;
@@ -228,7 +234,7 @@ aarch64_parse_extension (const char *str, aarch64_feature_flags *isa_flags,
 	adding_ext = 1;
 
       if (len == 0)
-	return AARCH64_PARSE_MISSING_ARG;
+	return AARCH_PARSE_MISSING_ARG;
 
 
       /* Scan over the extensions table trying to find an exact match.  */
@@ -250,13 +256,13 @@ aarch64_parse_extension (const char *str, aarch64_feature_flags *isa_flags,
 	  /* Extension not found in list.  */
 	  if (invalid_extension)
 	    *invalid_extension = std::string (str, len);
-	  return AARCH64_PARSE_INVALID_FEATURE;
+	  return AARCH_PARSE_INVALID_FEATURE;
 	}
 
       str = ext;
     };
 
-  return AARCH64_PARSE_OK;
+  return AARCH_PARSE_OK;
 }
 
 /* Append all architecture extension candidates to the CANDIDATES vector.  */
@@ -301,6 +307,7 @@ aarch64_get_extension_string_for_isa_flags
      But in order to make the output more readable, it seems better
      to add the strings in definition order.  */
   aarch64_feature_flags added = 0;
+  auto flags_crypto = AARCH64_FL_AES | AARCH64_FL_SHA2;
   for (unsigned int i = ARRAY_SIZE (all_extensions); i-- > 0; )
     {
       auto &opt = all_extensions[i];
@@ -310,7 +317,7 @@ aarch64_get_extension_string_for_isa_flags
 	 per-feature crypto flags.  */
       auto flags = opt.flag_canonical;
       if (flags == AARCH64_FL_CRYPTO)
-	flags = AARCH64_FL_AES | AARCH64_FL_SHA2;
+	flags = flags_crypto;
 
       if ((flags & isa_flags & (explicit_flags | ~current_flags)) == flags)
 	{
@@ -325,14 +332,35 @@ aarch64_get_extension_string_for_isa_flags
 	outstr += opt.name;
       }
 
-  /* Remove the features in current_flags & ~isa_flags.  */
+  /* Remove the features in current_flags & ~isa_flags.  If the feature does
+     not have an HWCAPs then it shouldn't be taken into account for feature
+     detection because one way or another we can't tell if it's available
+     or not.  */
+
   for (auto &opt : all_extensions)
-    if (opt.flag_canonical & current_flags & ~isa_flags)
-      {
-	current_flags &= ~opt.flags_off;
-	outstr += "+no";
-	outstr += opt.name;
-      }
+    {
+      auto flags = opt.flag_canonical;
+      /* As a special case, don't emit "+noaes" or "+nosha2" when we could emit
+	 "+nocrypto" instead, in order to support assemblers that predate the
+	 separate per-feature crypto flags.  Only allow "+nocrypto" when "sm4"
+	 is not already enabled (to avoid dependending on whether "+nocrypto"
+	 also disables "sm4").  */
+      if (flags & flags_crypto
+	  && (flags_crypto & current_flags & ~isa_flags) == flags_crypto
+	  && !(current_flags & AARCH64_FL_SM4))
+	  continue;
+
+      if (flags == AARCH64_FL_CRYPTO)
+	/* If either crypto flag needs removing here, then both do.  */
+	flags = flags_crypto;
+
+      if (flags & current_flags & ~isa_flags)
+	{
+	  current_flags &= ~opt.flags_off;
+	  outstr += "+no";
+	  outstr += opt.name;
+	}
+    }
 
   return outstr;
 }

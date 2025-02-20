@@ -3,7 +3,7 @@
 [![Build Docker image](https://github.com/Rust-GCC/gccrs/actions/workflows/docker.yml/badge.svg)](https://github.com/Rust-GCC/gccrs/actions/workflows/docker.yml)
 ![Docker Pulls](https://img.shields.io/docker/pulls/philberty/gccrs)
 [![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://gcc-rust.zulipchat.com/)
-[![Bors enabled](https://bors.tech/images/badge_small.svg)](https://app.bors.tech/repositories/32890)
+[![justforfunnoreally.dev badge](https://img.shields.io/badge/justforfunnoreally-dev-9ff)](https://justforfunnoreally.dev)
 # GCC Rust
 ![GCC Rust](logo.png?raw=true "GCC rust Logo")
 
@@ -45,6 +45,12 @@ Fetch dependencies for Ubuntu:
 $ apt install build-essential libgmp3-dev libmpfr-dev libmpc-dev flex bison autogen gcc-multilib dejagnu
 ```
 
+Fetch dependencies for Fedora:
+
+```bash
+$ dnf install autoconf automake dejagnu flex bison glibc-devel.{x86_64,i686} gmp-devel libmpc-devel mpfr-devel
+```
+
 Clone the repository
 
 ```bash
@@ -69,17 +75,23 @@ The path of header dir and sysroot should be specified when you configure the pr
 ```bash
 $ mkdir mac-build
 $ cd mac-build
-$ ../gccrs/configure --prefix=$HOME/gccrs-install --disable-bootstrap --enable-multilib --enable-languages=rust --with-native-system-header-dir=/usr/include --with-sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk 
+$ ../gccrs/configure --prefix=$HOME/gccrs-install --disable-bootstrap --enable-multilib --enable-languages=rust --with-native-system-header-dir=/usr/include --with-sysroot=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 $ make
 
 ```
+
+Alternatively, a docker environment is available for ARM-based Mac contributors.
+
+Please visit [gccrs-workspace](https://github.com/badumbatish/gccrs-workspace). 
+ 
+The image is based on Ubuntu ARM and comes with dependencies all fetched.
 
 #### Running GCC Rust
 
 Running the compiler itself without make install we can simply invoke the compiler proper:
 
 ```bash
-$ ./gcc/rust1 test.rs -frust-debug -frust-dump-parse -Warray-bounds -dumpbase test.rs -mtune=generic -march=x86-64 -O0 -version -fdump-tree-gimple -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64
+$ ./gcc/crab1 test.rs -frust-debug -frust-dump-ast-pretty -Warray-bounds -dumpbase test.rs -mtune=generic -march=x86-64 -O0 -version -fdump-tree-gimple -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -frust-incomplete-and-experimental-compiler-do-not-use
 ```
 
 To invoke the compiler driver (gccrs) we need to:
@@ -91,11 +103,11 @@ $ make install
 Then invoke the compiler from the installation directory:
 
 ```bash
-$ $HOME/gccrs-install/gccrs -g -O2 -c test.rs -o test.o
-$ $HOME/gccrs-install/gccrs -o test test.o
+$ $HOME/gccrs-install/bin/gccrs -g -O2 -c test.rs -o test.o -frust-incomplete-and-experimental-compiler-do-not-use
+$ $HOME/gccrs-install/bin/gccrs -o test test.o
 ```
 
-You can also setup your shell to automatically find the installed compiler. For example for `bash`, 
+You can also setup your shell to automatically find the installed compiler. For example for `bash`,
 add the following in your `$HOME/.bashrc`:
 
 ```bash
@@ -139,34 +151,34 @@ test cases referencing any issues on Github.
 
 ### Enabling internal checks
 
-GCC has several internal checks that can be enabled during configuration. In the case of `gccrs`, 
+GCC has several internal checks that can be enabled during configuration. In the case of `gccrs`,
 you can enable the following:
 ```bash
 $ ../gccrs/configure --prefix=$HOME/gccrs-install --disable-bootstrap --enable-multilib --enable-languages=rust --enable-checking=gimple,tree,types
 ```
 
 ### GDB
-You can directly invoke `gdb` on the `rust1` compiler process (you can find the
+You can directly invoke `gdb` on the `crab1` compiler process (you can find the
 exact command adding `--verbose` to your `gccrs` invocation):
 ```bash
 $ gccrs test.rs -O0 -S -o arithmetic_expressions1.s --verbose
 ...
- /some/path/../../rust1 test.rs -quiet -dumpbase arithmetic_expressions1.rs -dumpbase-ext .rs
+ /some/path/../../crab1 test.rs -quiet -dumpbase arithmetic_expressions1.rs -dumpbase-ext .rs
  -mtune=generic -march=x86-64 -O0 -w -version -fdiagnostics-color=never -fno-diagnostics-show-caret -fno-diagnostics-show-line-numbers -fdiagnostics-urls=never -fdiagnostics-path-format=separate-events -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu
 ...
-$ gdb --args  /some/path/../../rust1 test.rs -quiet -dumpbase arithmetic_expressions1.rs -dumpbase-ext .rs
+$ gdb --args  /some/path/../../crab1 test.rs -quiet -dumpbase arithmetic_expressions1.rs -dumpbase-ext .rs
  -mtune=generic -march=x86-64 -O0 -w -version -fdiagnostics-color=never -fno-diagnostics-show-caret -fno-diagnostics-show-line-numbers -fdiagnostics-urls=never -fdiagnostics-path-format=separate-events -o test.s -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu
 ```
 
-Or simply add the `-wrapper gdb,--args` option. 
-This will call each subcommand in `gdb` and you simply have to break/debug in `rust1`:
+Or simply add the `-wrapper gdb,--args` option.
+This will call each subcommand in `gdb` and you simply have to break/debug in `crab1`:
 ```bash
 $ gccrs test.rs -O0 -S -o arithmetic_expressions1.s -wrapper gdb,--args
 ```
 
 ## Docker image
 
-There is a docker image hosted over on: 
+There is a docker image hosted over on:
 
 https://hub.docker.com/repository/docker/philberty/gccrs
 
@@ -179,7 +191,7 @@ Or you can build your own image:
 ```bash
 $ docker build . -t gccrs-dev
 ```
-If you want to build an object file: 
+If you want to build an object file:
 
 ```bash
 $ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
@@ -198,7 +210,7 @@ To emit assembly :
 ```bash
 $ docker run --rm -v "$PWD":/usr/src/myapp -w /usr/src/myapp \
     gccrs-dev:latest gccrs -g -O2 \
-    gcc/testsuite/rust/compile/torture/type_infer1.rs -S -o type_infer1.s 
+    gcc/testsuite/rust/compile/torture/type_infer1.rs -S -o type_infer1.s
 ```
 
 To emit Rust front end debug output, you may add options like `-frust-debug`, `-frust-dump-all`.
@@ -208,11 +220,12 @@ To emit Rust front end debug output, you may add options like `-frust-debug`, `-
 
 If you want to contribute to GCC Rust, you can find more information in [CONTRIBUTING.md](https://github.com/Rust-GCC/gccrs/blob/master/CONTRIBUTING.md).
 
-Please be aware this project is designed to be pushed upstream to GCC when we reach some milestones, 
-and this means we require copyright assignment or the Developer's Certificate of Origin sign-off. 
-Please see the [Contributing to GCC](https://gcc.gnu.org/contribute.html) guide or [Developer's Certificate of Origin (DCO) Sign-off](https://gcc.gnu.org/dco.html) guide.
+Please be aware this project is designed to be pushed upstream to GCC when we reach some milestones,
+and this means we require copyright assignment or the Developer's Certificate of Origin sign-off.
+Please see the [Contributing to GCC](https://gcc.gnu.org/contribute.html) guide or
+[Developer's Certificate of Origin (DCO) Sign-off](https://gcc.gnu.org/dco.html) guide.
 
-Not all contributions must be code; we would love to see new test cases or bugs and issues to be reported. 
+Not all contributions must be code; we would love to see new test cases or bugs and issues to be reported.
 Feel free to add any comments on open PRs
 
 
@@ -247,7 +260,7 @@ With that, we're missing out on the aspect that _enforces that GCC compiles with
 To encounter that, the default CI has a [_check for new warnings_ step](https://github.com/Rust-GCC/gccrs/pull/1026)
 that verifies in the CI `--disable-bootstrap` build configuration that no new warnings are introduced.
 If that step fails, it usually points out a new _warning_ you've introduced erroneously, and should address.
-Occasionally it means that simply the `.github/bors_log_expected_warnings` file needs to be updated,
+Occasionally it means that simply the `.github/log_expected_warnings` file needs to be updated,
 for example if due to any kind of "environmental changes" (for example, CI "initial" compiler changes).
 Unless diligently reproducing the CI configuration (in particular "initial" compiler, GCC version),
 it's not really feasible to reproduce this check locally.

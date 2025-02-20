@@ -1,3 +1,39 @@
+2023-10-22  Iain Sandoe  <iain@sandoe.co.uk>
+
+	* configure: Regenerate.
+	* configure.ac: Handle Darwin rpaths.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Alexander von Gluck IV  <kallisti5@unixzen.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  H.J. Lu  <hjl.tools@gmail.com>
+
+	* configure: Regenerate.
+
+2023-08-07  H.J. Lu  <hjl.tools@gmail.com>
+
+	* configure: Regenerate.
+
+2023-01-07  LIU Hao  <lh_mouse@126.com>
+
+	PR middle-end/108300
+	* vtv_malloc.cc: Define `WIN32_LEAN_AND_MEAN` before <windows.h>.
+	* vtv_rts.cc: Likewise.
+	* vtv_utils.cc: Likewise.
+
 2022-10-31  Lulu Cheng  <chenglulu@loongson.cn>
 	    qijingwen  <qijingwen@loongson.cn>
 
@@ -274,7 +310,7 @@
 	(count_all_pages): Likewise.
 	(dl_iterate_phdr_count_pages): Don't build on Cygwin and MinGW.
 	* libvtv/utils.cc : Include windows.h and skip execinfo.h inclusion on
-	 Cygwin and MinGW.
+	Cygwin and MinGW.
 	(__vtv_open_log): Exchange call to getuid and getpid with
 	GetCurrentProcessId and adjust call to snprintf accordingly on Cygwin
 	and MinGW.  Adjust calls to mkdir on MinGW.  Adjust call to open on

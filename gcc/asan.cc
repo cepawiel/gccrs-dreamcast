@@ -1,5 +1,5 @@
 /* AddressSanitizer, a fast memory error detector.
-   Copyright (C) 2012-2022 Free Software Foundation, Inc.
+   Copyright (C) 2012-2024 Free Software Foundation, Inc.
    Contributed by Kostya Serebryany <kcc@google.com>
 
 This file is part of GCC.
@@ -64,6 +64,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-inline.h"
 #include "tree-ssa.h"
 #include "tree-eh.h"
+#include "diagnostic-core.h"
 
 /* AddressSanitizer finds out-of-bounds and use-after-free bugs
    with <2x slowdown on average.
@@ -387,6 +388,46 @@ bool
 asan_memintrin (void)
 {
   return (sanitize_flags_p (SANITIZE_ADDRESS) && param_asan_memintrin);
+}
+
+
+/* Support for --param asan-kernel-mem-intrinsic-prefix=1.  */
+static GTY(()) rtx asan_memfn_rtls[3];
+
+rtx
+asan_memfn_rtl (tree fndecl)
+{
+  int i;
+  const char *f, *p;
+  char buf[sizeof ("__hwasan_memmove")];
+
+  switch (DECL_FUNCTION_CODE (fndecl))
+    {
+    case BUILT_IN_MEMCPY: i = 0; f = "memcpy"; break;
+    case BUILT_IN_MEMSET: i = 1; f = "memset"; break;
+    case BUILT_IN_MEMMOVE: i = 2; f = "memmove"; break;
+    default: gcc_unreachable ();
+    }
+  if (asan_memfn_rtls[i] == NULL_RTX)
+    {
+      tree save_name = DECL_NAME (fndecl);
+      tree save_assembler_name = DECL_ASSEMBLER_NAME (fndecl);
+      rtx save_rtl = DECL_RTL (fndecl);
+      if (flag_sanitize & SANITIZE_KERNEL_HWADDRESS)
+	p = "__hwasan_";
+      else
+	p = "__asan_";
+      strcpy (buf, p);
+      strcat (buf, f);
+      DECL_NAME (fndecl) = get_identifier (buf);
+      DECL_ASSEMBLER_NAME_RAW (fndecl) = NULL_TREE;
+      SET_DECL_RTL (fndecl, NULL_RTX);
+      asan_memfn_rtls[i] = DECL_RTL (fndecl);
+      DECL_NAME (fndecl) = save_name;
+      DECL_ASSEMBLER_NAME_RAW (fndecl) = save_assembler_name;
+      SET_DECL_RTL (fndecl, save_rtl);
+    }
+  return asan_memfn_rtls[i];
 }
 
 
@@ -1440,10 +1481,7 @@ asan_clear_shadow (rtx shadow_mem, HOST_WIDE_INT len)
 void
 asan_function_start (void)
 {
-  section *fnsec = function_section (current_function_decl);
-  switch_to_section (fnsec);
-  ASM_OUTPUT_DEBUG_LABEL (asm_out_file, "LASANPC",
-			 current_function_funcdef_no);
+  ASM_OUTPUT_DEBUG_LABEL (asm_out_file, "LASANPC", current_function_funcdef_no);
 }
 
 /* Return number of shadow bytes that are occupied by a local variable
@@ -1818,6 +1856,11 @@ asan_emit_stack_protection (rtx base, rtx pbase, unsigned int alignb,
   tree str_cst, decl, id;
   int use_after_return_class = -1;
 
+  /* Don't emit anything when doing error recovery, the assertions
+     might fail e.g. if a function had a frame offset overflow.  */
+  if (seen_error ())
+    return NULL;
+
   if (shadow_ptr_types[0] == NULL_TREE)
     asan_init_shadow_ptr_types ();
 
@@ -1960,6 +2003,7 @@ asan_emit_stack_protection (rtx base, rtx pbase, unsigned int alignb,
   DECL_INITIAL (decl) = decl;
   TREE_ASM_WRITTEN (decl) = 1;
   TREE_ASM_WRITTEN (id) = 1;
+  DECL_ALIGN_RAW (decl) = DECL_ALIGN_RAW (current_function_decl);
   emit_move_insn (mem, expand_normal (build_fold_addr_expr (decl)));
   shadow_base = expand_binop (Pmode, lshr_optab, base,
 			      gen_int_shift_amount (Pmode, ASAN_SHADOW_SHIFT),
@@ -2245,6 +2289,8 @@ asan_protect_global (tree decl, bool ignore_decl_rtl_set_p)
       || (DECL_SECTION_NAME (decl) != NULL
 	  && !symtab_node::get (decl)->implicit_section
 	  && !section_sanitized_p (DECL_SECTION_NAME (decl)))
+      /* Don't protect variables in non-generic address-space.  */
+      || !ADDR_SPACE_GENERIC_P (TYPE_ADDR_SPACE (TREE_TYPE (decl)))
       || DECL_SIZE (decl) == 0
       || ASAN_RED_ZONE_SIZE * BITS_PER_UNIT > MAX_OFILE_ALIGNMENT
       || TREE_CODE (DECL_SIZE_UNIT (decl)) != INTEGER_CST
@@ -2945,6 +2991,7 @@ maybe_instrument_call (gimple_stmt_iterator *iter)
 	  switch (DECL_FUNCTION_CODE (callee))
 	    {
 	    case BUILT_IN_UNREACHABLE:
+	    case BUILT_IN_UNREACHABLE_TRAP:
 	    case BUILT_IN_TRAP:
 	      /* Don't instrument these.  */
 	      return false;
@@ -3240,7 +3287,17 @@ asan_add_global (tree decl, tree type, vec<constructor_elt, va_gc> *v)
     pp_string (&asan_pp, "<unknown>");
   str_cst = asan_pp_string (&asan_pp);
 
-  pp_string (&module_name_pp, main_input_filename);
+  if (!in_lto_p)
+    pp_string (&module_name_pp, main_input_filename);
+  else
+    {
+      const_tree tu = get_ultimate_context ((const_tree)decl);
+      if (tu != NULL_TREE)
+	pp_string (&module_name_pp, IDENTIFIER_POINTER (DECL_NAME (tu)));
+      else
+	pp_string (&module_name_pp, aux_base_name);
+    }
+
   module_name_cst = asan_pp_string (&module_name_pp);
 
   if (asan_needs_local_alias (decl))
@@ -3738,9 +3795,7 @@ asan_expand_mark_ifn (gimple_stmt_iterator *iter)
     }
   tree len = gimple_call_arg (g, 2);
 
-  gcc_assert (tree_fits_shwi_p (len));
-  unsigned HOST_WIDE_INT size_in_bytes = tree_to_shwi (len);
-  gcc_assert (size_in_bytes);
+  gcc_assert (poly_int_tree_p (len));
 
   g = gimple_build_assign (make_ssa_name (pointer_sized_int_node),
 			   NOP_EXPR, base);
@@ -3749,9 +3804,10 @@ asan_expand_mark_ifn (gimple_stmt_iterator *iter)
   tree base_addr = gimple_assign_lhs (g);
 
   /* Generate direct emission if size_in_bytes is small.  */
-  if (size_in_bytes
-      <= (unsigned)param_use_after_scope_direct_emission_threshold)
+  unsigned threshold = param_use_after_scope_direct_emission_threshold;
+  if (tree_fits_uhwi_p (len) && tree_to_uhwi (len) <= threshold)
     {
+      unsigned HOST_WIDE_INT size_in_bytes = tree_to_uhwi (len);
       const unsigned HOST_WIDE_INT shadow_size
 	= shadow_mem_size (size_in_bytes);
       const unsigned int shadow_align

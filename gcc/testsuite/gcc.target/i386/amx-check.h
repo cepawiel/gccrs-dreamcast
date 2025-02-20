@@ -213,6 +213,12 @@ main ()
 #ifdef AMX_BF16
       && __builtin_cpu_supports ("amx-bf16")
 #endif
+#ifdef AMX_FP16
+      && __builtin_cpu_supports ("amx-fp16")
+#endif
+#ifdef AMX_COMPLEX
+      && __builtin_cpu_supports ("amx-complex")
+#endif
 #ifdef __linux__
       && request_perm_xtile_data ()
 #endif

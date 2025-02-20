@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 2011-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 2011-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -23,7 +23,6 @@
 --                                                                          --
 ------------------------------------------------------------------------------
 
-with Aspects;        use Aspects;
 with Atree;          use Atree;
 with Einfo;          use Einfo;
 with Einfo.Entities; use Einfo.Entities;
@@ -1316,7 +1315,7 @@ package body Sem_Dim is
 
          --  Look at the named components right after the positional components
 
-         if not Present (Next (Comp))
+         if No (Next (Comp))
            and then List_Containing (Comp) = Exps
          then
             Comp := First (Comp_Ass);
@@ -2922,7 +2921,6 @@ package body Sem_Dim is
                Subtype_Indication  => New_Occurrence_Of (Btyp_Of_L, Loc));
 
          Append (New_Aspect, New_Aspects);
-         Set_Parent (New_Aspects, New_Subtyp_Decl_For_L);
          Set_Aspect_Specifications (New_Subtyp_Decl_For_L, New_Aspects);
 
          Analyze (New_Subtyp_Decl_For_L);

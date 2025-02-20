@@ -1,4 +1,4 @@
-/* Copyright (C) 1988-2022 Free Software Foundation, Inc.
+/* Copyright (C) 1988-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -66,7 +66,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "pass_manager.h"
 #include "target-globals.h"
 #include "gimple-iterator.h"
-#include "tree-vectorizer.h"
 #include "shrink-wrap.h"
 #include "builtins.h"
 #include "rtl-iter.h"
@@ -83,6 +82,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "intl.h"
 #include "ifcvt.h"
 #include "symbol-summary.h"
+#include "sreal.h"
+#include "ipa-cp.h"
 #include "ipa-prop.h"
 #include "ipa-fnsummary.h"
 #include "wide-int-bitmask.h"
@@ -91,6 +92,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "dwarf2out.h"
 #include "i386-builtins.h"
 #include "i386-features.h"
+#include "i386-expand.h"
 
 const char * const xlogue_layout::STUB_BASE_NAMES[XLOGUE_STUB_COUNT] = {
   "savms64",
@@ -296,6 +298,8 @@ scalar_chain::scalar_chain (enum machine_mode smode_, enum machine_mode vmode_)
 
   n_sse_to_integer = 0;
   n_integer_to_sse = 0;
+
+  max_visits = x86_stv_max_visits;
 }
 
 /* Free chain's data.  */
@@ -314,14 +318,12 @@ scalar_chain::~scalar_chain ()
 void
 scalar_chain::add_to_queue (unsigned insn_uid)
 {
-  if (bitmap_bit_p (insns, insn_uid)
-      || bitmap_bit_p (queue, insn_uid))
+  if (!bitmap_set_bit (queue, insn_uid))
     return;
 
   if (dump_file)
     fprintf (dump_file, "  Adding insn %d into chain's #%d queue\n",
 	     insn_uid, chain_id);
-  bitmap_set_bit (queue, insn_uid);
 }
 
 /* For DImode conversion, mark register defined by DEF as requiring
@@ -356,16 +358,17 @@ scalar_chain::mark_dual_mode_def (df_ref def)
 }
 
 /* Check REF's chain to add new insns into a queue
-   and find registers requiring conversion.  */
+   and find registers requiring conversion.  Return true if OK, false
+   if the analysis was aborted.  */
 
-void
-scalar_chain::analyze_register_chain (bitmap candidates, df_ref ref)
+bool
+scalar_chain::analyze_register_chain (bitmap candidates, df_ref ref,
+				      bitmap disallowed)
 {
   df_link *chain;
+  bool mark_def = false;
 
-  gcc_assert (bitmap_bit_p (insns, DF_REF_INSN_UID (ref))
-	      || bitmap_bit_p (candidates, DF_REF_INSN_UID (ref)));
-  add_to_queue (DF_REF_INSN_UID (ref));
+  gcc_checking_assert (bitmap_bit_p (insns, DF_REF_INSN_UID (ref)));
 
   for (chain = DF_REF_CHAIN (ref); chain; chain = chain->next)
     {
@@ -373,6 +376,9 @@ scalar_chain::analyze_register_chain (bitmap candidates, df_ref ref)
 
       if (!NONDEBUG_INSN_P (DF_REF_INSN (chain->ref)))
 	continue;
+
+      if (--max_visits == 0)
+	return false;
 
       if (!DF_REF_REG_MEM_P (chain->ref))
 	{
@@ -384,6 +390,10 @@ scalar_chain::analyze_register_chain (bitmap candidates, df_ref ref)
 	      add_to_queue (uid);
 	      continue;
 	    }
+
+	  /* If we run into parts of an aborted chain discovery abort.  */
+	  if (bitmap_bit_p (disallowed, uid))
+	    return false;
 	}
 
       if (DF_REF_REG_DEF_P (chain->ref))
@@ -398,23 +408,28 @@ scalar_chain::analyze_register_chain (bitmap candidates, df_ref ref)
 	  if (dump_file)
 	    fprintf (dump_file, "  r%d use in insn %d isn't convertible\n",
 		     DF_REF_REGNO (chain->ref), uid);
-	  mark_dual_mode_def (ref);
+	  mark_def = true;
 	}
     }
+
+  if (mark_def)
+    mark_dual_mode_def (ref);
+
+  return true;
 }
 
-/* Add instruction into a chain.  */
+/* Add instruction into a chain.  Return true if OK, false if the search
+   was aborted.  */
 
-void
-scalar_chain::add_insn (bitmap candidates, unsigned int insn_uid)
+bool
+scalar_chain::add_insn (bitmap candidates, unsigned int insn_uid,
+			bitmap disallowed)
 {
-  if (bitmap_bit_p (insns, insn_uid))
-    return;
+  if (!bitmap_set_bit (insns, insn_uid))
+    return true;
 
   if (dump_file)
     fprintf (dump_file, "  Adding insn %d to chain #%d\n", insn_uid, chain_id);
-
-  bitmap_set_bit (insns, insn_uid);
 
   rtx_insn *insn = DF_INSN_UID_GET (insn_uid)->insn;
   rtx def_set = single_set (insn);
@@ -428,17 +443,27 @@ scalar_chain::add_insn (bitmap candidates, unsigned int insn_uid)
   df_ref ref;
   for (ref = DF_INSN_UID_DEFS (insn_uid); ref; ref = DF_REF_NEXT_LOC (ref))
     if (!HARD_REGISTER_P (DF_REF_REG (ref)))
-      analyze_register_chain (candidates, ref);
+      if (!analyze_register_chain (candidates, ref, disallowed))
+	return false;
+
+  /* The operand(s) of VEC_SELECT don't need to be converted/convertible.  */
+  if (def_set && GET_CODE (SET_SRC (def_set)) == VEC_SELECT)
+    return true;
+
   for (ref = DF_INSN_UID_USES (insn_uid); ref; ref = DF_REF_NEXT_LOC (ref))
     if (!DF_REF_REG_MEM_P (ref))
-      analyze_register_chain (candidates, ref);
+      if (!analyze_register_chain (candidates, ref, disallowed))
+	return false;
+
+  return true;
 }
 
 /* Build new chain starting from insn INSN_UID recursively
-   adding all dependent uses and definitions.  */
+   adding all dependent uses and definitions.  Return true if OK, false
+   if the chain discovery was aborted.  */
 
-void
-scalar_chain::build (bitmap candidates, unsigned insn_uid)
+bool
+scalar_chain::build (bitmap candidates, unsigned insn_uid, bitmap disallowed)
 {
   queue = BITMAP_ALLOC (NULL);
   bitmap_set_bit (queue, insn_uid);
@@ -451,7 +476,17 @@ scalar_chain::build (bitmap candidates, unsigned insn_uid)
       insn_uid = bitmap_first_set_bit (queue);
       bitmap_clear_bit (queue, insn_uid);
       bitmap_clear_bit (candidates, insn_uid);
-      add_insn (candidates, insn_uid);
+      if (!add_insn (candidates, insn_uid, disallowed))
+	{
+	  /* If we aborted the search put sofar found insn on the set of
+	     disallowed insns so that further searches reaching them also
+	     abort and thus we abort the whole but yet undiscovered chain.  */
+	  bitmap_ior_into (disallowed, insns);
+	  if (dump_file)
+	    fprintf (dump_file, "Aborted chain #%d discovery\n", chain_id);
+	  BITMAP_FREE (queue);
+	  return false;
+	}
     }
 
   if (dump_file)
@@ -475,6 +510,8 @@ scalar_chain::build (bitmap candidates, unsigned insn_uid)
     }
 
   BITMAP_FREE (queue);
+
+  return true;
 }
 
 /* Return a cost of building a vector costant
@@ -528,110 +565,195 @@ general_scalar_chain::compute_convert_gain ()
       else if (MEM_P (src) && REG_P (dst))
 	igain += m * ix86_cost->int_load[2] - ix86_cost->sse_load[sse_cost_idx];
       else
-	switch (GET_CODE (src))
-	  {
-	  case ASHIFT:
-	  case ASHIFTRT:
-	  case LSHIFTRT:
-	    if (m == 2)
-	      {
-		if (INTVAL (XEXP (src, 1)) >= 32)
-		  igain += ix86_cost->add;
-		else
-		  igain += ix86_cost->shift_const;
-	      }
+	{
+	  /* For operations on memory operands, include the overhead
+	     of explicit load and store instructions.  */
+	  if (MEM_P (dst))
+	    igain += optimize_insn_for_size_p ()
+		     ? -COSTS_N_BYTES (8)
+		     : (m * (ix86_cost->int_load[2]
+			     + ix86_cost->int_store[2])
+			- (ix86_cost->sse_load[sse_cost_idx] +
+			   ix86_cost->sse_store[sse_cost_idx]));
 
-	    igain += ix86_cost->shift_const - ix86_cost->sse_op;
+	  switch (GET_CODE (src))
+	    {
+	    case ASHIFT:
+	    case ASHIFTRT:
+	    case LSHIFTRT:
+	      if (m == 2)
+		{
+		  if (INTVAL (XEXP (src, 1)) >= 32)
+		    igain += ix86_cost->add;
+		  /* Gain for extend highpart case.  */
+		  else if (GET_CODE (XEXP (src, 0)) == ASHIFT)
+		    igain += ix86_cost->shift_const - ix86_cost->sse_op;
+		  else
+		    igain += ix86_cost->shift_const;
+		}
 
-	    if (CONST_INT_P (XEXP (src, 0)))
-	      igain -= vector_const_cost (XEXP (src, 0));
-	    break;
+	      igain += ix86_cost->shift_const - ix86_cost->sse_op;
 
-	  case AND:
-	  case IOR:
-	  case XOR:
-	  case PLUS:
-	  case MINUS:
-	    igain += m * ix86_cost->add - ix86_cost->sse_op;
-	    /* Additional gain for andnot for targets without BMI.  */
-	    if (GET_CODE (XEXP (src, 0)) == NOT
-		&& !TARGET_BMI)
-	      igain += m * ix86_cost->add;
+	      if (CONST_INT_P (XEXP (src, 0)))
+		igain -= vector_const_cost (XEXP (src, 0));
+	      break;
 
-	    if (CONST_INT_P (XEXP (src, 0)))
-	      igain -= vector_const_cost (XEXP (src, 0));
-	    if (CONST_INT_P (XEXP (src, 1)))
-	      igain -= vector_const_cost (XEXP (src, 1));
-	    break;
+	    case ROTATE:
+	    case ROTATERT:
+	      igain += m * ix86_cost->shift_const;
+	      if (TARGET_AVX512VL)
+		igain -= ix86_cost->sse_op;
+	      else if (smode == DImode)
+		{
+		  int bits = INTVAL (XEXP (src, 1));
+		  if ((bits & 0x0f) == 0)
+		    igain -= ix86_cost->sse_op;
+		  else if ((bits & 0x07) == 0)
+		    igain -= 2 * ix86_cost->sse_op;
+		  else
+		    igain -= 3 * ix86_cost->sse_op;
+		}
+	      else if (INTVAL (XEXP (src, 1)) == 16)
+		igain -= ix86_cost->sse_op;
+	      else
+		igain -= 2 * ix86_cost->sse_op;
+	      break;
 
-	  case NEG:
-	  case NOT:
-	    igain -= ix86_cost->sse_op + COSTS_N_INSNS (1);
-
-	    if (GET_CODE (XEXP (src, 0)) != ABS)
-	      {
+	    case AND:
+	    case IOR:
+	    case XOR:
+	    case PLUS:
+	    case MINUS:
+	      igain += m * ix86_cost->add - ix86_cost->sse_op;
+	      /* Additional gain for andnot for targets without BMI.  */
+	      if (GET_CODE (XEXP (src, 0)) == NOT
+		  && !TARGET_BMI)
 		igain += m * ix86_cost->add;
-		break;
-	      }
-	    /* FALLTHRU */
 
-	  case ABS:
-	  case SMAX:
-	  case SMIN:
-	  case UMAX:
-	  case UMIN:
-	    /* We do not have any conditional move cost, estimate it as a
-	       reg-reg move.  Comparisons are costed as adds.  */
-	    igain += m * (COSTS_N_INSNS (2) + ix86_cost->add);
-	    /* Integer SSE ops are all costed the same.  */
-	    igain -= ix86_cost->sse_op;
-	    break;
+	      if (CONST_INT_P (XEXP (src, 0)))
+		igain -= vector_const_cost (XEXP (src, 0));
+	      if (CONST_INT_P (XEXP (src, 1)))
+		igain -= vector_const_cost (XEXP (src, 1));
+	      if (MEM_P (XEXP (src, 1)))
+		{
+		  if (optimize_insn_for_size_p ())
+		    igain -= COSTS_N_BYTES (m == 2 ? 3 : 5);
+		  else
+		    igain += m * ix86_cost->int_load[2]
+			     - ix86_cost->sse_load[sse_cost_idx];
+		}
+	      break;
 
-	  case COMPARE:
-	    /* Assume comparison cost is the same.  */
-	    break;
+	    case NEG:
+	    case NOT:
+	      igain -= ix86_cost->sse_op + COSTS_N_INSNS (1);
 
-	  case CONST_INT:
-	    if (REG_P (dst))
-	      {
-		if (optimize_insn_for_size_p ())
-		  {
-		    /* xor (2 bytes) vs. xorps (3 bytes).  */
-		    if (src == const0_rtx)
-		      igain -= COSTS_N_BYTES (1);
-		    /* movdi_internal vs. movv2di_internal.  */
-		    /* => mov (5 bytes) vs. movaps (7 bytes).  */
-		    else if (x86_64_immediate_operand (src, SImode))
-		      igain -= COSTS_N_BYTES (2);
-		    else
-		      /* ??? Larger immediate constants are placed in the
-			 constant pool, where the size benefit/impact of
-			 STV conversion is affected by whether and how
-			 often each constant pool entry is shared/reused.
-			 The value below is empirically derived from the
-			 CSiBE benchmark (and the optimal value may drift
-			 over time).  */
-		      igain += COSTS_N_BYTES (0);
-		  }
-		else
-		  {
-		    /* DImode can be immediate for TARGET_64BIT
-		       and SImode always.  */
-		    igain += m * COSTS_N_INSNS (1);
-		    igain -= vector_const_cost (src);
-		  }
-	      }
-	    else if (MEM_P (dst))
-	      {
-		igain += (m * ix86_cost->int_store[2]
-			  - ix86_cost->sse_store[sse_cost_idx]);
-		igain -= vector_const_cost (src);
-	      }
-	    break;
+	      if (GET_CODE (XEXP (src, 0)) != ABS)
+		{
+		  igain += m * ix86_cost->add;
+		  break;
+		}
+	      /* FALLTHRU */
 
-	  default:
-	    gcc_unreachable ();
-	  }
+	    case ABS:
+	    case SMAX:
+	    case SMIN:
+	    case UMAX:
+	    case UMIN:
+	      /* We do not have any conditional move cost, estimate it as a
+		 reg-reg move.  Comparisons are costed as adds.  */
+	      igain += m * (COSTS_N_INSNS (2) + ix86_cost->add);
+	      /* Integer SSE ops are all costed the same.  */
+	      igain -= ix86_cost->sse_op;
+	      break;
+
+	    case COMPARE:
+	      if (XEXP (src, 1) != const0_rtx)
+		{
+		  /* cmp vs. pxor;pshufd;ptest.  */
+		  igain += COSTS_N_INSNS (m - 3);
+		}
+	      else if (GET_CODE (XEXP (src, 0)) != AND)
+		{
+		  /* test vs. pshufd;ptest.  */
+		  igain += COSTS_N_INSNS (m - 2);
+		}
+	      else if (GET_CODE (XEXP (XEXP (src, 0), 0)) != NOT)
+		{
+		  /* and;test vs. pshufd;ptest.  */
+		  igain += COSTS_N_INSNS (2 * m - 2);
+		}
+	      else if (TARGET_BMI)
+		{
+		  /* andn;test vs. pandn;pshufd;ptest.  */
+		  igain += COSTS_N_INSNS (2 * m - 3);
+		}
+	      else
+		{
+		  /* not;and;test vs. pandn;pshufd;ptest.  */
+		  igain += COSTS_N_INSNS (3 * m - 3);
+		}
+	      break;
+
+	    case CONST_INT:
+	      if (REG_P (dst))
+		{
+		  if (optimize_insn_for_size_p ())
+		    {
+		      /* xor (2 bytes) vs. xorps (3 bytes).  */
+		      if (src == const0_rtx)
+			igain -= COSTS_N_BYTES (1);
+		      /* movdi_internal vs. movv2di_internal.  */
+		      /* => mov (5 bytes) vs. movaps (7 bytes).  */
+		      else if (x86_64_immediate_operand (src, SImode))
+			igain -= COSTS_N_BYTES (2);
+		      else
+			/* ??? Larger immediate constants are placed in the
+			   constant pool, where the size benefit/impact of
+			   STV conversion is affected by whether and how
+			   often each constant pool entry is shared/reused.
+			   The value below is empirically derived from the
+			   CSiBE benchmark (and the optimal value may drift
+			   over time).  */
+			igain += COSTS_N_BYTES (0);
+		    }
+		  else
+		    {
+		      /* DImode can be immediate for TARGET_64BIT
+			 and SImode always.  */
+		      igain += m * COSTS_N_INSNS (1);
+		      igain -= vector_const_cost (src);
+		    }
+		}
+	      else if (MEM_P (dst))
+		{
+		  igain += (m * ix86_cost->int_store[2]
+			    - ix86_cost->sse_store[sse_cost_idx]);
+		  igain -= vector_const_cost (src);
+		}
+	      break;
+
+	    case VEC_SELECT:
+	      if (XVECEXP (XEXP (src, 1), 0, 0) == const0_rtx)
+		{
+		  // movd (4 bytes) replaced with movdqa (4 bytes).
+		  if (!optimize_insn_for_size_p ())
+		    igain += ix86_cost->sse_to_integer - ix86_cost->xmm_move;
+		}
+	      else
+		{
+		  // pshufd; movd replaced with pshufd.
+		  if (optimize_insn_for_size_p ())
+		    igain += COSTS_N_BYTES (4);
+		  else
+		    igain += ix86_cost->sse_to_integer;
+		}
+	      break;
+
+	    default:
+	      gcc_unreachable ();
+	    }
+	}
 
       if (igain != 0 && dump_file)
 	{
@@ -645,11 +767,33 @@ general_scalar_chain::compute_convert_gain ()
     fprintf (dump_file, "  Instruction conversion gain: %d\n", gain);
 
   /* Cost the integer to sse and sse to integer moves.  */
-  cost += n_sse_to_integer * ix86_cost->sse_to_integer;
-  /* ???  integer_to_sse but we only have that in the RA cost table.
-     Assume sse_to_integer/integer_to_sse are the same which they
-     are at the moment.  */
-  cost += n_integer_to_sse * ix86_cost->sse_to_integer;
+  if (!optimize_function_for_size_p (cfun))
+    {
+      cost += n_sse_to_integer * ix86_cost->sse_to_integer;
+      /* ???  integer_to_sse but we only have that in the RA cost table.
+	      Assume sse_to_integer/integer_to_sse are the same which they
+	      are at the moment.  */
+      cost += n_integer_to_sse * ix86_cost->sse_to_integer;
+    }
+  else if (TARGET_64BIT || smode == SImode)
+    {
+      cost += n_sse_to_integer * COSTS_N_BYTES (4);
+      cost += n_integer_to_sse * COSTS_N_BYTES (4);
+    }
+  else if (TARGET_SSE4_1)
+    {
+      /* vmovd (4 bytes) + vpextrd (6 bytes).  */
+      cost += n_sse_to_integer * COSTS_N_BYTES (10);
+      /* vmovd (4 bytes) + vpinsrd (6 bytes).  */
+      cost += n_integer_to_sse * COSTS_N_BYTES (10);
+    }
+  else
+    {
+      /* movd (4 bytes) + psrlq (5 bytes) + movd (4 bytes).  */
+      cost += n_sse_to_integer * COSTS_N_BYTES (13);
+      /* movd (4 bytes) + movd (4 bytes) + unpckldq (4 bytes).  */
+      cost += n_integer_to_sse * COSTS_N_BYTES (12);
+    }
 
   if (dump_file)
     fprintf (dump_file, "  Registers conversion cost: %d\n", cost);
@@ -846,7 +990,8 @@ general_scalar_chain::convert_op (rtx *op, rtx_insn *insn)
 {
   *op = copy_rtx_if_shared (*op);
 
-  if (GET_CODE (*op) == NOT)
+  if (GET_CODE (*op) == NOT
+      || GET_CODE (*op) == ASHIFT)
     {
       convert_op (&XEXP (*op, 0), insn);
       PUT_MODE (*op, vmode);
@@ -914,12 +1059,45 @@ general_scalar_chain::convert_op (rtx *op, rtx_insn *insn)
     }
 }
 
-/* Convert COMPARE to vector mode.  */
+/* Convert CCZmode COMPARE to vector mode.  */
 
 rtx
 scalar_chain::convert_compare (rtx op1, rtx op2, rtx_insn *insn)
 {
   rtx src, tmp;
+
+  /* Handle any REG_EQUAL notes.  */
+  tmp = find_reg_equal_equiv_note (insn);
+  if (tmp)
+    {
+      if (GET_CODE (XEXP (tmp, 0)) == COMPARE
+	  && GET_MODE (XEXP (tmp, 0)) == CCZmode
+	  && REG_P (XEXP (XEXP (tmp, 0), 0)))
+	{
+	  rtx *op = &XEXP (XEXP (tmp, 0), 1);
+	  if (CONST_SCALAR_INT_P (*op))
+	    {
+	      if (constm1_operand (*op, GET_MODE (*op)))
+		*op = CONSTM1_RTX (vmode);
+	      else
+		{
+		  unsigned n = GET_MODE_NUNITS (vmode);
+		  rtx *v = XALLOCAVEC (rtx, n);
+		  v[0] = *op;
+		  for (unsigned i = 1; i < n; ++i)
+		    v[i] = const0_rtx;
+		  *op = gen_rtx_CONST_VECTOR (vmode, gen_rtvec_v (n, v));
+		}
+	      tmp = NULL_RTX;
+	    }
+	  else if (REG_P (*op))
+	    tmp = NULL_RTX;
+	}
+
+      if (tmp)
+	remove_note (insn, tmp);
+    }
+
   /* Comparison against anything other than zero, requires an XOR.  */
   if (op2 != const0_rtx)
     {
@@ -963,7 +1141,7 @@ scalar_chain::convert_compare (rtx op1, rtx op2, rtx_insn *insn)
 	  emit_insn_before (gen_rtx_SET (tmp, op11), insn);
 	  op11 = tmp;
 	}
-      return gen_rtx_UNSPEC (CCmode, gen_rtvec (2, op11, op12),
+      return gen_rtx_UNSPEC (CCZmode, gen_rtvec (2, op11, op12),
 			     UNSPEC_PTEST);
     }
   else
@@ -992,7 +1170,7 @@ scalar_chain::convert_compare (rtx op1, rtx op2, rtx_insn *insn)
       src = tmp;
     }
 
-  return gen_rtx_UNSPEC (CCmode, gen_rtvec (2, src, src), UNSPEC_PTEST);
+  return gen_rtx_UNSPEC (CCZmode, gen_rtvec (2, src, src), UNSPEC_PTEST);
 }
 
 /* Helper function for converting INSN to vector mode.  */
@@ -1061,6 +1239,99 @@ scalar_chain::convert_insn_common (rtx_insn *insn)
 	}
 }
 
+/* Convert INSN which is an SImode or DImode rotation by a constant
+   to vector mode.  CODE is either ROTATE or ROTATERT with operands
+   OP0 and OP1.  Returns the SET_SRC of the last instruction in the
+   resulting sequence, which is emitted before INSN.  */
+
+rtx
+general_scalar_chain::convert_rotate (enum rtx_code code, rtx op0, rtx op1,
+				      rtx_insn *insn)
+{
+  int bits = INTVAL (op1);
+  rtx pat, result;
+
+  convert_op (&op0, insn);
+  if (bits == 0)
+    return op0;
+
+  if (smode == DImode)
+    {
+      if (code == ROTATE)
+	bits = 64 - bits;
+      if (bits == 32)
+	{
+	  rtx tmp1 = gen_reg_rtx (V4SImode);
+	  pat = gen_sse2_pshufd (tmp1, gen_lowpart (V4SImode, op0),
+				 GEN_INT (225));
+	  emit_insn_before (pat, insn);
+	  result = gen_lowpart (V2DImode, tmp1);
+	}
+      else if (TARGET_AVX512VL)
+	result = simplify_gen_binary (code, V2DImode, op0, op1);
+      else if (bits == 16 || bits == 48)
+	{
+	  rtx tmp1 = gen_reg_rtx (V8HImode);
+	  pat = gen_sse2_pshuflw (tmp1, gen_lowpart (V8HImode, op0),
+				  GEN_INT (bits == 16 ? 57 : 147));
+	  emit_insn_before (pat, insn);
+	  result = gen_lowpart (V2DImode, tmp1);
+	}
+      else if ((bits & 0x07) == 0)
+	{
+	  rtx tmp1 = gen_reg_rtx (V4SImode);
+	  pat = gen_sse2_pshufd (tmp1, gen_lowpart (V4SImode, op0),
+				 GEN_INT (68));
+	  emit_insn_before (pat, insn);
+	  rtx tmp2 = gen_reg_rtx (V1TImode);
+	  pat = gen_sse2_lshrv1ti3 (tmp2, gen_lowpart (V1TImode, tmp1),
+				    GEN_INT (bits));
+	  emit_insn_before (pat, insn);
+	  result = gen_lowpart (V2DImode, tmp2);
+	}
+      else
+	{
+	  rtx tmp1 = gen_reg_rtx (V4SImode);
+	  pat = gen_sse2_pshufd (tmp1, gen_lowpart (V4SImode, op0),
+				 GEN_INT (20));
+	  emit_insn_before (pat, insn);
+	  rtx tmp2 = gen_reg_rtx (V2DImode);
+	  pat = gen_lshrv2di3 (tmp2, gen_lowpart (V2DImode, tmp1),
+			       GEN_INT (bits & 31));
+	  emit_insn_before (pat, insn);
+	  rtx tmp3 = gen_reg_rtx (V4SImode);
+	  pat = gen_sse2_pshufd (tmp3, gen_lowpart (V4SImode, tmp2),
+				 GEN_INT (bits > 32 ? 34 : 136));
+	  emit_insn_before (pat, insn);
+	  result = gen_lowpart (V2DImode, tmp3);
+	}
+    }
+  else if (bits == 16)
+    {
+      rtx tmp1 = gen_reg_rtx (V8HImode);
+      pat = gen_sse2_pshuflw (tmp1, gen_lowpart (V8HImode, op0), GEN_INT (225));
+      emit_insn_before (pat, insn);
+      result = gen_lowpart (V4SImode, tmp1);
+    }
+  else if (TARGET_AVX512VL)
+    result = simplify_gen_binary (code, V4SImode, op0, op1);
+  else
+    {
+      if (code == ROTATE)
+	bits = 32 - bits;
+
+      rtx tmp1 = gen_reg_rtx (V4SImode);
+      emit_insn_before (gen_sse2_pshufd (tmp1, op0, GEN_INT (224)), insn);
+      rtx tmp2 = gen_reg_rtx (V2DImode);
+      pat = gen_lshrv2di3 (tmp2, gen_lowpart (V2DImode, tmp1),
+			   GEN_INT (bits));
+      emit_insn_before (pat, insn);
+      result = gen_lowpart (V4SImode, tmp2);
+    }
+
+  return result;
+}
+
 /* Convert INSN to vector mode.  */
 
 void
@@ -1116,6 +1387,12 @@ general_scalar_chain::convert_insn (rtx_insn *insn)
       PUT_MODE (src, vmode);
       break;
 
+    case ROTATE:
+    case ROTATERT:
+      src = convert_rotate (GET_CODE (src), XEXP (src, 0), XEXP (src, 1),
+			    insn);
+      break;
+
     case NEG:
       src = XEXP (src, 0);
 
@@ -1159,12 +1436,30 @@ general_scalar_chain::convert_insn (rtx_insn *insn)
       break;
 
     case COMPARE:
-      dst = gen_rtx_REG (CCmode, FLAGS_REG);
+      dst = gen_rtx_REG (CCZmode, FLAGS_REG);
       src = convert_compare (XEXP (src, 0), XEXP (src, 1), insn);
       break;
 
     case CONST_INT:
       convert_op (&src, insn);
+      break;
+
+    case VEC_SELECT:
+      if (XVECEXP (XEXP (src, 1), 0, 0) == const0_rtx)
+	src = XEXP (src, 0);
+      else if (smode == DImode)
+	{
+	  rtx tmp = gen_lowpart (V1TImode, XEXP (src, 0));
+	  dst = gen_lowpart (V1TImode, dst);
+	  src = gen_rtx_LSHIFTRT (V1TImode, tmp, GEN_INT (64));
+	}
+      else
+	{
+	  rtx tmp = XVECEXP (XEXP (src, 1), 0, 0);
+	  rtvec vec = gen_rtvec (4, tmp, tmp, tmp, tmp);
+	  rtx par = gen_rtx_PARALLEL (VOIDmode, vec);
+	  src = gen_rtx_VEC_SELECT (vmode, XEXP (src, 0), par);
+	}
       break;
 
     default:
@@ -1456,6 +1751,19 @@ timode_scalar_chain::fix_debug_reg_uses (rtx reg)
     }
 }
 
+/* Helper function to convert immediate constant X to V1TImode.  */
+static rtx
+timode_convert_cst (rtx x)
+{
+  /* Prefer all ones vector in case of -1.  */
+  if (constm1_operand (x, TImode))
+    return CONSTM1_RTX (V1TImode);
+
+  rtx *v = XALLOCAVEC (rtx, 1);
+  v[0] = x;
+  return gen_rtx_CONST_VECTOR (V1TImode, gen_rtvec_v (1, v));
+}
+
 /* Convert operand OP in INSN from TImode to V1TImode.  */
 
 void
@@ -1482,18 +1790,8 @@ timode_scalar_chain::convert_op (rtx *op, rtx_insn *insn)
     }
   else if (CONST_SCALAR_INT_P (*op))
     {
-      rtx vec_cst;
       rtx tmp = gen_reg_rtx (V1TImode);
-
-      /* Prefer all ones vector in case of -1.  */
-      if (constm1_operand (*op, TImode))
-	vec_cst = CONSTM1_RTX (V1TImode);
-      else
-	{
-	  rtx *v = XALLOCAVEC (rtx, 1);
-	  v[0] = *op;
-	  vec_cst = gen_rtx_CONST_VECTOR (V1TImode, gen_rtvec_v (1, v));
-	}
+      rtx vec_cst = timode_convert_cst (*op);
 
       if (!standard_sse_constant_p (vec_cst, V1TImode))
 	{
@@ -1534,16 +1832,11 @@ timode_scalar_chain::convert_insn (rtx_insn *insn)
 	}
       if (GET_MODE (dst) == V1TImode)
 	{
-	  tmp = find_reg_equal_equiv_note (insn);
-	  if (tmp)
-	    {
-	      if (GET_MODE (XEXP (tmp, 0)) == TImode)
-		PUT_MODE (XEXP (tmp, 0), V1TImode);
-	      else if (CONST_SCALAR_INT_P (XEXP (tmp, 0)))
-		XEXP (tmp, 0)
-		  = gen_rtx_CONST_VECTOR (V1TImode,
-					  gen_rtvec (1, XEXP (tmp, 0)));
-	    }
+	  /* It might potentially be helpful to convert REG_EQUAL notes,
+	     but for now we just remove them.  */
+	  rtx note = find_reg_equal_equiv_note (insn);
+	  if (note)
+	    remove_note (insn, note);
 	}
       break;
     case MEM:
@@ -1557,10 +1850,11 @@ timode_scalar_chain::convert_insn (rtx_insn *insn)
   switch (GET_CODE (src))
     {
     case REG:
-      PUT_MODE (src, V1TImode);
-      /* Call fix_debug_reg_uses only if SRC is never defined.  */
-      if (!DF_REG_DEF_CHAIN (REGNO (src)))
-	fix_debug_reg_uses (src);
+      if (GET_MODE (src) == TImode)
+	{
+	  PUT_MODE (src, V1TImode);
+	  fix_debug_reg_uses (src);
+	}
       break;
 
     case MEM:
@@ -1572,14 +1866,25 @@ timode_scalar_chain::convert_insn (rtx_insn *insn)
 	{
 	  /* Since there are no instructions to store 128-bit constant,
 	     temporary register usage is required.  */
+	  bool use_move;
 	  start_sequence ();
-	  src = gen_rtx_CONST_VECTOR (V1TImode, gen_rtvec (1, src));
-	  src = validize_mem (force_const_mem (V1TImode, src));
+	  tmp = ix86_convert_const_wide_int_to_broadcast (TImode, src);
+	  if (tmp)
+	    {
+	      src = lowpart_subreg (V1TImode, tmp, TImode);
+	      use_move = true;
+	    }
+	  else
+	    {
+	      src = timode_convert_cst (src);
+	      src = validize_mem (force_const_mem (V1TImode, src));
+	      use_move = MEM_P (dst);
+	    }
 	  rtx_insn *seq = get_insns ();
 	  end_sequence ();
 	  if (seq)
 	    emit_insn_before (seq, insn);
-	  if (MEM_P (dst))
+	  if (use_move)
 	    {
 	      tmp = gen_reg_rtx (V1TImode);
 	      emit_insn_before (gen_rtx_SET (tmp, src), insn);
@@ -1647,7 +1952,7 @@ timode_scalar_chain::convert_insn (rtx_insn *insn)
       break;
 
     case COMPARE:
-      dst = gen_rtx_REG (CCmode, FLAGS_REG);
+      dst = gen_rtx_REG (CCZmode, FLAGS_REG);
       src = convert_compare (XEXP (src, 0), XEXP (src, 1), insn);
       break;
 
@@ -1756,6 +2061,19 @@ pseudo_reg_set (rtx_insn *insn)
   return set;
 }
 
+/* Return true if the register REG is defined in a single DEF chain.
+   If it is defined in more than one DEF chains, we may not be able
+   to convert it in all chains.  */
+
+static bool
+single_def_chain_p (rtx reg)
+{
+  df_ref ref = DF_REG_DEF_CHAIN (REGNO (reg));
+  if (!ref)
+    return false;
+  return DF_REF_NEXT_REG (ref) == nullptr;
+}
+
 /* Check if comparison INSN may be transformed into vector comparison.
    Currently we transform equality/inequality checks which look like:
    (set (reg:CCZ 17 flags) (compare:CCZ (reg:TI x) (reg:TI y)))  */
@@ -1851,15 +2169,25 @@ general_scalar_to_vector_candidate_p (rtx_insn *insn, enum machine_mode mode)
   switch (GET_CODE (src))
     {
     case ASHIFTRT:
-      if (!TARGET_AVX512VL)
+      if (mode == DImode && !TARGET_AVX512VL)
 	return false;
       /* FALLTHRU */
 
     case ASHIFT:
     case LSHIFTRT:
+    case ROTATE:
+    case ROTATERT:
       if (!CONST_INT_P (XEXP (src, 1))
 	  || !IN_RANGE (INTVAL (XEXP (src, 1)), 0, GET_MODE_BITSIZE (mode)-1))
 	return false;
+
+      /* Check for extend highpart case.  */
+      if (mode != DImode
+	  || GET_CODE (src) != ASHIFTRT
+	  || GET_CODE (XEXP (src, 0)) != ASHIFT)
+	break;
+
+      src = XEXP (src, 0);
       break;
 
     case SMAX:
@@ -1917,6 +2245,16 @@ general_scalar_to_vector_candidate_p (rtx_insn *insn, enum machine_mode mode)
     case CONST_INT:
       return REG_P (dst);
 
+    case VEC_SELECT:
+      /* Excluding MEM_P (dst) avoids intefering with vpextr[dq].  */
+      return REG_P (dst)
+	     && REG_P (XEXP (src, 0))
+	     && GET_MODE (XEXP (src, 0)) == (mode == DImode ? V2DImode
+							    : V4SImode)
+	     && GET_CODE (XEXP (src, 1)) == PARALLEL
+	     && XVECLEN (XEXP (src, 1), 0) == 1
+	     && CONST_INT_P (XVECEXP (XEXP (src, 1), 0, 0));
+
     default:
       return false;
     }
@@ -1972,9 +2310,14 @@ timode_scalar_to_vector_candidate_p (rtx_insn *insn)
       && !TARGET_SSE_UNALIGNED_STORE_OPTIMAL)
     return false;
 
+  if (REG_P (dst) && !single_def_chain_p (dst))
+    return false;
+
   switch (GET_CODE (src))
     {
     case REG:
+      return single_def_chain_p (src);
+
     case CONST_WIDE_INT:
       return true;
 
@@ -2207,30 +2550,34 @@ convert_scalars_to_vector (bool timode_p)
       fprintf (dump_file, "There are no candidates for optimization.\n");
 
   for (unsigned i = 0; i <= 2; ++i)
-    while (!bitmap_empty_p (&candidates[i]))
-      {
-	unsigned uid = bitmap_first_set_bit (&candidates[i]);
-	scalar_chain *chain;
+    {
+      auto_bitmap disallowed;
+      bitmap_tree_view (&candidates[i]);
+      while (!bitmap_empty_p (&candidates[i]))
+	{
+	  unsigned uid = bitmap_first_set_bit (&candidates[i]);
+	  scalar_chain *chain;
 
-	if (cand_mode[i] == TImode)
-	  chain = new timode_scalar_chain;
-	else
-	  chain = new general_scalar_chain (cand_mode[i], cand_vmode[i]);
+	  if (cand_mode[i] == TImode)
+	    chain = new timode_scalar_chain;
+	  else
+	    chain = new general_scalar_chain (cand_mode[i], cand_vmode[i]);
 
-	/* Find instructions chain we want to convert to vector mode.
-	   Check all uses and definitions to estimate all required
-	   conversions.  */
-	chain->build (&candidates[i], uid);
+	  /* Find instructions chain we want to convert to vector mode.
+	     Check all uses and definitions to estimate all required
+	     conversions.  */
+	  if (chain->build (&candidates[i], uid, disallowed))
+	    {
+	      if (chain->compute_convert_gain () > 0)
+		converted_insns += chain->convert ();
+	      else if (dump_file)
+		fprintf (dump_file, "Chain #%d conversion is not profitable\n",
+			 chain->chain_id);
+	    }
 
-	if (chain->compute_convert_gain () > 0)
-	  converted_insns += chain->convert ();
-	else
-	  if (dump_file)
-	    fprintf (dump_file, "Chain #%d conversion is not profitable\n",
-		     chain->chain_id);
-
-	delete chain;
-      }
+	  delete chain;
+	}
+    }
 
   if (dump_file)
     fprintf (dump_file, "Total insns converted: %d\n", converted_insns);
@@ -2304,10 +2651,11 @@ convert_scalars_to_vector (bool timode_p)
 static unsigned int
 rest_of_handle_insert_vzeroupper (void)
 {
-  /* vzeroupper instructions are inserted immediately after reload to
-     account for possible spills from 256bit or 512bit registers.  The pass
-     reuses mode switching infrastructure by re-running mode insertion
-     pass, so disable entities that have already been processed.  */
+  /* vzeroupper instructions are inserted immediately after reload and
+     postreload_cse to clean up after it a little bit to account for possible
+     spills from 256bit or 512bit registers.  The pass reuses mode switching
+     infrastructure by re-running mode insertion pass, so disable entities
+     that have already been processed.  */
   for (int i = 0; i < MAX_386_ENTITIES; i++)
     ix86_optimize_mode_switching[i] = 0;
 
@@ -2316,6 +2664,33 @@ rest_of_handle_insert_vzeroupper (void)
   /* Call optimize_mode_switching.  */
   g->get_passes ()->execute_pass_mode_switching ();
 
+  /* LRA removes all REG_DEAD/REG_UNUSED notes and normally they
+     reappear in the IL only at the start of pass_rtl_dse2, which does
+     df_note_add_problem (); df_analyze ();
+     The vzeroupper is scheduled after postreload_cse pass and mode
+     switching computes the notes as well, the problem is that e.g.
+     pass_gcse2 doesn't maintain the notes, see PR113059 and
+     PR112760.  Remove the notes now to restore status quo ante
+     until we figure out how to maintain the notes or what else
+     to do.  */
+  basic_block bb;
+  rtx_insn *insn;
+  FOR_EACH_BB_FN (bb, cfun)
+    FOR_BB_INSNS (bb, insn)
+      if (NONDEBUG_INSN_P (insn))
+	{
+	  rtx *pnote = &REG_NOTES (insn);
+	  while (*pnote != 0)
+	    {
+	      if (REG_NOTE_KIND (*pnote) == REG_DEAD
+		  || REG_NOTE_KIND (*pnote) == REG_UNUSED)
+		*pnote = XEXP (*pnote, 1);
+	      else
+		pnote = &XEXP (*pnote, 1);
+	    }
+	}
+
+  df_remove_problem (df_note);
   df_analyze ();
   return 0;
 }
@@ -2345,8 +2720,7 @@ public:
   /* opt_pass methods: */
   bool gate (function *) final override
     {
-      return TARGET_AVX && TARGET_VZEROUPPER
-	&& flag_expensive_optimizations && !optimize_size;
+      return TARGET_AVX && TARGET_VZEROUPPER;
     }
 
   unsigned int execute (function *) final override
@@ -2812,7 +3186,7 @@ remove_partial_avx_dependency (void)
 	  insn = NEXT_INSN (insn);
 	}
       if (insn == BB_HEAD (bb))
-        set_insn = emit_insn_before (set, insn);
+	set_insn = emit_insn_before (set, insn);
       else
 	set_insn = emit_insn_after (set,
 				    insn ? PREV_INSN (insn) : BB_END (bb));
@@ -2986,7 +3360,7 @@ add_condition_to_bb (tree function_decl, tree version_decl,
       predicate_chain = TREE_CHAIN (predicate_chain);
       
       if (and_expr_var == NULL)
-        and_expr_var = cond_var;
+	and_expr_var = cond_var;
       else
 	{
 	  gimple *assign_stmt;
@@ -3003,7 +3377,7 @@ add_condition_to_bb (tree function_decl, tree version_decl,
     }
 
   if_else_stmt = gimple_build_cond (GT_EXPR, and_expr_var,
-	  		            integer_zero_node,
+				    integer_zero_node,
 				    NULL_TREE, NULL_TREE);
   gimple_set_block (if_else_stmt, DECL_INITIAL (function_decl));
   gimple_set_bb (if_else_stmt, new_bb);
@@ -3100,10 +3474,10 @@ dispatch_function_versions (tree dispatch_decl,
       tree predicate_chain = NULL_TREE;
       unsigned int priority;
       /* Get attribute string, parse it and find the right predicate decl.
-         The predicate function could be a lengthy combination of many
+	 The predicate function could be a lengthy combination of many
 	 features, like arch-type and various isa-variants.  */
       priority = get_builtin_code_for_version (version_decl,
-	 			               &predicate_chain);
+					       &predicate_chain);
 
       if (predicate_chain == NULL_TREE)
 	continue;
@@ -3121,7 +3495,7 @@ dispatch_function_versions (tree dispatch_decl,
      to execute,  which one should be dispatched?  In future, allow the user
      to specify a dispatch  priority next to the version.  */
   qsort (function_version_info, actual_versions,
-         sizeof (struct _function_version_info), feature_compare);
+	 sizeof (struct _function_version_info), feature_compare);
 
   for  (i = 0; i < actual_versions; ++i)
     *empty_bb = add_condition_to_bb (dispatch_decl,
@@ -3238,7 +3612,7 @@ ix86_get_function_versions_dispatcher (void *decl)
     {
       if (is_function_default_version
 	    (default_version_info->this_node->decl))
-        break;
+	break;
       default_version_info = default_version_info->next;
     }
 
@@ -3251,7 +3625,7 @@ ix86_get_function_versions_dispatcher (void *decl)
     {
       default_version_info->prev->next = default_version_info->next;
       if (default_version_info->next)
-        default_version_info->next->prev = default_version_info->prev;
+	default_version_info->next->prev = default_version_info->prev;
       first_v->prev = default_version_info;
       default_version_info->next = first_v;
       default_version_info->prev = NULL;

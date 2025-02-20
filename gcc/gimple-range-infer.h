@@ -1,5 +1,5 @@
 /* Header file for gimple range inference.
-   Copyright (C) 2022 Free Software Foundation, Inc.
+   Copyright (C) 2022-2024 Free Software Foundation, Inc.
    Contributed by Andrew MacLeod <amacleod@redhat.com>.
 
 This file is part of GCC.
@@ -62,6 +62,7 @@ public:
   void add_range (tree name, basic_block bb, const vrange &r);
   void add_nonzero (tree name, basic_block bb);
   bool has_range_p (tree name, basic_block bb);
+  bool has_range_p (basic_block bb);
   bool maybe_adjust_range (vrange &r, tree name, basic_block bb);
 private:
   class exit_range_head
@@ -79,7 +80,7 @@ private:
   bitmap m_seen;
   bitmap_obstack m_bitmaps;
   struct obstack m_list_obstack;
-  class obstack_vrange_allocator *m_range_allocator;
+  class vrange_allocator *m_range_allocator;
 };
 
 #endif // GCC_GIMPLE_RANGE_SIDE_H

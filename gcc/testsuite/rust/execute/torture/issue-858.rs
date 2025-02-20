@@ -1,7 +1,10 @@
-/* { dg-output "Result: 123\n" } */
+/* { dg-output "Result: 123\r*\n" } */
 extern "C" {
     fn printf(s: *const i8, ...);
 }
+
+#[lang = "sized"]
+pub trait Sized {}
 
 enum Foo<T> {
     A,

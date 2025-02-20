@@ -1,5 +1,5 @@
 /* Header file for SSA dominator optimizations.
-   Copyright (C) 2013-2022 Free Software Foundation, Inc.
+   Copyright (C) 2013-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -259,11 +259,6 @@ avail_exprs_stack::lookup_avail_expr (gimple *stmt, bool insert, bool tbaa_p,
     }
   else if (*slot == NULL)
     {
-      /* If we did not find the expression in the hash table, we may still
-	 be able to produce a result for some expressions.  */
-      tree retval = avail_exprs_stack::simplify_binary_operation (stmt,
-								  element);
-
       /* We have, in effect, allocated *SLOT for ELEMENT at this point.
 	 We must initialize *SLOT to a real entry, even if we found a
 	 way to prove ELEMENT was a constant after not finding ELEMENT
@@ -276,6 +271,11 @@ avail_exprs_stack::lookup_avail_expr (gimple *stmt, bool insert, bool tbaa_p,
 	 would become unreachable.  */
       class expr_hash_elt *element2 = new expr_hash_elt (element);
       *slot = element2;
+
+      /* If we did not find the expression in the hash table, we may still
+	 be able to produce a result for some expressions.  */
+      tree retval = avail_exprs_stack::simplify_binary_operation (stmt,
+								  element);
 
       record_expr (element2, NULL, '2');
       return retval;
@@ -574,7 +574,7 @@ hashable_expr_equal_p (const struct hashable_expr *expr0,
       && (TREE_CODE (type0) == ERROR_MARK
 	  || TREE_CODE (type1) == ERROR_MARK
 	  || TYPE_UNSIGNED (type0) != TYPE_UNSIGNED (type1)
-	  || TYPE_PRECISION (type0) != TYPE_PRECISION (type1)
+	  || element_precision (type0) != element_precision (type1)
 	  || TYPE_MODE (type0) != TYPE_MODE (type1)))
     return false;
 

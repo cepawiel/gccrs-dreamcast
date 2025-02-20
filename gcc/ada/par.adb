@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -48,6 +48,7 @@ with Sinfo;          use Sinfo;
 with Sinfo.Nodes;    use Sinfo.Nodes;
 with Sinfo.Utils;    use Sinfo.Utils;
 with Snames;         use Snames;
+with Stringt;        use Stringt;
 with Style;
 with Stylesw;        use Stylesw;
 with Table;
@@ -74,6 +75,15 @@ function Par (Configuration_Pragmas : Boolean) return List_Id is
    Save_Config_Attrs : Config_Switches_Type;
    --  Variable used to save values of config switches while we parse the
    --  new unit, to be restored on exit for proper recursive behavior.
+
+   Inside_Delta_Aggregate : Boolean := False;
+   --  True within a delta aggregate (but only after the "delta" token has
+   --  been scanned). Used to distinguish syntax errors from syntactically
+   --  correct "deep" delta aggregates (enabled via -gnatX0).
+   Save_Style_Checks : Style_Check_Options;
+   Save_Style_Check  : Boolean;
+   --  Variables for storing the original state of whether style checks should
+   --  be active in general and which particular ones should be checked.
 
    --------------------
    -- Error Recovery --
@@ -651,6 +661,8 @@ function Par (Configuration_Pragmas : Boolean) return List_Id is
       --  An appropriate error message, pointing to the token, is also issued
       --  if either this is the first occurrence of misuse of this identifier,
       --  or if Force_Msg is True.
+
+      function P_Interpolated_String_Literal return Node_Id;
 
       function P_Pragmas_Opt return List_Id;
       --  This function scans for a sequence of pragmas in other than a
@@ -1238,6 +1250,7 @@ function Par (Configuration_Pragmas : Boolean) return List_Id is
       procedure T_Range;
       procedure T_Record;
       procedure T_Right_Bracket;
+      procedure T_Right_Curly_Bracket;
       procedure T_Right_Paren;
       procedure T_Semicolon;
       procedure T_Then;
@@ -1592,6 +1605,11 @@ begin
    else
       Save_Config_Attrs := Save_Config_Switches;
 
+      --  Store the state of Style_Checks pragamas
+
+      Save_Style_Check := Style_Check;
+      Save_Style_Check_Options (Save_Style_Checks);
+
       --  The following loop runs more than once in syntax check mode
       --  where we allow multiple compilation units in the same file
       --  and in Multiple_Unit_Per_file mode where we skip units till
@@ -1649,6 +1667,7 @@ begin
          --  syntax mode we are interested in all units in the file.
 
          else
+
             declare
                Comp_Unit_Node : constant Node_Id := P_Compilation_Unit;
 
@@ -1734,6 +1753,13 @@ begin
 
          Restore_Config_Switches (Save_Config_Attrs);
       end loop;
+
+      --  Restore the state of Style_Checks after parsing the unit to
+      --  avoid parsed pragmas affecting other units.
+
+      Reset_Style_Check_Options;
+      Set_Style_Check_Options (Save_Style_Checks);
+      Style_Check := Save_Style_Check;
 
       --  Now that we have completely parsed the source file, we can complete
       --  the source file table entry.

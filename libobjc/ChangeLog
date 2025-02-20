@@ -1,3 +1,38 @@
+2023-10-22  Iain Sandoe  <iain@sandoe.co.uk>
+
+	* configure: Regenerate.
+	* configure.ac: Handle Darwin rpaths.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Alexander von Gluck IV  <kallisti5@unixzen.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  Nick Alcock  <nick.alcock@oracle.com>
+
+	* configure: Regenerate.
+
+2023-08-07  H.J. Lu  <hjl.tools@gmail.com>
+
+	* configure: Regenerate.
+
+2023-08-07  H.J. Lu  <hjl.tools@gmail.com>
+
+	* configure: Regenerate.
+
+2023-05-22  Iain Sandoe  <iain@sandoe.co.uk>
+	    Andrew Pinski  <apinski@marvell.com>
+
+	PR libobjc/109913
+	* encoding.c (RECORD_OR_UNION_TYPE_P, VECTOR_TYPE_P): New.
+
 2022-10-20  Thomas Schwinge  <thomas@codesourcery.com>
 
 	* configure.ac (AC_CONFIG_MACRO_DIRS): Instantiate.
@@ -3236,9 +3271,9 @@ Mon Dec 17 17:02:12 2001  Nicola Pero  <nicola@brainstorm.co.uk>
 
 2001-11-07  Aldy Hernandez  <aldyh@redhat.com>
 
-	 * objc/objc-api.h (_C_VECTOR): New.
+	* objc/objc-api.h (_C_VECTOR): New.
 
-	 * encoding.c (VECTOR_TYPE): New.
+	* encoding.c (VECTOR_TYPE): New.
 
 Mon Oct 29 21:29:21 2001  Nicola Pero  <n.pero@mi.flashnet.it>
 
@@ -3624,7 +3659,7 @@ Mon Sep 21 23:27:10 1998  Ovidiu Predescu <ovidiu@slip.net>
 
 	* New directory.  Moved files from ../gcc/objc.
 
-Copyright (C) 1998-2022 Free Software Foundation, Inc.
+Copyright (C) 1998-2024 Free Software Foundation, Inc.
 
 Copying and distribution of this file, with or without modification,
 are permitted in any medium without royalty provided the copyright

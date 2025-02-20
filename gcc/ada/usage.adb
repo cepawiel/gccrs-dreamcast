@@ -6,7 +6,7 @@
 --                                                                          --
 --                                B o d y                                   --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -198,6 +198,11 @@ begin
 
    Write_Switch_Char ("eG");
    Write_Line ("Generate preprocessed source");
+
+   --  Line for -gnateH switch
+
+   Write_Switch_Char ("eH");
+   Write_Line ("Set reverse Bit_Order threshold to 64");
 
    --  Line for -gnatei switch
 
@@ -567,6 +572,10 @@ begin
                                                   "record types");
    Write_Line ("        .Q*  turn off warnings for questionable layout of " &
                                                   "record types");
+   Write_Line ("        _q   turn on warnings for ignored " &
+                                                  "equality operators");
+   Write_Line ("        _Q*  turn off warnings for ignored " &
+                                                  "equality operators");
    Write_Line ("        r+   turn on warnings for redundant construct");
    Write_Line ("        R*   turn off warnings for redundant construct");
    Write_Line ("        .r+  turn on warnings for object renaming function");
@@ -576,6 +585,10 @@ begin
    Write_Line ("        s    suppress all info/warnings");
    Write_Line ("        .s   turn on warnings for overridden size clause");
    Write_Line ("        .S*  turn off warnings for overridden size clause");
+   Write_Line ("        _s+  turn on warnings for ineffective predicate " &
+                                                  "tests");
+   Write_Line ("        _S*  turn off warnings for ineffective predicate " &
+                                                   "tests");
    Write_Line ("        t    turn on warnings for tracking deleted code");
    Write_Line ("        T*   turn off warnings for tracking deleted code");
    Write_Line ("        .t*+ turn on warnings for suspicious contract");
@@ -651,6 +664,7 @@ begin
    Write_Line ("        c    check comment format (two spaces)");
    Write_Line ("        C    check comment format (one space)");
    Write_Line ("        d    check no DOS line terminators");
+   Write_Line ("        D    check declared identifiers in mixed case");
    Write_Line ("        e    check end/exit labels present");
    Write_Line ("        f    check no form feeds/vertical tabs in source");
    Write_Line ("        g    check standard GNAT style rules, same as ydISux");
@@ -674,6 +688,8 @@ begin
    Write_Line ("        u    check no unnecessary blank lines");
    Write_Line ("        x    check extra parentheses around conditionals");
    Write_Line ("        y    turn on default style checks");
+   Write_Line ("        z    check parentheses not required by operator " &
+               "precedence rules");
    Write_Line ("        -    subtract (turn off) subsequent checks");
    Write_Line ("        +    add (turn on) subsequent checks");
 

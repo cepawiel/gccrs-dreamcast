@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -179,7 +179,6 @@ package Rtsfind is
 
       CUDA_Driver_Types,
       CUDA_Internal,
-      CUDA_Runtime_Api,
       CUDA_Vector_Types,
 
       --  Interfaces
@@ -605,10 +604,13 @@ package Rtsfind is
 
      RE_Root_Buffer_Type,                -- Ada.Strings.Text_Buffers
      RE_Put_UTF_8,                       -- Ada.Strings.Text_Buffers
+     RE_Set_Trim_Leading_Spaces,         -- Ada.Strings.Text_Buffers
      RE_Wide_Wide_Put,                   -- Ada.Strings.Text_Buffers
 
      RE_Buffer_Type,                     -- Ada.Strings.Text_Buffers.Unbounded
      RE_Get,                             -- Ada.Strings.Text_Buffers.Unbounded
+     RE_Wide_Get,                        -- Ada.Strings.Text_Buffers.Unbounded
+     RE_Wide_Wide_Get,                   -- Ada.Strings.Text_Buffers.Unbounded
 
      RE_Wait_For_Release,                -- Ada.Synchronous_Barriers
 
@@ -916,7 +918,6 @@ package Rtsfind is
      RE_Attr_Long_Long_Float,            -- System.Fat_LLF
 
      RE_Add_Offset_To_Address,           -- System.Finalization_Masters
-     RE_Attach,                          -- System.Finalization_Masters
      RE_Base_Pool,                       -- System.Finalization_Masters
      RE_Finalization_Master,             -- System.Finalization_Masters
      RE_Finalization_Master_Ptr,         -- System.Finalization_Masters
@@ -2241,10 +2242,13 @@ package Rtsfind is
 
      RE_Root_Buffer_Type                 => Ada_Strings_Text_Buffers,
      RE_Put_UTF_8                        => Ada_Strings_Text_Buffers,
+     RE_Set_Trim_Leading_Spaces          => Ada_Strings_Text_Buffers,
      RE_Wide_Wide_Put                    => Ada_Strings_Text_Buffers,
 
      RE_Buffer_Type                      => Ada_Strings_Text_Buffers_Unbounded,
      RE_Get                              => Ada_Strings_Text_Buffers_Unbounded,
+     RE_Wide_Get                         => Ada_Strings_Text_Buffers_Unbounded,
+     RE_Wide_Wide_Get                    => Ada_Strings_Text_Buffers_Unbounded,
 
      RE_Wait_For_Release                 => Ada_Synchronous_Barriers,
 
@@ -2558,7 +2562,6 @@ package Rtsfind is
      RE_Attr_Long_Long_Float             => System_Fat_LLF,
 
      RE_Add_Offset_To_Address            => System_Finalization_Masters,
-     RE_Attach                           => System_Finalization_Masters,
      RE_Base_Pool                        => System_Finalization_Masters,
      RE_Finalization_Master              => System_Finalization_Masters,
      RE_Finalization_Master_Ptr          => System_Finalization_Masters,

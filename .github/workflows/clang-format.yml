@@ -7,6 +7,7 @@ on:
       - staging
   pull_request:
     branches: [ master ]
+  merge_group:
 
 jobs:
   clang-format:
@@ -14,12 +15,12 @@ jobs:
 
     steps:
     # If updating these steps, please also correspondingly update '../../CONTRIBUTING.md', "Running `clang-format` locally".
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Copy .clang-format file
       run: cp contrib/clang-format .clang-format
     - name: Check clang-format
-      uses: DoozyX/clang-format-lint-action@v0.11
+      uses: DoozyX/clang-format-lint-action@v0.18.2
       with:
-        source: 'gcc/rust/'
+        source: 'gcc/rust/ libgrust/'
         extensions: 'h,cc'
         clangFormatVersion: 10

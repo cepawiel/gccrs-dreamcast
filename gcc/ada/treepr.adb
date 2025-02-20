@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -187,7 +187,6 @@ package body Treepr is
    --  Called if the node being printed is an entity. Prints fields from the
    --  extension, using routines in Einfo to get the field names and flags.
 
-   procedure Print_Field (Val : Union_Id; Format : UI_Format := Auto);
    procedure Print_Field
      (Prefix : String;
       Field  : String;
@@ -269,8 +268,9 @@ package body Treepr is
    function Image (F : Node_Or_Entity_Field) return String is
    begin
       case F is
-         when F_Alloc_For_BIP_Return =>
-            return "Alloc_For_BIP_Return";
+         --  We special case the following; otherwise the compiler will use
+         --  the usual Mixed_Case convention.
+
          when F_Assignment_OK =>
             return "Assignment_OK";
          when F_Backwards_OK =>
@@ -328,8 +328,6 @@ package body Treepr is
             return "Has_RACW";
          when F_Ignore_SPARK_Mode_Pragmas =>
             return "Ignore_SPARK_Mode_Pragmas";
-         when F_Is_Constr_Subt_For_UN_Aliased =>
-            return "Is_Constr_Subt_For_UN_Aliased";
          when F_Is_CPP_Class =>
             return "Is_CPP_Class";
          when F_Is_CUDA_Kernel =>
@@ -724,51 +722,6 @@ package body Treepr is
 
    function Get_Mechanism_Type is new Get_32_Bit_Field
      (Mechanism_Type) with Inline, Unreferenced;
-
-   procedure Print_Field (Val : Union_Id; Format : UI_Format := Auto) is
-   begin
-      if Phase /= Printing then
-         return;
-      end if;
-
-      if Val in Node_Range then
-         Print_Node_Ref (Node_Id (Val));
-
-      elsif Val in List_Range then
-         Print_List_Ref (List_Id (Val));
-
-      elsif Val in Elist_Range then
-         Print_Elist_Ref (Elist_Id (Val));
-
-      elsif Val in Names_Range then
-         Print_Name (Name_Id (Val));
-         Write_Str (" (Name_Id=");
-         Write_Int (Int (Val));
-         Write_Char (')');
-
-      elsif Val in Strings_Range then
-         Write_String_Table_Entry (String_Id (Val));
-         Write_Str (" (String_Id=");
-         Write_Int (Int (Val));
-         Write_Char (')');
-
-      elsif Val in Uint_Range then
-         UI_Write (From_Union (Val), Format);
-         Write_Str (" (Uint = ");
-         Write_Int (Int (Val));
-         Write_Char (')');
-
-      elsif Val in Ureal_Range then
-         UR_Write (From_Union (Val));
-         Write_Str (" (Ureal = ");
-         Write_Int (Int (Val));
-         Write_Char (')');
-
-      else
-         Print_Str ("****** Incorrect value = ");
-         Print_Int (Int (Val));
-      end if;
-   end Print_Field;
 
    procedure Print_Field
      (Prefix : String;
@@ -1392,7 +1345,6 @@ package body Treepr is
             | F_Assignment_OK
             | F_Do_Range_Check
             | F_Has_Dynamic_Length_Check
-            | F_Has_Aspects
             | F_Is_Controlling_Actual
             | F_Is_Overloaded
             | F_Is_Static_Expression
@@ -1438,15 +1390,6 @@ package body Treepr is
             end loop;
          end loop;
       end;
-
-      --  Print aspects if present
-
-      if Has_Aspects (N) then
-         Print_Str (Prefix);
-         Print_Str ("Aspect_Specifications = ");
-         Print_Field (Union_Id (Aspect_Specifications (N)));
-         Print_Eol;
-      end if;
 
       --  Print entity information for entities
 

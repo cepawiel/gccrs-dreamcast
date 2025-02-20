@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2022, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2024, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -44,40 +44,6 @@ package Sem_Util is
    --  including the cases where there can't be any because e.g. the type is
    --  not tagged.
 
-   type Accessibility_Level_Kind is
-     (Dynamic_Level,
-      Object_Decl_Level,
-      Zero_On_Dynamic_Level);
-   --  Accessibility_Level_Kind is an enumerated type which captures the
-   --  different modes in which an accessibility level could be obtained for
-   --  a given expression.
-
-   --  When in the context of the function Accessibility_Level,
-   --  Accessibility_Level_Kind signals what type of accessibility level to
-   --  obtain. For example, when Level is Dynamic_Level, a defining identifier
-   --  associated with a SAOOAAT may be returned or an N_Integer_Literal node.
-   --  When the level is Object_Decl_Level, an N_Integer_Literal node is
-   --  returned containing the level of the declaration of the object if
-   --  relevant (be it a SAOOAAT or otherwise). Finally, Zero_On_Dynamic_Level
-   --  returns library level for all cases where the accessibility level is
-   --  dynamic (used to bypass static accessibility checks in dynamic cases).
-
-   function Accessibility_Level
-     (Expr              : Node_Id;
-      Level             : Accessibility_Level_Kind;
-      In_Return_Context : Boolean := False;
-      Allow_Alt_Model   : Boolean := True) return Node_Id;
-   --  Centralized accessibility level calculation routine for finding the
-   --  accessibility level of a given expression Expr.
-
-   --  In_Return_Context forces the Accessibility_Level calculations to be
-   --  carried out "as if" Expr existed in a return value. This is useful for
-   --  calculating the accessibility levels for discriminant associations
-   --  and return aggregates.
-
-   --  The Allow_Alt_Model parameter allows the alternative level calculation
-   --  under the restriction No_Dynamic_Accessibility_Checks to be performed.
-
    function Acquire_Warning_Match_String (Str_Lit : Node_Id) return String;
    --  Used by pragma Warnings (Off, string), and Warn_As_Error (string) to get
    --  the given string argument, adding leading and trailing asterisks if they
@@ -87,11 +53,6 @@ package Sem_Util is
    procedure Add_Access_Type_To_Process (E : Entity_Id; A : Entity_Id);
    --  Add A to the list of access types to process when expanding the
    --  freeze node of E.
-
-   procedure Add_Block_Identifier (N : Node_Id; Id : out Entity_Id);
-   --  Given a block statement N, generate an internal E_Block label and make
-   --  it the identifier of the block. Id denotes the generated entity. If the
-   --  block already has an identifier, Id returns the entity of its label.
 
    procedure Add_Global_Declaration (N : Node_Id);
    --  These procedures adds a declaration N at the library level, to be
@@ -321,14 +282,13 @@ package Sem_Util is
    --  subtype. Otherwise, simply return T.
 
    function Build_Default_Subtype_OK (T : Entity_Id) return Boolean;
-   --  When analyzing components or object declarations, it is possible, in
-   --  some cases, to build subtypes for discriminated types. This is
-   --  worthwhile to avoid the backend allocating the maximum possible size for
-   --  objects of the type.
+   --  When analyzing object declarations, it is possible, in some cases, to
+   --  build subtypes for discriminated types. This is worthwhile to avoid the
+   --  backend allocating the maximum possible size for objects of the type.
    --  In particular, when T is limited, the discriminants and therefore the
    --  size of an object of type T cannot change. Furthermore, if T is definite
-   --  with statically initialized defaulted discriminants, we are able and
-   --  want to build a constrained subtype of the right size.
+   --  with initialized defaulted discriminants, we are able and want to build
+   --  a constrained subtype of the right size.
 
    function Build_Discriminal_Subtype_Of_Component
      (T : Entity_Id) return Node_Id;
@@ -454,10 +414,6 @@ package Sem_Util is
    --  In the error case, error message is associate with Inheritor;
    --  Inheritor parameter is otherwise unused.
 
-   procedure Check_Nonvolatile_Function_Profile (Func_Id : Entity_Id);
-   --  Verify that the profile of nonvolatile function Func_Id does not contain
-   --  effectively volatile parameters or return type for reading.
-
    function Check_Parents (N : Node_Id; List : Elist_Id) return Boolean;
    --  Return True if all the occurrences of subtree N referencing entities in
    --  the given List have the right value in their Parent field.
@@ -505,19 +461,6 @@ package Sem_Util is
    --  Check whether the expression is a pointer to a protected component,
    --  and the context is external to the protected operation, to warn against
    --  a possible unlocked access to data.
-
-   procedure Check_Volatility_Compatibility
-     (Id1, Id2                     : Entity_Id;
-      Description_1, Description_2 : String;
-      Srcpos_Bearer                : Node_Id);
-   --  Id1 and Id2 should each be the entity of a state abstraction, a
-   --  variable, or a type (i.e., something suitable for passing to
-   --  Async_Readers_Enabled and similar functions).
-   --  Does nothing if SPARK_Mode /= On. Otherwise, flags a legality violation
-   --  if one or more of the four volatility-related aspects is False for Id1
-   --  and True for Id2. The two descriptions are included in the error message
-   --  text; the source position for the generated message is determined by
-   --  Srcpos_Bearer.
 
    function Choice_List (N : Node_Id) return List_Id;
    --  Utility to retrieve the choices of a Component_Association or the
@@ -657,9 +600,9 @@ package Sem_Util is
    --  Possible optimization???
 
    function Corresponding_Primitive_Op
-       (Ancestor_Op     : Entity_Id;
-        Descendant_Type : Entity_Id) return Entity_Id;
-   --  Given a primitive subprogram of a tagged type and a (distinct)
+     (Ancestor_Op     : Entity_Id;
+      Descendant_Type : Entity_Id) return Entity_Id;
+   --  Given a primitive subprogram of a first type and a (distinct)
    --  descendant type of that type, find the corresponding primitive
    --  subprogram of the descendant type.
 
@@ -681,6 +624,15 @@ package Sem_Util is
    function Current_Scope_No_Loops return Entity_Id;
    --  Return the current scope ignoring internally generated loops
 
+   procedure Add_Block_Identifier
+     (N     : Node_Id;
+      Id    : out Entity_Id;
+      Scope : Entity_Id := Current_Scope);
+   --  Given a block statement N, generate an internal E_Block label and make
+   --  it the identifier of the block. Scope denotes the scope in which the
+   --  generated entity Id is created and defaults to the current scope. If the
+   --  block already has an identifier, Id returns the entity of its label.
+
    function Current_Subprogram return Entity_Id;
    --  Returns current enclosing subprogram. If Current_Scope is a subprogram,
    --  then that is what is returned, otherwise the Enclosing_Subprogram of the
@@ -691,22 +643,6 @@ package Sem_Util is
    --  True if Typ is a class-wide type or requires finalization actions. Same
    --  as Needs_Finalization except with pragma Restrictions (No_Finalization),
    --  in which case we know that class-wide objects do not need finalization.
-
-   function Deepest_Type_Access_Level
-     (Typ             : Entity_Id;
-      Allow_Alt_Model : Boolean := True) return Uint;
-
-   --  Same as Type_Access_Level, except that if the type is the type of an Ada
-   --  2012 stand-alone object of an anonymous access type, then return the
-   --  static accessibility level of the object. In that case, the dynamic
-   --  accessibility level of the object may take on values in a range. The low
-   --  bound of that range is returned by Type_Access_Level; this function
-   --  yields the high bound of that range. Also differs from Type_Access_Level
-   --  in the case of a descendant of a generic formal type (returns Int'Last
-   --  instead of 0).
-
-   --  The Allow_Alt_Model parameter allows the alternative level calculation
-   --  under the restriction No_Dynamic_Accessibility_Checks to be performed.
 
    function Defining_Entity (N : Node_Id) return Entity_Id;
    --  Given a declaration N, returns the associated defining entity. If the
@@ -782,10 +718,6 @@ package Sem_Util is
    --  private components of protected objects, but is generally useful when
    --  restriction No_Implicit_Heap_Allocation is active.
 
-   function Effective_Extra_Accessibility (Id : Entity_Id) return Entity_Id;
-   --  Same as Einfo.Extra_Accessibility except thtat object renames
-   --  are looked through.
-
    function Effective_Reads_Enabled (Id : Entity_Id) return Boolean;
    --  Id should be the entity of a state abstraction, an object, or a type.
    --  Returns True iff Id is subject to external property Effective_Reads.
@@ -804,6 +736,10 @@ package Sem_Util is
    function Enclosing_Declaration (N : Node_Id) return Node_Id;
    --  Returns the declaration node enclosing N (including possibly N itself),
    --  if any, or Empty otherwise.
+
+   function Enclosing_Declaration_Or_Statement (N : Node_Id) return Node_Id;
+   --  Return the nearest enclosing declaration or statement that houses
+   --  arbitrary node N.
 
    function Enclosing_Generic_Body (N : Node_Id) return Node_Id;
    --  Returns the Node_Id associated with the innermost enclosing generic
@@ -855,8 +791,10 @@ package Sem_Util is
    procedure Enter_Name (Def_Id : Entity_Id);
    --  Insert new name in symbol table of current scope with check for
    --  duplications (error message is issued if a conflict is found).
-   --  Note: Enter_Name is not used for overloadable entities, instead these
-   --  are entered using Sem_Ch6.Enter_Overloaded_Entity.
+   --  Note: Enter_Name is not used for most overloadable entities, instead
+   --  they are entered using Sem_Ch6.Enter_Overloaded_Entity. However,
+   --  this is used for SOME overloadable entities, such as enumeration
+   --  literals and certain operator symbols.
 
    function Entity_Of (N : Node_Id) return Entity_Id;
    --  Obtain the entity of arbitrary node N. If N is a renaming, return the
@@ -933,7 +871,8 @@ package Sem_Util is
    --  such a loop exists, return the entity of its identifier (E_Loop scope),
    --  otherwise return Empty.
 
-   function Find_Enclosing_Scope (N : Node_Id) return Entity_Id;
+   function Find_Enclosing_Scope (N : Node_Id) return Scope_Kind_Id with
+     Post => Find_Enclosing_Scope'Result /= N;
    --  Find the nearest scope which encloses arbitrary node N
 
    function Find_Loop_In_Conditional_Block (N : Node_Id) return Node_Id;
@@ -1124,7 +1063,6 @@ package Sem_Util is
    --
    --    Report_Errors is set to True if the values of the discriminants are
    --     insufficiently static (see body for details of what that means).
-
    --
    --    Allow_Compile_Time if set to True, allows compile time known values in
    --     Governed_By expressions in addition to static expressions.
@@ -1137,10 +1075,6 @@ package Sem_Util is
    --  subtype are only those of the variants selected by the values of the
    --  discriminants. Otherwise all components of the parent must be included
    --  in the subtype for semantic analysis.
-
-   function Get_Dynamic_Accessibility (E : Entity_Id) return Entity_Id;
-   --  Obtain the accessibility level for a given entity formal taking into
-   --  account both extra and minimum accessibility.
 
    function Get_Actual_Subtype (N : Node_Id) return Entity_Id;
    --  Given a node for an expression, obtain the actual subtype of the
@@ -1385,18 +1319,6 @@ package Sem_Util is
    --  don't look inside packed array types. If Recurse is False, just
    --  go down one level (so it's no longer the "fullest" view).
 
-   function Has_Access_Values (T : Entity_Id) return Boolean;
-   --  Returns true if the underlying type of T is an access type, or has a
-   --  component (at any recursive level) that is an access type. This is a
-   --  conservative predicate, if it is not known whether or not T contains
-   --  access values (happens for generic formals in some cases), then False is
-   --  returned.  Note that tagged types return False. Even though the tag is
-   --  implemented as an access type internally, this function tests only for
-   --  access types known to the programmer. See also Has_Tagged_Component.
-
-   function Has_Anonymous_Access_Discriminant (Typ : Entity_Id) return Boolean;
-   --  Returns True if Typ has one or more anonymous access discriminants
-
    type Alignment_Result is (Known_Compatible, Unknown, Known_Incompatible);
    --  Result of Has_Compatible_Alignment test, description found below. Note
    --  that the values are arranged in increasing order of problematicness.
@@ -1536,19 +1458,12 @@ package Sem_Util is
    --  Return True if the loop has no side effect and can therefore be
    --  marked for removal. Return False if N is not a N_Loop_Statement.
 
-   subtype Static_Accessibility_Level_Kind
-     is Accessibility_Level_Kind range Object_Decl_Level
-                                         .. Zero_On_Dynamic_Level;
-   --  Restrict the reange of Accessibility_Level_Kind to be non-dynamic for
-   --  use in the static version of Accessibility_Level below.
+   function Is_Container_Aggregate (Exp : Node_Id) return Boolean;
+   --  Is the given expression a container aggregate?
 
-   function Static_Accessibility_Level
-     (Expr              : Node_Id;
-      Level             : Static_Accessibility_Level_Kind;
-      In_Return_Context : Boolean := False) return Uint;
-   --  Overloaded version of Accessibility_Level which returns a universal
-   --  integer for use in compile-time checking. Note: Level is restricted to
-   --  be non-dynamic.
+   function Is_Function_With_Side_Effects (Subp : Entity_Id) return Boolean;
+   --  Return True if Subp is a function with side effects, ie. it has a
+   --  (direct or inherited) pragma Side_Effects with static value True.
 
    function Is_Newly_Constructed
      (Exp : Node_Id; Context_Requires_NC : Boolean) return Boolean;
@@ -1636,14 +1551,14 @@ package Sem_Util is
    --  a tagged type or has a subcomponent that is tagged. Returns False for a
    --  noncomposite type, or if no tagged subcomponents are present.
 
-   function Has_Unconstrained_Access_Discriminants
-     (Subtyp : Entity_Id) return Boolean;
-   --  Returns True if the given subtype is unconstrained and has one or more
-   --  access discriminants.
-
    function Has_Undefined_Reference (Expr : Node_Id) return Boolean;
    --  Given arbitrary expression Expr, determine whether it contains at
    --  least one name whose entity is Any_Id.
+
+   function Has_Effectively_Volatile_Component
+     (Typ : Entity_Id) return Boolean;
+   --  Given arbitrary type Typ, determine whether it contains at least one
+   --  effectively volatile component.
 
    function Has_Volatile_Component (Typ : Entity_Id) return Boolean;
    --  Given arbitrary type Typ, determine whether it contains at least one
@@ -1771,9 +1686,14 @@ package Sem_Util is
    --  either the value is not yet known before back-end processing or it is
    --  not known at compile time after back-end processing.
 
-   procedure Inherit_Predicate_Flags (Subt, Par : Entity_Id);
+   procedure Inherit_Predicate_Flags
+     (Subt, Par  : Entity_Id;
+      Only_Flags : Boolean := False);
    --  Propagate static and dynamic predicate flags from a parent to the
-   --  subtype in a subtype declaration with and without constraints.
+   --  subtype in a subtype declaration with and without constraints, or from
+   --  a parent to the derived type in a derived type declaration. Only_Flags
+   --  is True in the case of a derived type declaration to inherit only the
+   --  flags, not the predicate functions.
 
    procedure Inherit_Rep_Item_Chain (Typ : Entity_Id; From_Typ : Entity_Id);
    --  Inherit the rep item chain of type From_Typ without clobbering any
@@ -1814,10 +1734,6 @@ package Sem_Util is
    --  pragma Initialize_Scalars or by the binder. Return an expression created
    --  at source location Loc, which denotes the invalid value.
 
-   function Is_Anonymous_Access_Actual (N : Node_Id) return Boolean;
-   --  Determine if N is used as an actual for a call whose corresponding
-   --  formal is of an anonymous access type.
-
    function Is_Access_Subprogram_Wrapper (E : Entity_Id) return Boolean;
    --  True if E is the constructed wrapper for an access_to_subprogram
    --  type with Pre/Postconditions.
@@ -1838,10 +1754,6 @@ package Sem_Util is
 
    function Is_Actual_Parameter (N : Node_Id) return Boolean;
    --  Determines if N is an actual parameter in a subprogram or entry call
-
-   function Is_Actual_Tagged_Parameter (N : Node_Id) return Boolean;
-   --  Determines if N is an actual parameter of a formal of tagged type in a
-   --  subprogram call.
 
    function Is_Aliased_View (Obj : Node_Id) return Boolean;
    --  Determine if Obj is an aliased view, i.e. the name of an object to which
@@ -1873,12 +1785,13 @@ package Sem_Util is
    function Is_Attribute_Update (N : Node_Id) return Boolean;
    --  Determine whether node N denotes attribute 'Update
 
-   function Is_Body_Or_Package_Declaration (N : Node_Id) return Boolean;
+   function Is_Body_Or_Package_Declaration (N : Node_Id) return Boolean
+     with Inline;
    --  Determine whether node N denotes a body or a package declaration
 
    function Is_Bounded_String (T : Entity_Id) return Boolean;
    --  True if T is a bounded string type. Used to make sure "=" composes
-   --  properly for bounded string types.
+   --  properly for bounded string types (see 4.5.2(32.1/1)).
 
    function Is_By_Protected_Procedure (Id : Entity_Id) return Boolean;
    --  Determine whether entity Id denotes a procedure with synchronization
@@ -2162,12 +2075,6 @@ package Sem_Util is
    --  E is a subprogram. Return True is E is an implicit operation inherited
    --  by a derived type declaration.
 
-   function Is_Inherited_Operation_For_Type
-     (E   : Entity_Id;
-      Typ : Entity_Id) return Boolean;
-   --  E is a subprogram. Return True is E is an implicit operation inherited
-   --  by the derived type declaration for type Typ.
-
    function Is_Inlinable_Expression_Function (Subp : Entity_Id) return Boolean;
    --  Return True if Subp is an expression function that fulfills all the
    --  following requirements for inlining:
@@ -2181,6 +2088,11 @@ package Sem_Util is
    --     8. Return expression naming an object global to the function
    --     9. Nominal subtype of the returned object statically compatible
    --        with the result subtype of the expression function.
+
+   function Is_Internal_Block (N : Node_Id) return Boolean;
+   pragma Inline (Is_Internal_Block);
+   --  Determine if N is an N_Block_Statement with an internal label. See
+   --  Add_Block_Identifier.
 
    function Is_Iterator (Typ : Entity_Id) return Boolean;
    --  AI05-0139-2: Check whether Typ is one of the predefined interfaces in
@@ -2269,7 +2181,7 @@ package Sem_Util is
       Obj_Ref       : Node_Id;
       Check_Actuals : Boolean) return Boolean;
    --  Determine whether node Context denotes a "non-interfering context" (as
-   --  defined in SPARK RM 7.1.3(10)) where volatile reference Obj_Ref can
+   --  defined in SPARK RM 7.1.3(9)) where volatile reference Obj_Ref can
    --  safely reside. When examining references that might be located within
    --  actual parameters of a subprogram call that has not been resolved yet,
    --  Check_Actuals should be False; such references will be assumed to be
@@ -2391,21 +2303,6 @@ package Sem_Util is
    --  Determine whether arbitrary entity Id denotes the anonymous object
    --  created for a single task type.
 
-   function Is_Special_Aliased_Formal_Access
-     (Exp               : Node_Id;
-      In_Return_Context : Boolean := False) return Boolean;
-   --  Determines whether a dynamic check must be generated for explicitly
-   --  aliased formals within a function Scop for the expression Exp.
-
-   --  In_Return_Context forces Is_Special_Aliased_Formal_Access to assume
-   --  that Exp is within a return value which is useful for checking
-   --  expressions within discriminant associations of return objects.
-
-   --  More specially, Is_Special_Aliased_Formal_Access checks that Exp is a
-   --  'Access attribute reference within a return statement where the ultimate
-   --  prefix is an aliased formal of Scop and that Scop returns an anonymous
-   --  access type. See RM 3.10.2 for more details.
-
    function Is_Specific_Tagged_Type (Typ : Entity_Id) return Boolean;
    --  Determine whether an arbitrary [private] type is specifically tagged
 
@@ -2439,8 +2336,10 @@ package Sem_Util is
    function Is_Subprogram_Contract_Annotation (Item : Node_Id) return Boolean;
    --  Determine whether aspect specification or pragma Item is one of the
    --  following subprogram contract annotations:
+   --    Always_Terminates
    --    Contract_Cases
    --    Depends
+   --    Exceptional_Cases
    --    Extensions_Visible
    --    Global
    --    Post
@@ -2563,6 +2462,13 @@ package Sem_Util is
    --  Calls Handle_Parameter for each pair of formal and actual parameters of
    --  a function, procedure, or entry call.
 
+   function Iterator_Interface_Ancestor (Typ : Entity_Id) return Entity_Id;
+   --  If Typ has an ancestor that is an iterator interface type declared in
+   --  an instance of Ada.Iterator_Interfaces, then returns that interface
+   --  type. Otherwise returns Empty. (It's not clear what it means if there
+   --  is more than one such ancestor, perhaps coming from multiple instances,
+   --  but this function returns the first such ancestor it finds. ???)
+
    procedure Kill_Current_Values (Last_Assignment_Only : Boolean := False);
    --  This procedure is called to clear all constant indications from all
    --  entities in the current scope and in any parent scopes if the current
@@ -2683,12 +2589,6 @@ package Sem_Util is
    --  syntactic ambiguity that results from an indexing of a function call
    --  that returns an array, so that Obj.F (X, Y) may mean F (Ob) (X, Y).
 
-   function Needs_Result_Accessibility_Level
-     (Func_Id : Entity_Id) return Boolean;
-   --  Ada 2012 (AI05-0234): Return True if the function needs an implicit
-   --  parameter to identify the accessibility level of the function result
-   --  "determined by the point of call".
-
    function Needs_Secondary_Stack (Id : Entity_Id) return Boolean;
    --  Return true if functions whose result type is Id must return on the
    --  secondary stack, i.e. allocate the return object on this stack.
@@ -2720,22 +2620,11 @@ package Sem_Util is
    --  below. As for New_Copy_Tree, it is illegal to attempt to copy extended
    --  nodes (entities) either directly or indirectly using this function.
 
-   function New_Copy_Separate_List (List : List_Id) return List_Id;
-   --  Copy recursively a list of nodes using New_Copy_Separate_Tree
-
-   function New_Copy_Separate_Tree (Source : Node_Id) return Node_Id;
-   --  Perform a deep copy of the subtree rooted at Source using New_Copy_Tree
-   --  replacing entities of local declarations by new entities. This behavior
-   --  is required by the backend to ensure entities uniqueness when a copy of
-   --  a subtree is attached to the tree. The new entities keep their original
-   --  names to facilitate debugging the tree copy.
-
    function New_Copy_Tree
-     (Source           : Node_Id;
-      Map              : Elist_Id   := No_Elist;
-      New_Sloc         : Source_Ptr := No_Location;
-      New_Scope        : Entity_Id  := Empty;
-      Scopes_In_EWA_OK : Boolean    := False) return Node_Id;
+     (Source    : Node_Id;
+      Map       : Elist_Id   := No_Elist;
+      New_Sloc  : Source_Ptr := No_Location;
+      New_Scope : Entity_Id  := Empty) return Node_Id;
    --  Perform a deep copy of the subtree rooted at Source. Entities, itypes,
    --  and nodes are handled separately as follows:
    --
@@ -2746,6 +2635,7 @@ package Sem_Util is
    --
    --        First_Named_Actual
    --        Next_Named_Actual
+   --        Controlling_Argument
    --
    --      If applicable, the Etype field (if any) is updated to refer to a
    --      local itype or type (see below).
@@ -2804,10 +2694,6 @@ package Sem_Util is
    --
    --  Parameter New_Scope may be used to specify a new scope for all copied
    --  entities and itypes.
-   --
-   --  Parameter Scopes_In_EWA_OK may be used to force the replication of both
-   --  scoping entities and non-scoping entities found within expression with
-   --  actions nodes.
 
    function New_External_Entity
      (Kind         : Entity_Kind;
@@ -2863,9 +2749,9 @@ package Sem_Util is
    --  inline this procedural form, but not the functional form above.
 
    function No_Caching_Enabled (Id : Entity_Id) return Boolean;
-   --  Given the entity of a variable, determine whether Id is subject to
-   --  volatility property No_Caching and if it is, the related expression
-   --  evaluates to True.
+   --  Given any entity Id, determine whether Id is subject to volatility
+   --  property No_Caching and if it is, the related expression evaluates
+   --  to True.
 
    function No_Heap_Finalization (Typ : Entity_Id) return Boolean;
    --  Determine whether type Typ is subject to pragma No_Heap_Finalization
@@ -3076,16 +2962,16 @@ package Sem_Util is
 
    function Rep_To_Pos_Flag (E : Entity_Id; Loc : Source_Ptr) return Node_Id;
    --  This is used to construct the second argument in a call to Rep_To_Pos
-   --  which is Standard_True if range checks are enabled (E is an entity to
-   --  which the Range_Checks_Suppressed test is applied), and Standard_False
-   --  if range checks are suppressed. Loc is the location for the node that
-   --  is returned (which is a New_Occurrence of the appropriate entity).
+   --  which is True if range checks are enabled (E is an entity to which the
+   --  Range_Checks_Suppressed test is applied), and False if range checks are
+   --  suppressed. Loc is the location for the node that is returned (which is
+   --  a New_Occurrence of the appropriate entity).
    --
-   --  Note: one might think that it would be fine to always use True and
-   --  to ignore the suppress in this case, but it is generally better to
-   --  believe a request to suppress exceptions if possible, and further
-   --  more there is at least one case in the generated code (the code for
-   --  array assignment in a loop) that depends on this suppression.
+   --  Note: one might think that it would be fine to always use True and to
+   --  ignore the suppress in this case, but there is at least one case in the
+   --  generated code (the code for array assignment in a loop) that depends on
+   --  this suppression. Anyway, it is generally better to believe a request to
+   --  suppress exceptions if possible.
 
    procedure Require_Entity (N : Node_Id);
    --  N is a node which should have an entity value if it is an entity name.
@@ -3196,8 +3082,8 @@ package Sem_Util is
    --  associated name (i.e. the Node_Id associated with its name).
 
    procedure Set_Debug_Info_Defining_Id (N : Node_Id);
-   --  Call Set_Debug_Info_Needed on Defining_Identifier (N) if it comes
-   --  from source.
+   --  Call Set_Debug_Info_Needed on Defining_Identifier (N) if it comes from
+   --  source or we are in -gnatD mode, where we are debugging generated code.
 
    procedure Set_Debug_Info_Needed (T : Entity_Id);
    --  Sets the Debug_Info_Needed flag on entity T , and also on any entities
@@ -3272,9 +3158,6 @@ package Sem_Util is
    --  from sub(type) entity T2 to (sub)type entity T1, as well as Is_Volatile
    --  if T1 is a base type.
 
-   procedure Set_Scope_Is_Transient (V : Boolean := True);
-   --  Set the flag Is_Transient of the current scope
-
    procedure Set_Size_Info (T1, T2 : Entity_Id);
    pragma Inline (Set_Size_Info);
    --  Copies the Esize field and Has_Biased_Representation flag from sub(type)
@@ -3331,9 +3214,6 @@ package Sem_Util is
    --  Determine whether node N is a loop statement subject to at least one
    --  'Loop_Entry attribute.
 
-   function Subprogram_Access_Level (Subp : Entity_Id) return Uint;
-   --  Return the accessibility level of the view denoted by Subp
-
    function Support_Atomic_Primitives (Typ : Entity_Id) return Boolean;
    --  Return True if Typ supports the GCC built-in atomic operations (i.e. if
    --  Typ is properly sized and aligned).
@@ -3363,19 +3243,6 @@ package Sem_Util is
    --  This is the same as Traverse_More_Func except that no result is
    --  returned, i.e. Traverse_More_Func is called and the result is simply
    --  discarded.
-
-   function Type_Access_Level
-     (Typ             : Entity_Id;
-      Allow_Alt_Model : Boolean   := True;
-      Assoc_Ent       : Entity_Id := Empty) return Uint;
-   --  Return the accessibility level of Typ
-
-   --  The Allow_Alt_Model parameter allows the alternative level calculation
-   --  under the restriction No_Dynamic_Accessibility_Checks to be performed.
-
-   --  Assoc_Ent allows for the optional specification of the entity associated
-   --  with Typ. This gets utilized mostly for anonymous access type
-   --  processing, where context matters in interpreting Typ's level.
 
    function Type_Without_Stream_Operation
      (T  : Entity_Id;
@@ -3455,8 +3322,8 @@ package Sem_Util is
    function Validated_View (Typ : Entity_Id) return Entity_Id;
    --  Obtain the "validated view" of arbitrary type Typ which is suitable for
    --  verification by attribute 'Valid_Scalars. This view is the type itself
-   --  or its full view while stripping away concurrency, derivations, and
-   --  privacy.
+   --  or its full view or nonlimited view, while stripping away concurrency,
+   --  derivations, and privacy.
 
    function Visible_Ancestors (Typ : Entity_Id) return Elist_Id;
    --  [Ada 2012:AI-0125-1]: Collect all the visible parents and progenitors
@@ -3486,12 +3353,16 @@ package Sem_Util is
    --  is potentially issued: it is the visible entity in the former case, and
    --  the use_clause in the latter case.
 
-   procedure Wrong_Type (Expr : Node_Id; Expected_Type : Entity_Id);
+   procedure Wrong_Type
+     (Expr          : Node_Id;
+      Expected_Type : Entity_Id;
+      Multiple      : Boolean := False);
    --  Output error message for incorrectly typed expression. Expr is the node
    --  for the incorrectly typed construct (Etype (Expr) is the type found),
    --  and Expected_Type is the entity for the expected type. Note that Expr
    --  does not have to be a subexpression, anything with an Etype field may
-   --  be used.
+   --  be used. If Multiple is False, do not output the message if an error
+   --  has already been posted for Expr.
 
    function Yields_Synchronized_Object (Typ : Entity_Id) return Boolean;
    --  Determine whether type Typ "yields synchronized object" as specified by

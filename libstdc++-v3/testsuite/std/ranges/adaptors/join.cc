@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -15,8 +15,7 @@
 // with this library; see the file COPYING3.  If not see
 // <http://www.gnu.org/licenses/>.
 
-// { dg-options "-std=gnu++2a" }
-// { dg-do run { target c++2a } }
+// { dg-do run { target c++20 } }
 
 #include <algorithm>
 #include <array>
@@ -24,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <testsuite_hooks.h>
 #include <testsuite_iterators.h>
@@ -113,15 +113,15 @@ test06()
 
   // Verify that _Iterator<false> is implicitly convertible to _Iterator<true>.
   static_assert(!std::same_as<decltype(ranges::begin(v)),
-			      decltype(ranges::cbegin(v))>);
-  auto a = ranges::cbegin(v);
+			      decltype(std::as_const(v).begin())>);
+  auto a = std::as_const(v).begin();
   a = ranges::begin(v);
 
   // Verify that _Sentinel<false> is implicitly convertible to _Sentinel<true>.
   static_assert(!ranges::common_range<decltype(v)>);
   static_assert(!std::same_as<decltype(ranges::end(v)),
-			      decltype(ranges::cend(v))>);
-  auto b = ranges::cend(v);
+			      decltype(std::as_const(v).end())>);
+  auto b = std::as_const(v).end();
   b = ranges::end(v);
 }
 

@@ -1,5 +1,5 @@
 /* Wrapper to call lto.  Used by collect2 and the linker plugin.
-   Copyright (C) 2009-2022 Free Software Foundation, Inc.
+   Copyright (C) 2009-2024 Free Software Foundation, Inc.
 
    Factored out of collect2 by Rafael Espindola <espindola@google.com>
 
@@ -335,6 +335,8 @@ merge_and_complain (vec<cl_decoded_option> &decoded_options,
 
 	case OPT_fopenmp:
 	case OPT_fopenacc:
+	case OPT_fasynchronous_unwind_tables:
+	case OPT_funwind_tables:
 	  /* For selected options we can merge conservatively.  */
 	  if (existing_opt == -1)
 	    decoded_options.safe_push (*foption);
@@ -737,6 +739,8 @@ append_compiler_options (obstack *argv_obstack, vec<cl_decoded_option> opts)
 	case OPT_fopenacc_dim_:
 	case OPT_foffload_abi_:
 	case OPT_fcf_protection_:
+	case OPT_fasynchronous_unwind_tables:
+	case OPT_funwind_tables:
 	case OPT_g:
 	case OPT_O:
 	case OPT_Ofast:
@@ -1351,7 +1355,7 @@ void
 print_lto_docs_link ()
 {
   bool print_url = global_dc->printer->url_format != URL_FORMAT_NONE;
-  const char *url = global_dc->get_option_url (global_dc, OPT_flto);
+  const char *url = global_dc->make_option_url (OPT_flto);
 
   pretty_printer pp;
   pp.url_format = URL_FORMAT_DEFAULT;
@@ -1558,6 +1562,16 @@ run_gcc (unsigned argc, char *argv[])
 	case OPT_g:
 	  /* Recognize -g0.  */
 	  skip_debug = option->arg && !strcmp (option->arg, "0");
+	  break;
+
+	case OPT_gbtf:
+	case OPT_gctf:
+	case OPT_gdwarf:
+	case OPT_gdwarf_:
+	case OPT_ggdb:
+	case OPT_gvms:
+	  /* Negative forms, if allowed, enable debug info as well.  */
+	  skip_debug = false;
 	  break;
 
 	case OPT_dumpdir:
@@ -2132,7 +2146,11 @@ main (int argc, char *argv[])
   diagnostic_initialize (global_dc, 0);
   diagnostic_color_init (global_dc);
   diagnostic_urls_init (global_dc);
-  global_dc->get_option_url = get_option_url;
+  global_dc->set_option_hooks (nullptr,
+			       nullptr,
+			       nullptr,
+			       get_option_url,
+			       0);
 
   if (atexit (lto_wrapper_cleanup) != 0)
     fatal_error (input_location, "%<atexit%> failed");

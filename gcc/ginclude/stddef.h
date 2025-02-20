@@ -1,4 +1,4 @@
-/* Copyright (C) 1989-2022 Free Software Foundation, Inc.
+/* Copyright (C) 1989-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -454,6 +454,7 @@ typedef struct {
 
 #if defined __STDC_VERSION__ && __STDC_VERSION__ > 201710L
 #define unreachable() (__builtin_unreachable ())
+#define __STDC_VERSION_STDDEF_H__	202311L
 #endif
 
 #endif /* _STDDEF_H was defined this time */

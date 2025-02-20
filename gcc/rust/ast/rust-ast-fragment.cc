@@ -1,4 +1,4 @@
-// Copyright (C) 2020-2022 Free Software Foundation, Inc.
+// Copyright (C) 2020-2024 Free Software Foundation, Inc.
 
 // This file is part of GCC.
 
@@ -21,8 +21,9 @@
 namespace Rust {
 namespace AST {
 
-Fragment::Fragment (FragmentKind kind, std::vector<SingleASTNode> nodes)
-  : kind (kind), nodes (std::move (nodes))
+Fragment::Fragment (FragmentKind kind, std::vector<SingleASTNode> nodes,
+		    std::vector<std::unique_ptr<AST::Token>> tokens)
+  : kind (kind), nodes (std::move (nodes)), tokens (std::move (tokens))
 {}
 
 Fragment::Fragment (Fragment const &other) : kind (other.get_kind ())
@@ -33,13 +34,17 @@ Fragment::Fragment (Fragment const &other) : kind (other.get_kind ())
 Fragment &
 Fragment::operator= (Fragment const &other)
 {
+  kind = other.get_kind ();
+
   nodes.clear ();
   nodes.reserve (other.nodes.size ());
-  kind = other.get_kind ();
   for (auto &n : other.nodes)
-    {
-      nodes.push_back (n);
-    }
+    nodes.push_back (n);
+
+  tokens.clear ();
+  tokens.reserve (other.tokens.size ());
+  for (auto &t : other.tokens)
+    tokens.emplace_back (t->clone_token ());
 
   return *this;
 }
@@ -47,25 +52,38 @@ Fragment::operator= (Fragment const &other)
 Fragment
 Fragment::create_error ()
 {
-  return Fragment (FragmentKind::Error, {});
+  return Fragment (FragmentKind::Error, {}, {});
 }
 
 Fragment
-Fragment::complete (std::vector<AST::SingleASTNode> nodes)
+Fragment::create_empty ()
 {
-  return Fragment (FragmentKind::Complete, std::move (nodes));
+  return Fragment (FragmentKind::Complete, {}, {});
 }
 
-Fragment
-Fragment::unexpanded ()
+Fragment::Fragment (std::vector<AST::SingleASTNode> nodes,
+		    std::vector<std::unique_ptr<AST::Token>> tokens)
+  : kind (FragmentKind::Complete), nodes (std::move (nodes)),
+    tokens (std::move (tokens))
+{}
+
+Fragment::Fragment (std::vector<AST::SingleASTNode> nodes,
+		    std::unique_ptr<AST::Token> token)
+  : kind (FragmentKind::Complete), nodes (std::move (nodes))
 {
-  return Fragment (FragmentKind::Unexpanded, {});
+  tokens.emplace_back (std::move (token));
 }
 
 std::vector<SingleASTNode> &
 Fragment::get_nodes ()
 {
   return nodes;
+}
+
+std::vector<std::unique_ptr<AST::Token>> &
+Fragment::get_tokens ()
+{
+  return tokens;
 }
 
 FragmentKind
@@ -135,14 +153,12 @@ void
 Fragment::assert_single_fragment (SingleASTNode::NodeType expected) const
 {
   static const std::map<SingleASTNode::NodeType, const char *> str_map = {
-    {SingleASTNode::NodeType::IMPL, "impl"},
+    {SingleASTNode::NodeType::ASSOC_ITEM, "associated item"},
     {SingleASTNode::NodeType::ITEM, "item"},
     {SingleASTNode::NodeType::TYPE, "type"},
     {SingleASTNode::NodeType::EXPRESSION, "expr"},
     {SingleASTNode::NodeType::STMT, "stmt"},
     {SingleASTNode::NodeType::EXTERN, "extern"},
-    {SingleASTNode::NodeType::TRAIT, "trait"},
-    {SingleASTNode::NodeType::TRAIT_IMPL, "trait impl"},
   };
 
   auto actual = nodes[0].get_kind ();
@@ -150,14 +166,14 @@ Fragment::assert_single_fragment (SingleASTNode::NodeType expected) const
 
   if (!is_single_fragment ())
     {
-      rust_error_at (Location (), "fragment is not single");
+      rust_error_at (UNDEF_LOCATION, "fragment is not single");
       fail = true;
     }
 
   if (actual != expected)
     {
       rust_error_at (
-	Location (),
+	UNDEF_LOCATION,
 	"invalid fragment operation: expected %qs node, got %qs node",
 	str_map.find (expected)->second,
 	str_map.find (nodes[0].get_kind ())->second);

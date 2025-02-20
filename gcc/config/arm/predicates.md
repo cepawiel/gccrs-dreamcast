@@ -1,5 +1,5 @@
 ;; Predicate definitions for ARM and Thumb
-;; Copyright (C) 2004-2022 Free Software Foundation, Inc.
+;; Copyright (C) 2004-2024 Free Software Foundation, Inc.
 ;; Contributed by ARM Ltd.
 
 ;; This file is part of GCC.
@@ -73,13 +73,13 @@
 (define_predicate "mve_imm_selective_upto_8"
   (match_test "satisfies_constraint_Rg (op)"))
 
-;; True if the immediate is the range +/- 1016 and multiple of 8 for MVE.
-(define_constraint "Ri"
-  "@internal In Thumb-2 state a constant is multiple of 8 and in range
-   of -/+ 1016 for MVE"
-  (and (match_code "const_int")
-       (match_test "TARGET_HAVE_MVE && (-1016 <= ival) && (ival <= 1016)
-		    && ((ival % 8) == 0)")))
+;; True if the immediate is multiple of 8 and in range of -/+ 1016 for MVE.
+(define_predicate "mve_vldrd_immediate"
+  (match_test "satisfies_constraint_Ri (op)"))
+
+;; True if the immediate is multiple of 2 and in range of -/+ 252 for MVE.
+(define_predicate "mve_vstrw_immediate"
+  (match_test "satisfies_constraint_Rl (op)"))
 
 ; Predicate for stack protector guard's address in
 ; stack_protect_combined_set_insn and stack_protect_combined_test_insn patterns
@@ -876,6 +876,10 @@
   (and (match_code "mem")
        (match_test "TARGET_32BIT && neon_vector_mem_operand (op, 2, true)")))
 
+(define_predicate "mve_struct_operand"
+  (and (match_code "mem")
+       (match_test "TARGET_HAVE_MVE && mve_struct_mem_operand (op)")))
+
 (define_predicate "neon_permissive_struct_operand"
   (and (match_code "mem")
        (match_test "TARGET_32BIT && neon_vector_mem_operand (op, 2, false)")))
@@ -899,3 +903,7 @@
 (define_special_predicate "aligned_operand"
   (ior (not (match_code "mem"))
        (match_test "MEM_ALIGN (op) >= GET_MODE_ALIGNMENT (mode)")))
+
+;; A special predicate that doesn't match a particular mode.
+(define_special_predicate "arm_any_register_operand"
+  (match_code "reg"))
